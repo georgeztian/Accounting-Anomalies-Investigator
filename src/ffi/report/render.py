@@ -1,4 +1,4 @@
-"""Render the report model to HTML (self-contained), Markdown, JSON and optional PDF (BLUEPRINT §12.3)."""
+"""Render the report model to HTML (self-contained), Markdown, JSON and optional PDF."""
 
 from __future__ import annotations
 

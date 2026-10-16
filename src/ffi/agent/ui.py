@@ -1,4 +1,4 @@
-"""Terminal handling of human-in-the-loop interrupts (BLUEPRINT §13.4)."""
+"""Terminal handling of human-in-the-loop interrupts."""
 
 from __future__ import annotations
 
@@ -31,6 +31,27 @@ CHOICES = {
 }
 
 
+def stdin_interactive() -> bool:
+    """True only when a person can answer prompts on stdin.
+
+    On Windows `isatty()` is also True for the NUL device (what IDE agents and schedulers attach), so the
+    console handle is checked with GetConsoleMode, which fails for NUL, pipes and files.
+    """
+    try:
+        if sys.stdin is None or not sys.stdin.isatty():
+            return False
+        if os.name != "nt":
+            return True
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        mode = wintypes.DWORD()
+        return bool(ctypes.windll.kernel32.GetConsoleMode(msvcrt.get_osfhandle(sys.stdin.fileno()), ctypes.byref(mode)))
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 class PauseRun(Exception):
     """Raised to stop the process at a --pause-on interrupt; state is already checkpointed."""
 
@@ -46,17 +67,24 @@ class TerminalUI:
         kind = payload["interrupt"]
         if kind in self.pause_on:
             raise PauseRun(kind)
-        if self.mode != "interactive" or not sys.stdin.isatty():
-            d = dict(AUTO_POLICY[kind])
-            d["auto"] = True
-            return d
+        if self.mode != "interactive" or not stdin_interactive():
+            return self._auto(kind)
         if self.status:
             self.status.stop()
         try:
             return self._ask(kind, payload)
+        except EOFError:
+            # input closed mid-run: answer this and every later interrupt by policy instead of failing the case
+            self.mode = "auto"
+            self.console.print("[dim]Input closed: continuing with --mode auto.[/dim]")
+            return self._auto(kind)
         finally:
             if self.status:
                 self.status.start()
+
+    @staticmethod
+    def _auto(kind: str) -> dict[str, Any]:
+        return {**AUTO_POLICY[kind], "auto": True}
 
     def _ask(self, kind: str, payload: dict[str, Any]) -> dict[str, Any]:
         title = {"review_plan": "Review investigation plan", "review_explained": "Innocent explanation found",

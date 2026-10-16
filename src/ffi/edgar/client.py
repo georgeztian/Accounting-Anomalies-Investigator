@@ -97,6 +97,17 @@ class EdgarClient:
         resp.raise_for_status()
         return resp.content
 
+    def fetch(self, url: str) -> bytes:
+        """Download without caching (for responses the caller stores in a processed form)."""
+        if self.offline:
+            raise OfflineCacheMiss(f"Not in cache (offline mode): {url}")
+        try:
+            return self._fetch(url)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise EdgarError(f"404 Not Found: {url}") from exc
+            raise
+
     def get_bytes(self, url: str, max_age_s: float | None = None) -> bytes:
         path = self._path(url)
         if path.exists():

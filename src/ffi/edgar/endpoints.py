@@ -1,4 +1,4 @@
-"""Typed accessors for the SEC endpoints the app uses (BLUEPRINT §5)."""
+"""Typed accessors for the SEC endpoints the app uses."""
 
 from __future__ import annotations
 
@@ -78,10 +78,6 @@ def filings_table(client: EdgarClient, cik: int) -> list[FilingRef]:
             )
     out.sort(key=lambda f: f.filing_date)
     return out
-
-
-def companyfacts(client: EdgarClient, cik: int) -> dict:
-    return client.get_json(COMPANYFACTS_URL.format(cik=cik), max_age_s=DAY)
 
 
 def frame(client: EdgarClient, concept: str, period: str, unit: str = "USD", taxonomy: str = "us-gaap") -> pd.DataFrame:

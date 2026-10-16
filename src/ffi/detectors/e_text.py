@@ -1,4 +1,4 @@
-"""Family E: text and disclosure detectors (BLUEPRINT §9, Family E), plus text-based C.NG / C.BS.03.
+"""Family E: text and disclosure detectors, plus text-based C.NG / C.BS.03.
 
 Deterministic detectors (E.03, E.05-E.08, E.10, E.12, E.13, C.NG.01/02) need no LLM. LLM detectors
 (E.01, E.02, E.04, E.09, C.BS.03, C.NG.03/04) return schema-bound JSON with verbatim quotes; any
@@ -41,7 +41,7 @@ def _need_docs(ctx: RunContext, two: bool = True) -> tuple[TextDoc, TextDoc | No
 
 def _llm(ctx: RunContext):
     if ctx.llm is None:
-        raise SkipDetector("LLM disabled (deterministic mode or no ANTHROPIC_API_KEY)")
+        raise SkipDetector("needs the LLM (deterministic mode, or no Claude Code login or API key)")
     return ctx.llm
 
 

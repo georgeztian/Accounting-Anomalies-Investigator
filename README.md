@@ -75,20 +75,35 @@ ANTHROPIC_API_KEY=                                  # optional: leave empty to u
 The app finds the Claude CLI in this order:
 1. `FFI_CLAUDE_CLI`;
 2. `claude` on your PATH;
-3. the binary bundled with the Claude Code extension for VS Code or Cursor.
+3. the binary bundled with the Claude Code extension for VS Code or Cursor;
+4. `~/.local/bin` and `~/.claude/local`, where the Claude Code installer puts it.
 
 Log in once by running `claude` in a terminal. The API key is removed from the CLI's environment, so subscription runs are never billed to an API account.
 
 With either backend, `--budget-usd` caps the run. For subscription runs the cap applies to the API-equivalent cost, which keeps long agent investigations bounded.
 
-To change tuning settings, create an optional `ffi.toml` in the project folder. You can set:
-- the peer count;
-- materiality thresholds;
-- the false-discovery rate;
-- the flag threshold;
-- agent budgets.
+To change tuning settings, create an optional `ffi.toml` in the project folder. Anything you leave out keeps its built-in default; the values below are the defaults:
 
-Anything you leave out keeps its built-in default.
+```toml
+[peers]
+count = 15            # peers compared against
+min_candidates = 30   # widen the SIC code from 4 to 3 to 2 digits until this many active filers
+
+[materiality]
+pretax_pct = 0.05     # auditor-style thresholds
+revenue_pct = 0.005
+assets_pct = 0.005
+equity_pct = 0.01
+
+[scoring]
+fdr_q = 0.10          # false-discovery rate (Benjamini-Hochberg)
+flag_severity = 0.5   # severity at which a test result is flagged
+
+[agent]
+max_cases = 3         # findings the investigation agent takes on
+run_budget_usd = 6.0  # AI spend cap per run (API-equivalent on a subscription)
+recursion_limit = 40
+```
 
 ---
 
@@ -109,6 +124,10 @@ anomaly-report SMCI --mode auto --budget-usd 3     # unattended agent with a $3 
 anomaly-report SMCI --pause-on review_publish      # stop at the publish review and save state
 anomaly-report SMCI --resume SMCI_FY2026_ab12cd    # continue a paused or interrupted run
 anomaly-report SMCI --offline                      # use cached data only
+anomaly-report SMCI --keep-artifacts               # keep the run's graph database and agent checkpoints
+
+anomaly-report render                              # rebuild the latest report with the current templates (no re-run)
+anomaly-report render META_FY2025_33b3ff           # rebuild one saved run's report
 
 anomaly-report batch companies.txt --workers 3     # many companies (one per line), one ranked summary
 anomaly-report detectors                           # list the detector catalogue
@@ -183,8 +202,8 @@ Each run writes `reports/<TICKER>_<FY>_<id>/`:
 | `report.json` | Findings, every signal, every detector status and every evidence reference, for other tools |
 | `report.pdf` | With `--format pdf` |
 | `manifest.json` | What's needed to reproduce the run. It records versions, options, the company profile, detector statuses, peers, the hash of the source data, source documents, LLM spend and timings. |
-| `kg.duckdb` | The run's knowledge graph |
-| `checkpoints.sqlite` | Agent checkpoints (LLM runs only) |
+| `run.pkl.gz` | Everything the report is built from, so `anomaly-report render` can rebuild it without downloads, tests or AI calls. Open only files this tool wrote. |
+| `kg.duckdb`, `checkpoints.sqlite` | Working files: the run's knowledge graph and agent checkpoints. Removed after a successful run unless you pass `--keep-artifacts`. Checkpoints are kept when an investigation paused or failed, so `--resume` can continue it. |
 
 `batch` also writes `batch_<time>.csv` and `.md` to the output folder. They rank the companies by risk index and list:
 - finding counts (verified and unverified);
@@ -241,17 +260,17 @@ The risk index is a weighted combination of flagged results and corroborated pat
 |---|---|---|
 | Resolve | [resolve/resolver.py](src/ffi/resolve/resolver.py) | Parses `Name (TICKER)`, looks up the ticker in SEC's list, and checks the name against the SEC title and former names. If they don't match it asks you to choose. It requires at least one 10-K, 20-F or 40-F and counts annual reports across the full filing history, because large banks' recent filings are mostly prospectus supplements. |
 | Profile | [profiles.py](src/ffi/profiles.py) | Chooses the detector profile from the SIC code, then adjusts it for 20-F/40-F filing, IFRS and a non-USD currency. |
-| Fetch | [edgar/](src/ffi/edgar/) | Sends your User-Agent with every request. One shared rate limiter (≤ 8 requests/s) keeps all threads and batch workers within SEC's limit. Errors are retried with backoff, and responses are kept in a disk cache. |
+| Fetch | [edgar/](src/ffi/edgar/) | Sends your User-Agent with every request. One shared rate limiter (≤ 8 requests/s) keeps all threads and batch workers within SEC's limit. Errors are retried with backoff, and responses are kept in a disk cache. Each company's XBRL data is stored only in processed form (refreshed daily), and filing text, releases and events download in the background while the industry data is built. |
 | Normalize | [xbrl/](src/ffi/xbrl/) | Maps us-gaap, ifrs-full and dei concepts to canonical line items, in priority order. Keeps every reported value with its filing date, and builds annual and quarterly panels both *as first reported* and *latest*. It detects the reporting currency and never mixes currencies. It accepts annual statements filed on 6-K, as many 40-F filers do. |
 | Text | [text/](src/ffi/text/) | Splits annual reports into Item sections and notes. 20-F items are mapped onto the 10-K sections. When MD&A and the statements are filed as exhibits, it reads those too: Exhibit 13 for some banks and insurers, and the 40-F exhibits. Each paragraph gets a stable ID, so any quote can be checked verbatim. |
 | Peers | [peers/](src/ffi/peers/) | Starts from active filers with the same 4-digit SIC code and widens to 3 and then 2 digits until there are enough. It picks the 15 nearest on size, margins and growth. The industry cross-section is built from XBRL frames and cached. |
 | Knowledge graph | [kg/](src/ffi/kg/) | DuckDB storage with NetworkX traversal. It holds companies, filings, facts and their restated versions, line items, sections, quotes, events, the auditor and signals. Every read is filtered by the `--as-of` date. |
-| Detect | [pipeline/detect.py](src/ffi/pipeline/detect.py) | Runs the detectors in dependency order. Detectors that don't apply to the profile are marked *n/a*, and a missing input gives a *skipped* status with a reason. A bug in one detector is reported, not fatal. |
+| Detect | [pipeline/detect.py](src/ffi/pipeline/detect.py) | Runs the detectors in dependency order. Detectors that don't apply to the profile are marked *n/a*, and a missing input gives a *skipped* status with a reason. A bug in one detector is reported, not fatal. Tests run in parallel; the AI tests get their own pool and start first. |
 | Score | [scoring/engine.py](src/ffi/scoring/engine.py) | Applies the explained-away discounts, controls false discoveries (Benjamini–Hochberg) and matches scheme-pattern templates. A pattern needs corroboration from at least 2 detector families. Then it computes the risk index and ranks the findings. |
 | Materiality | [materiality/impact.py](src/ffi/materiality/impact.py) | Estimates each finding's impact range and its effect on pre-tax income, net income and EPS. Compares it with auditor-style materiality thresholds and checks the SAB 99 qualitative factors. |
 | Agent | [agent/](src/ffi/agent/) | Investigates the top findings with a LangGraph state graph (described below) |
 | Audit | [audit/](src/ffi/audit/) | Independent audit of every reported finding, with a correction loop (described below) |
-| Report | [report/](src/ffi/report/) | Jinja2 templates, inline SVG charts and a neutral-language linter |
+| Report | [report/](src/ffi/report/) | Jinja2 templates with a fixed layout, inline SVG charts and a neutral-language linter. The run is saved so `anomaly-report render` can rebuild the report. |
 
 ### Detector families
 
@@ -347,13 +366,20 @@ src/ffi/
   text/         annual-report sectioning (10-K, 20-F, 40-F, Exhibit 13), search, quote verification
   peers/        SIC universe, frames cross-section, peer selection
   kg/           DuckDB + NetworkX store, graph builder
-  detectors/    base, helpers, stats, scores, a_integrity, b_scores, c_accounts, d_stats, e_text, f_graph
+  detectors/    base, helpers, stats, scores, textnum, xsec_models, catalog (plain-language explanations),
+                a_integrity, b_scores, c_accounts, d_stats, e_text, f_graph
   pipeline/     detect (DAG runner), run (orchestration)
   scoring/      false-positive control, scheme templates, risk index
   materiality/  impact and materiality
   agent/        schemas, tools, budget, grounding, graph, runner, ui
   audit/        deterministic auditor + correction loop, independent LLM auditor
-  report/       model, charts, linter, render, templates/
+  report/       model, plain (client wording), charts, linter, render, snapshot (saved runs), templates/
   training/     labels (8-K 4.02), train / backtest
   models/       trained model for the supervised detector
 ```
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
+
+Reports produced by this tool are based on public SEC filings and are decision support, not investment, legal or audit advice.

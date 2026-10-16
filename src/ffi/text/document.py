@@ -1,4 +1,4 @@
-"""Filing text: HTML -> normalized text -> Items, notes and paragraph spans (BLUEPRINT §5 step 5).
+"""Filing text: HTML -> normalized text -> Items, notes and paragraph spans.
 
 Every paragraph has a stable id `accession#section#index#start-end` whose offsets index into
 `TextDoc.text`, so any quote can be verified verbatim at its span.

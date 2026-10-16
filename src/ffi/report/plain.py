@@ -205,6 +205,15 @@ REWRITES: list[tuple[str, str]] = [
 _REWRITES = [(re.compile(p, re.I), r) for p, r in REWRITES]
 
 
+CITE_RE = re.compile(r"\s*\[L\d+(?:\.\d+)?(?:\s*[,;]\s*L\d+(?:\.\d+)?)*\]")  # [L0.1] and [L2.1, L2.2]
+SECTION_RE = re.compile(r"\bitem(1a|1b|1c|7a|9a|9b|\d{1,2})\b", re.I)
+SECTION_NAMES = {"1": "business description", "1a": "risk factors", "1b": "unresolved SEC comments", "1c": "cybersecurity",
+                 "2": "properties", "3": "legal proceedings", "5": "market for the shares", "7": "management's discussion and analysis",
+                 "7a": "market risk disclosures", "8": "financial statements and notes", "9": "changes in accountants",
+                 "9a": "controls and procedures", "9b": "other information", "10": "directors and governance",
+                 "11": "executive pay", "13": "related-party transactions", "14": "audit fees", "15": "exhibits"}
+
+
 def name(detector_id: str) -> str:
     spec = REGISTRY.get(detector_id)
     return PLAIN_NAMES.get(detector_id, spec.name if spec else detector_id)
@@ -233,7 +242,9 @@ def plain(text: str | None, expand: bool = True) -> str:
     for pat, rep in _REWRITES:
         if pat.fullmatch(text.strip()):
             return rep
-    out = ID_RE.sub(lambda m: f"“{name(m.group(0))}”", text)
+    out = CITE_RE.sub("", text)  # the investigation's evidence-ledger references, e.g. [L0.1]
+    out = SECTION_RE.sub(lambda m: f"— {SECTION_NAMES.get(m.group(1).lower(), 'section')}", out)
+    out = ID_RE.sub(lambda m: f"“{name(m.group(0))}”", out)
     for internal, did in sorted(_names_index().items(), key=lambda kv: -len(kv[0])):
         if internal in out and did in PLAIN_NAMES and len(internal) > 8:
             out = out.replace(f"{internal}:", f"{PLAIN_NAMES[did]}:")
@@ -264,7 +275,8 @@ def area(key: str) -> str:
 
 def source_label(form: str | None, filed: str | None, kind: str) -> str:
     forms = {"10-K": "Annual report", "10-K/A": "Amended annual report", "10-Q": "Quarterly report", "8-K": "Current report",
-             "20-F": "Annual report (foreign issuer)", "40-F": "Annual report (Canadian issuer)", "6-K": "Foreign issuer report",
+             "20-F": "Annual report (foreign issuer)", "40-F": "Annual report (Canadian issuer)", "10-KT": "Transition annual report",
+             "20-F/A": "Amended annual report (foreign issuer)", "40-F/A": "Amended annual report (Canadian issuer)", "6-K": "Foreign issuer report",
              "EX-99": "Earnings release"}
     label = forms.get(form or "", "SEC filing" if kind != "derived" else "Calculation")
     return f"{label}{', filed ' + filed if filed else ''}"

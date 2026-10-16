@@ -1,4 +1,4 @@
-"""Run all registered detectors in dependency order (BLUEPRINT §8 detector DAG).
+"""Run all registered detectors in dependency order.
 
 With the LLM enabled, independent detectors run concurrently (LLM calls are I/O-bound); a detector starts
 as soon as everything it depends on has finished. Deterministic runs stay sequential (CPU-bound, and
@@ -47,7 +47,7 @@ def _run_one(ctx: RunContext, did: str, results: dict[str, DetectorResult]) -> D
         return r
     try:
         if spec.needs_llm and ctx.llm is None:
-            raise SkipDetector("needs the LLM (deterministic mode or no ANTHROPIC_API_KEY)")
+            raise SkipDetector("needs the LLM (deterministic mode, or no Claude Code login or API key)")
         if spec.needs_text and ctx.doc is None:
             raise SkipDetector("10-K text not available")
         bad_dep = [d for d in spec.depends_on if d in results and results[d].status == "error"]
@@ -63,6 +63,18 @@ def _run_one(ctx: RunContext, did: str, results: dict[str, DetectorResult]) -> D
     return r
 
 
+def _preload_heavy_modules() -> None:
+    """Import scikit-learn once on this thread: two detector threads importing it at the same time can see a
+    partially initialised module ('cannot import name ... from partially initialized module')."""
+    try:
+        import sklearn.covariance  # noqa: F401
+        import sklearn.ensemble  # noqa: F401
+        import sklearn.feature_extraction.text  # noqa: F401
+        import sklearn.metrics.pairwise  # noqa: F401
+    except ImportError:
+        pass  # the detectors that need it report the error themselves
+
+
 def run_detectors(ctx: RunContext, only: set[str] | None = None,
                   after: dict[str, Callable[[RunContext], None]] | None = None,
                   progress: Callable[[str], None] | None = None,
@@ -72,7 +84,7 @@ def run_detectors(ctx: RunContext, only: set[str] | None = None,
     ts = TopologicalSorter({i: {d for d in specs[i].depends_on if d in ids} for i in ids})
     ts.prepare()
     results: dict[str, DetectorResult] = {}
-    workers = workers or (4 if ctx.llm is not None else 1)
+    workers = workers or 4
 
     def finish(r: DetectorResult) -> None:
         results[r.id] = r
@@ -88,11 +100,16 @@ def run_detectors(ctx: RunContext, only: set[str] | None = None,
             for did in ts.get_ready():
                 finish(_run_one(ctx, did, results))
     else:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
+        _preload_heavy_modules()
+        # AI tests mostly wait on the model, so they get their own pool and start first; they never queue behind
+        # the CPU-bound statistical tests (and those never wait for a slow model call).
+        llm_ids = {i for i in ids if specs[i].needs_llm and ctx.llm is not None}
+        with ThreadPoolExecutor(max_workers=workers) as pool, ThreadPoolExecutor(max_workers=max(len(llm_ids), 1)) as llm_pool:
             running: dict[Future, str] = {}
             while ts.is_active():
-                for did in ts.get_ready():
-                    running[pool.submit(contextvars.copy_context().run, _run_one, ctx, did, results)] = did
+                for did in sorted(ts.get_ready(), key=lambda d: d not in llm_ids):
+                    target = llm_pool if did in llm_ids else pool
+                    running[target.submit(contextvars.copy_context().run, _run_one, ctx, did, results)] = did
                 if not running:
                     break
                 finished, _ = wait(running, return_when=FIRST_COMPLETED)

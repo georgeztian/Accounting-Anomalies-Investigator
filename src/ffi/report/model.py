@@ -1,4 +1,4 @@
-"""Assemble the report data model from a run (BLUEPRINT §12.1)."""
+"""Assemble the report data model from a run."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ from typing import Any
 
 import numpy as np
 
-from ffi import __version__
 from ffi.detectors import scores as S
 from ffi.detectors.catalog import explain, interpret
 from ffi.detectors.d_stats import RATIOS
@@ -16,7 +15,6 @@ from ffi.detectors.stats import fmt_money, fmt_num, fmt_pct, money_prefix
 from ffi.report import charts
 from ffi.report import plain as P
 from ffi.report.linter import lint
-from ffi.scoring.engine import template_narrative
 
 FAMILY_NAMES = {"A": "Accounting integrity", "B": "Forensic scores & accrual models", "C": "Account-level detectors",
                 "D": "Statistical & ML", "E": "Text & disclosure", "F": "Knowledge-graph"}
@@ -145,6 +143,38 @@ def _audit(a) -> dict | None:
     return d
 
 
+# Every finding shows the same blocks in the same order; these fill a block that has nothing to show.
+NONE_TEXT = "None identified."
+MAX_FIGURES, MAX_QUOTES = 12, 6
+INVESTIGATION = {  # narrative_source -> (status label, text when the AI investigation adds no explanation of its own)
+    "agent": ("Completed", "The AI investigation reached no conclusion beyond the test results below."),
+    "agent-degraded": ("Did not finish", "The AI investigation did not finish within its time and cost limits, so it adds no "
+                                         "conclusion beyond the test results below. Evidence it gathered is listed under "
+                                         "Supporting evidence."),
+    "agent: closed as explained": ("Likely explained", "The AI investigation found a likely legitimate explanation, listed under "
+                                                       "Innocent explanations below, so this finding counts for half."),
+    "agent narrative dropped by reviewer": ("Withdrawn", "The AI-written explanation was withdrawn at review, so the conclusion "
+                                                         "rests on the test results below."),
+    "template": ("Not run", "No AI investigation was run for this finding, so the conclusion rests on the test results below."),
+}
+
+
+def _investigation(f) -> tuple[str, str, str]:
+    """(summary, investigation status, investigation text) for one finding."""
+    status, fallback = INVESTIGATION.get(f.narrative_source, INVESTIGATION["template"])
+    if f.narrative and f.narrative_source in ("agent", "agent-degraded"):
+        summary, _, expl = f.narrative.partition("\n\n")
+        return summary.strip(), status, expl.strip() or fallback
+    return f.signals[0].rationale, status, fallback
+
+
+def _evidence_blocks(evidence: list[dict]) -> dict[str, Any]:
+    figures = [e for e in evidence if not e.get("quote")]
+    quotes = [e for e in evidence if e.get("quote")]
+    return {"figures": figures[:MAX_FIGURES], "figures_total": len(figures),
+            "quotes": quotes[:MAX_QUOTES], "quotes_total": len(quotes)}
+
+
 def _resolution(ctx) -> str:
     c = ctx.company
     return (f"Identified as {c.display_name or c.name}{f' (ticker {c.ticker})' if c.ticker else ''} in the SEC's register of public companies"
@@ -154,41 +184,42 @@ def _resolution(ctx) -> str:
 def build_model(out) -> dict[str, Any]:
     ctx, sc = out.ctx, out.score
     flag_at = float(ctx.tuning.get("scoring", {}).get("flag_severity", 0.5)) if ctx.tuning else 0.5
-    lint_hits: list[str] = []
     findings = []
     for i, f in enumerate(sc.findings[:12]):
-        narrative = f.narrative or template_narrative(f)
-        narrative, hits = lint(narrative)
-        lint_hits += hits
+        summary, inv_status, inv_text = _investigation(f)
+        summary, _ = lint(summary)
+        inv_text, _ = lint(inv_text)
+        evidence = [_ev_dict(e, ctx) for e in _dedupe(f.evidence)]
         m = f.materiality
         groups = {"fact": [], "span": [], "derived": [], "event": []}
         for e in f.evidence:
             groups.setdefault(e.kind, []).append(P.plain(e.label, expand=False))
         findings.append({
-            "rank": i + 1, "id": f.id, "title": P.title(f.title), "kind": f.kind, "score": round(f.score, 2),
-            "strength": _strength(f.score), "priority": round(f.priority, 3), "detectors": f.detectors,
+            "rank": i + 1, "title": P.title(f.title), "score": round(f.score, 2), "strength": _strength(f.score),
             "tests": [P.name(d) for d in f.detectors],
-            "signals": [{"id": s.detector_id, "name": P.name(s.detector_id), "family": s.family, "severity": round(s.severity, 2),
+            "signals": [{"name": P.name(s.detector_id), "severity": round(s.severity, 2),
                          "rationale": P.plain(s.rationale), "period": P.plain(s.period, expand=False),
                          "reading": P.plain(interpret("ok", s.severity, flag_at, s.flagged, s.percentile_peer, s.suppressed_by)),
                          **_about(s.detector_id)} for s in f.signals],
-            "narrative": P.plain(narrative), "narrative_source": f.narrative_source,
-            "impact": f.impact.to_dict() if f.impact else None,
+            "summary": P.plain(summary), "investigation_status": inv_status, "investigation": P.plain(inv_text),
             "impact_basis": P.plain(f.impact.basis) if f.impact else "",
-            "materiality": m.to_dict() if m else None,
-            "impact_text": (f"{fmt_money(m.impact_low)} to {fmt_money(m.impact_high)} (central estimate {fmt_money(m.impact_mid)})" if m else "Not quantified"),
+            "impact_text": (f"{fmt_money(m.impact_low)} to {fmt_money(m.impact_high)} (central estimate {fmt_money(m.impact_mid)})"
+                            if m else "Not quantified: this test measures a pattern, not an amount of profit."),
             "materiality_text": (
                 f"{fmt_pct(m.pct_pretax)} of pre-tax income and {fmt_pct(m.pct_revenue, 2)} of revenue; "
                 f"{m.multiple:.1f} times the materiality threshold an auditor would typically use (based on {BENCHMARKS.get(m.benchmark, m.benchmark)})"
                 + (f"; effect on earnings per share {money_prefix()}{m.eps_effect:.2f}" if m.eps_effect is not None else "")
                 + (f"; about {fmt_pct(m.pct_market_value)} of market value" if m.pct_market_value is not None else "")
-                if m else ""),
-            "sab99": [P.plain(x) for x in (m.sab99 if m else [])],
-            "evidence": [_ev_dict(e, ctx) for e in _dedupe(f.evidence)],
-            "alternatives": [P.plain(x) for x in f.alternatives], "questions": [P.plain(x) for x in f.questions],
+                if m else "Not assessed, because no effect on profit was estimated."),
+            "sab99_text": ("; ".join(P.plain(x) for x in m.sab99) + " (qualitative factors from SEC guidance on materiality)"
+                           if m and m.sab99 else NONE_TEXT),
+            **_evidence_blocks(evidence),
+            "alternatives": [P.plain(x) for x in f.alternatives] or [NONE_TEXT],
+            "questions": [P.plain(x) for x in f.questions] or [NONE_TEXT],
             "audit": _audit(f.audit),
+            "audit_label": f.audit.label if f.audit else "Not independently re-checked",
             "chart": _ratio_chart(out, f.signals[0].detector_id),
-            "graph": charts.evidence_graph(P.title(f.title), [(k, v) for k, v in groups.items() if v]) if i < 5 else "",
+            "graph": charts.evidence_graph(P.title(f.title), [(k, v) for k, v in groups.items() if v]),
         })
     families = []
     for fam, _name in FAMILY_NAMES.items():
@@ -232,33 +263,33 @@ def build_model(out) -> dict[str, Any]:
                                              "quotes": [_ev_dict(e, ctx) for e in s.evidence if e.kind == "span"][:3]})
     area_rows = sorted(sc.area_scores.items(), key=lambda kv: -kv[1])
     top_sentences = []
-    for f in sc.findings[:5]:
+    for f in sc.findings[:12]:  # one line per reported finding, so the list always matches the Findings section
         mt = f" ({fmt_money(f.materiality.impact_low)}-{fmt_money(f.materiality.impact_high)}, {fmt_pct(f.materiality.pct_pretax)} of pre-tax income)" if f.materiality and f.materiality.pct_pretax is not None else ""
         top_sentences.append(f"{P.title(f.title)}{mt}.")
     key_numbers = [{"label": lab, "value": fmt_money(ctx.a(item)), "prior": fmt_money(ctx.a(item, 1))}
                    for lab, item in (("Revenue", "REVENUE"), ("Net income", "NET_INCOME"), ("Cash from operations", "CFO"),
                                      ("Total assets", "TOTAL_ASSETS"), ("Shareholders' equity", "EQUITY"))]
     llm = out.manifest.get("llm")
-    integrity = [x for fam in families if fam["code"] == "A" for x in fam["rows"]]
     peers_txt = P.plain(f"The {ctx.peers.method}.") if ctx.peers else "No comparable peer group could be formed."
     return {
-        "title": f"{ctx.company.display_name or ctx.company.name} ({ctx.company.ticker}) - accounting anomaly analysis, {P.plain(ctx.focus_label, expand=False)}",
-        "company": {"name": ctx.company.display_name or ctx.company.name, "ticker": ctx.company.ticker, "cik": ctx.company.cik,
-                    "sic": ctx.company.sic, "sic_description": " ".join((ctx.company.sic_description or "").split()),
+        "company": {"name": ctx.company.display_name or ctx.company.name, "ticker": ctx.company.ticker,
+                    "sic_description": " ".join((ctx.company.sic_description or "").split()),
                     "match_note": _resolution(ctx), "warnings": [P.plain(w) for w in ctx.company.warnings], "auditor": ctx.auditor},
         "period": P.plain(ctx.focus_label, expand=False).capitalize(), "period_end": str(ctx.focus.date()), "as_of": str(ctx.as_of),
-        "run_id": out.manifest["run_id"], "generated": datetime.now().strftime("%d %B %Y"), "version": __version__,
-        "mode": ctx.mode,
+        "generated": datetime.now().strftime("%d %B %Y"),
         "analysis_type": ("Automated checks of the reported figures, plus AI-assisted reading of the filings' text"
                           if llm else "Automated checks of the reported figures and filing text"),
         "profile": ({"key": ctx.profile.key, "label": ctx.profile.label, "description": P.plain(ctx.profile.description),
-                     "notes": [P.plain(n) for n in ctx.profile.notes], "excluded": len(ctx.profile.excluded)} if ctx.profile else None),
+                     "notes": [P.plain(n) for n in ctx.profile.notes], "excluded": len(ctx.profile.excluded)} if ctx.profile else
+                    {"key": "industrial", "label": "Industrial / commercial company", "description": "Operating company; the full test set applies.",
+                     "notes": [], "excluded": 0}),
         "currency": ctx.currency, "annual_form": ctx.annual_form,
-        "risk": {"index": sc.risk_index, "band": sc.band, "probability": sc.probability, "peer_note": peers_txt},
+        "risk": {"index": sc.risk_index, "band": sc.band},
         "top_sentences": top_sentences,
+        "key_question": (findings[0]["questions"][0] if findings and findings[0]["questions"][0] != NONE_TEXT
+                         else "None: no finding was reported." if not findings else NONE_TEXT),
         "key_numbers": key_numbers,
         "areas": [{"area": P.area(k), "score": round(v, 2)} for k, v in area_rows],
-        "contributions": [{"name": k, "weight": round(v, 3)} for k, v in sc.contributions[:10]],
         "findings": findings,
         "audit_summary": {
             "verified": sum(1 for f in sc.findings[:12] if f.audit and f.audit.status == "verified"),
@@ -270,24 +301,16 @@ def build_model(out) -> dict[str, Any]:
         "flag_at": flag_at,
         "text_changes": text_changes,
         "pressure": [{"id": s.detector_id, "name": P.name(s.detector_id), "rationale": P.plain(s.rationale)} for s in sc.pressure],
-        "integrity": integrity,
         "explain_conditions": {k: P.plain(v) for k, v in sc.explain_conditions.items()},
         "charts": {"earnings_cash": _earnings_cash_chart(out), "scores": _scores_chart(out)},
-        "peers": [{"cik": p.cik, "name": p.name, "distance": round(p.distance, 2), "loaded": p.annual is not None}
-                  for p in (ctx.peers.peers if ctx.peers else [])],
+        "peers": [{"name": p.name} for p in (ctx.peers.peers if ctx.peers else [])],
         "peer_method": peers_txt,
-        "industry": {"digits": ctx.industry_digits, "size": len(ctx.industry_ciks)},
-        "documents": [{"accession": d.accession, "form": d.form, "period": d.period_end, "url": d.url,
+        "documents": [{"url": d.url,
                        "label": (f"Earnings release, {d.period_end}" if d.form == "EX-99" else
                                  f"{P.source_label(d.form, None, 'span')} for the fiscal year ended {d.period_end}")}
                       for d in ctx.docs + ctx.releases],
-        "notes": [P.plain(n) for n in ctx.notes],
-        "agent": [c if isinstance(c, dict) else getattr(c, "__dict__", {}) for c in out.agent_cases],
-        "llm": llm,
-        "kg": out.manifest.get("kg", {}),
-        "timings": out.timings,
-        "lint_hits": lint_hits,
+        "notes": [P.plain(n) for n in ctx.notes] or [NONE_TEXT],
+        "none_text": NONE_TEXT,
         "glossary": P.GLOSSARY,
         "disclaimer": DISCLAIMER,
-        "manifest": out.manifest,
     }

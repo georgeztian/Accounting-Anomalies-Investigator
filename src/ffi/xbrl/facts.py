@@ -1,4 +1,4 @@
-"""Point-in-time fact store built from SEC companyfacts (BLUEPRINT §5, §6 bitemporal rule).
+"""Point-in-time fact store built from SEC companyfacts.
 
 Every reported value is kept with its filing date. Panels are built "as of" a date and in two
 versions: as-first-reported (what the market saw first) and latest (after any restatement).
@@ -81,6 +81,65 @@ def flatten_companyfacts(cf: dict) -> pd.DataFrame:
     df["val"] = df["val"].astype(float)
     df["days"] = (df["end"] - df["start"]).dt.days
     return df
+
+
+FLAT_VERSION = 1  # bump when flatten_companyfacts changes
+
+
+@dataclass
+class CompanyFacts:
+    """A company's XBRL facts, flattened to the concepts the canonical map uses."""
+    cik: int
+    name: str
+    raw: pd.DataFrame
+    sha256: str  # of the SEC companyfacts file as downloaded
+
+
+def load_companyfacts(client, cik: int) -> CompanyFacts:
+    """A company's flattened companyfacts, cached as parquet; the raw download is not kept.
+
+    The SEC file is 10-50 MB of JSON per company (the target and ~15 peers each run). Only the flattened table is
+    stored, with the raw file's hash and the fetch time; it is refreshed after a day like the raw file was, and a
+    stale copy is used when the SEC cannot be reached or the run is offline."""
+    import hashlib
+    import json
+    import time
+
+    from ffi.edgar import endpoints
+    from ffi.edgar.client import EdgarError
+
+    concepts = hashlib.sha256(json.dumps(sorted(map(list, CONCEPT_TO_ITEMS))).encode()).hexdigest()[:8]
+    folder = client.cache_dir.parent / "facts"
+    path = folder / f"{cik}-{concepts}-v{FLAT_VERSION}.parquet"
+    meta_path = path.with_suffix(".json")
+
+    def cached() -> CompanyFacts | None:
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            return CompanyFacts(cik, meta["name"], pd.read_parquet(path), meta["sha256"])
+        except (OSError, ValueError, KeyError):
+            return None
+
+    fresh = path.exists() and (client.offline or time.time() - path.stat().st_mtime < endpoints.DAY)
+    if fresh and (hit := cached()) is not None:
+        return hit
+    try:
+        data = client.fetch(endpoints.COMPANYFACTS_URL.format(cik=cik))
+    except (EdgarError, OSError):
+        if (hit := cached()) is not None:
+            return hit  # stale copy beats nothing
+        raise
+    cf = json.loads(data)
+    facts = CompanyFacts(cik, cf.get("entityName", ""), flatten_companyfacts(cf), hashlib.sha256(data).hexdigest())
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        for old in folder.glob(f"{cik}-*"):  # superseded versions of this company's file
+            old.unlink(missing_ok=True)
+        facts.raw.to_parquet(path, index=False)
+        meta_path.write_text(json.dumps({"name": facts.name, "sha256": facts.sha256}), encoding="utf-8")
+    except (OSError, ValueError):
+        pass
+    return facts
 
 
 def map_canonical(df: pd.DataFrame, currency: str = "USD") -> pd.DataFrame:
@@ -168,6 +227,11 @@ class FactStore:
     @classmethod
     def from_companyfacts(cls, cik: int, cf: dict, as_of: date | None = None) -> FactStore:
         return cls(cik, flatten_companyfacts(cf), as_of)
+
+    @classmethod
+    def load(cls, client, cik: int, as_of: date | None = None) -> FactStore:
+        """From the cached flattened companyfacts (see load_companyfacts)."""
+        return cls(cik, load_companyfacts(client, cik).raw, as_of)
 
     # ------------------------------------------------------------------ periods
     def fiscal_year_ends(self) -> list[pd.Timestamp]:

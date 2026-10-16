@@ -1,4 +1,4 @@
-"""Neutral-language policy (BLUEPRINT §12.2): generated text must not accuse."""
+"""Neutral-language policy: generated text must not accuse."""
 
 from __future__ import annotations
 

@@ -1,10 +1,9 @@
-"""Run the investigation graph per finding with SQLite checkpoints, interrupts, resume and pause (BLUEPRINT §13.3-13.4)."""
+"""Run the investigation graph per finding with SQLite checkpoints, interrupts, resume and pause."""
 
 from __future__ import annotations
 
 import contextvars
 import logging
-import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -13,7 +12,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
 from ffi.agent.graph import build_graph
-from ffi.agent.ui import PauseRun, TerminalUI
+from ffi.agent.ui import PauseRun, TerminalUI, stdin_interactive
 from ffi.detectors.base import EvidenceRef
 
 log = logging.getLogger(__name__)
@@ -90,7 +89,7 @@ def investigate(ctx, score, run_dir: Path, run_id: str, opts, ui: TerminalUI | N
     targets = [f for f in score.findings if f.kind == "pattern"][: opts.max_cases] or score.findings[: opts.max_cases]
     cases: list[dict[str, Any]] = []
     with SqliteSaver.from_conn_string(str(run_dir / "checkpoints.sqlite")) as saver:
-        interactive = ui.mode == "interactive" and sys.stdin.isatty()
+        interactive = ui.mode == "interactive" and stdin_interactive()
         if interactive or len(targets) <= 1:
             for f in targets:
                 case = _run_case(ctx, f, saver, run_id, ui)

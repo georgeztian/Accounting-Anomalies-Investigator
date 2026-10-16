@@ -1,4 +1,4 @@
-"""Detector interface, Signal record and registry (BLUEPRINT §8)."""
+"""Detector interface, Signal record and registry."""
 
 from __future__ import annotations
 

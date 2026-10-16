@@ -1,6 +1,6 @@
 """Thin wrapper over the Anthropic SDK: structured outputs, response caching, spend tracking, budgets.
 
-The LLM only reads text and writes prose (BLUEPRINT §0 principle 6). Every call returns a
+The LLM only reads text and writes prose. Every call returns a
 Pydantic object validated against a schema; numbers in it are re-checked by Python callers.
 """
 
@@ -12,7 +12,7 @@ import logging
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
@@ -105,7 +105,7 @@ class LLM:
         self,
         schema: type[T],
         system: str,
-        prompt: str,
+        prompt: str | list[str],
         *,
         purpose: str,
         model: str | None = None,
@@ -114,6 +114,11 @@ class LLM:
         max_usd: float | None = None,
         timeout_s: float | None = None,
     ) -> T:
+        """`prompt` may be a list of parts: shared context first, the call's own instruction last. On the API each part but
+        the last is a prompt-cache breakpoint, so calls that share leading parts (one investigation's steps and redrafts)
+        read them from the cache at a tenth of the input price."""
+        parts = [p for p in ([prompt] if isinstance(prompt, str) else prompt) if p]
+        prompt = "\n".join(parts)
         model = model or self.extraction_model
         key = self._key(model, system, prompt, schema, effort)
         path = self.cache_dir / key[:2] / f"{key}.json"
@@ -133,18 +138,24 @@ class LLM:
 
         import anthropic
 
+        if len(parts) > 1:  # explicit breakpoints after each shared part (the API allows 4)
+            content: Any = [{"type": "text", "text": p + "\n", **({"cache_control": {"type": "ephemeral"}} if i < min(len(parts) - 1, 4) else {})}
+                            for i, p in enumerate(parts)]
+            caching: dict[str, Any] = {}
+        else:
+            content, caching = prompt, {"cache_control": {"type": "ephemeral"}}
         try:
             client = self.client.with_options(timeout=timeout_s) if timeout_s else self.client
             resp = client.beta.messages.parse(
                 model=model,
                 max_tokens=max_tokens,
                 system=system,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": content}],
                 output_format=schema,
                 output_config={"effort": effort},
-                cache_control={"type": "ephemeral"},
                 betas=[FALLBACK_BETA],
                 fallbacks="default",
+                **caching,
             )
         except anthropic.BadRequestError as e:
             raise LLMError(f"{purpose}: bad request: {e.message}") from e

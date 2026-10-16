@@ -1,4 +1,4 @@
-"""Scoring, scheme patterns and false-positive control (BLUEPRINT §10.2-§10.4)."""
+"""Scoring, scheme patterns and false-positive control."""
 
 from __future__ import annotations
 

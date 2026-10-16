@@ -1,4 +1,4 @@
-"""Versioned model artifacts shipped in src/ffi/models/ (BLUEPRINT §10.3). Runs only load them."""
+"""Versioned model artifacts shipped in src/ffi/models/. Runs only load them."""
 
 from __future__ import annotations
 

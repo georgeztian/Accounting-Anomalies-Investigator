@@ -1,4 +1,4 @@
-"""Canonical line items and the us-gaap concepts that map to them, in priority order (BLUEPRINT §5).
+"""Canonical line items and the us-gaap concepts that map to them, in priority order.
 
 Each item: (kind, unit, [concepts...]). kind = "D" (duration / flow) or "I" (instant / balance).
 Concepts may be prefixed "dei:" for the dei taxonomy; otherwise us-gaap is assumed.
@@ -98,6 +98,8 @@ ITEMS: tuple[CanonicalItem, ...] = (
     _i("DIVIDENDS_DECLARED", "Dividends declared", "D", USD, "NOTE",
        "DividendsCommonStockCash", "DividendsCommonStock", "Dividends", "DividendsCash"),
     _i("BUYBACKS", "Share repurchases", "D", USD, "CF", "PaymentsForRepurchaseOfCommonStock"),
+    _i("SHARE_TAX_WITHHELD", "Taxes paid on net share settlement of stock awards", "D", USD, "CF",
+       "PaymentsRelatedToTaxWithholdingForShareBasedCompensation"),
     _i("DEBT_ISSUED", "Debt issued", "D", USD, "CF",
        "ProceedsFromIssuanceOfLongTermDebt", "ProceedsFromIssuanceOfDebt", "ProceedsFromIssuanceOfSeniorLongTermDebt"),
     _i("EQUITY_ISSUED", "Equity issued", "D", USD, "CF", "ProceedsFromIssuanceOfCommonStock",

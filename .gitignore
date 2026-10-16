@@ -14,5 +14,4 @@ dist/
 tests/
 .github/
 BLUEPRINT.md
-ffi.toml.example
 data/

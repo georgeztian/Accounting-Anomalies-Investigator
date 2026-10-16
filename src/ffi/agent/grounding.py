@@ -1,4 +1,4 @@
-"""Grounding gate (BLUEPRINT §11): every number in generated text must match a known value; every quote must exist."""
+"""Grounding gate: every number in generated text must match a known value; every quote must exist."""
 
 from __future__ import annotations
 
@@ -13,15 +13,46 @@ NUM_RE = re.compile(
 )
 YEAR_RE = re.compile(r"^(?:19|20)\d{2}$")
 DATE_RE = re.compile(r"\b(?:19|20)\d{2}-\d{2}-\d{2}\b|\b\d{1,2}/\d{1,2}/(?:19|20)\d{2}\b")
-QUOTE_RE = re.compile(r"[\"“]([^\"”]{25,400})[\"”]")
 
 
 ID_RE = re.compile(r"\b[A-F](?:\.[A-Z]{2,4})?\.\d{2}\b|\[L\d+\.\d+\]|\bFY\d{4}(?:Q[1-4])?\b|\bCY\d{4}\b")
+# references to standards, rules and document parts ("ASC 842", "Topic 606", "IFRS 16", "Rule 10b5-1", "Note 5")
+REF_RE = re.compile(r"\b(?:ASC|ASU|Topic|IFRS|IAS|SFAS|FAS|SAB|Rule|Section|Item|Items|Note|Notes|Exhibit|Form|Regulation|"
+                    r"Level|Tier|Class|Series|Phase)\s+[0-9][0-9A-Za-z\-–.()]*", re.IGNORECASE)
+LEDGER_RE = re.compile(r"\s*\[L\d+(?:\.\d+)?\]")
 
 
 def strip_dates(text: str) -> str:
-    """Dates, detector ids (A.14, C.REV.01), ledger ids and fiscal labels are not financial figures."""
-    return ID_RE.sub(" ", DATE_RE.sub(" ", text))
+    """Dates, detector ids (A.14, C.REV.01), ledger ids, fiscal labels and standard references are not financial figures."""
+    return REF_RE.sub(" ", ID_RE.sub(" ", DATE_RE.sub(" ", text)))
+
+
+def numbers_in(text: str) -> list[float]:
+    """Every amount written in a passage (detector rationales, quoted filing text), for the allow-list."""
+    out: list[float] = []
+    for m in NUM_RE.finditer(strip_dates(text or "")):
+        out += [abs(c) for c in _candidates(m)]
+    return out
+
+
+def quotes_in(text: str) -> list[str]:
+    """Quoted passages, pairing quote marks in order so text between two quotes is never taken for a quote."""
+    text = LEDGER_RE.sub("", text)
+    out, open_at = [], None
+    for m in re.finditer(r"[\"“”]", text):
+        ch = m.group(0)
+        if open_at is None:
+            if ch != "”":
+                open_at = m.end()
+        elif ch != "“":
+            q = text[open_at:m.start()].strip()
+            if q[:1] in ".,;:)":
+                open_at = m.end()  # out of step (an unmatched mark earlier): this mark opens a quote, it does not close one
+                continue
+            if len(q) >= 25:
+                out.append(q[:300])  # a long quote is checked on its opening words
+            open_at = None
+    return out
 
 
 @dataclass
@@ -49,7 +80,12 @@ def _candidates(m: re.Match) -> list[float]:
     return [sign * raw]
 
 
-def check(text: str, allowed: list[float], docs: list, rel_tol: float = 0.015) -> GroundingReport:
+def _norm(s: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[\"'“”‘’]", "'", s)).strip().lower()
+
+
+def check(text: str, allowed: list[float], docs: list, rel_tol: float = 0.015, known_text: list[str] | None = None) -> GroundingReport:
+    """`known_text`: other verified sources a draft may quote, such as the detectors' own result sentences and labels."""
     rep = GroundingReport(ok=True)
     quotes_src = text
     text = strip_dates(text)
@@ -85,7 +121,10 @@ def check(text: str, allowed: list[float], docs: list, rel_tol: float = 0.015) -
                 break
         if not found:
             rep.unsupported_numbers.append(token)
-    for q in QUOTE_RE.findall(quotes_src):
+    known = [_norm(k) for k in known_text or []]
+    for q in quotes_in(quotes_src):
+        if any(_norm(q).strip(" .,;:") in k for k in known):
+            continue
         if not any(locate(d, q) for d in docs):
             rep.unverified_quotes.append(q[:80])
     rep.ok = not rep.unsupported_numbers and not rep.unverified_quotes

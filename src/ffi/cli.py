@@ -1,4 +1,4 @@
-"""Command-line interface (BLUEPRINT §1.1).
+"""Command-line interface.
 
     anomaly-report "Apple Inc. (AAPL)" [options]   run the analysis and write a report
     anomaly-report detectors                       list the detector catalogue
@@ -21,12 +21,14 @@ from rich.table import Table
 from ffi._env_guard import require_virtualenv
 
 console = Console()
-SUBCOMMANDS = {"detectors", "train", "labels", "cache-info", "batch"}
+SUBCOMMANDS = {"detectors", "train", "labels", "cache-info", "batch", "render"}
 app = typer.Typer(add_completion=False, no_args_is_help=True, help="Accounting-anomaly analysis reports for SEC registrants.")
 
 
 def _choose(cands: list[dict]) -> int | None:
-    if not sys.stdin.isatty():
+    from ffi.agent.ui import stdin_interactive
+
+    if not stdin_interactive():
         return None
     t = Table(title="Which company did you mean?")
     for col in ("#", "Ticker", "Name", "CIK", "Match"):
@@ -42,7 +44,7 @@ def _choose(cands: list[dict]) -> int | None:
 def run_cmd(
     company: Annotated[str, typer.Argument(help='Company as "Name (TICKER)", a ticker, or a name')],
     years: Annotated[int, typer.Option(help="Fiscal years of history analysed")] = 5,
-    period: Annotated[str | None, typer.Option(help="Focus fiscal year, e.g. FY2024 (default: latest 10-K)")] = None,
+    period: Annotated[str | None, typer.Option(help="Focus fiscal year, e.g. FY2024 (default: the latest annual report)")] = None,
     as_of: Annotated[str | None, typer.Option("--as-of", help="Point-in-time date YYYY-MM-DD")] = None,
     peers: Annotated[str | None, typer.Option(help="Comma-separated peer tickers (overrides automatic selection)")] = None,
     format: Annotated[str, typer.Option("--format", help="Comma list of html,md,json,pdf")] = "html,md,json",
@@ -53,6 +55,7 @@ def run_cmd(
     resume: Annotated[str | None, typer.Option(help="Resume a previous run id (agent continues from checkpoints)")] = None,
     pause_on: Annotated[str | None, typer.Option("--pause-on", help="Interrupt names at which to stop and save (e.g. review_publish)")] = None,
     offline: Annotated[bool, typer.Option(help="Use cached data only")] = False,
+    keep_artifacts: Annotated[bool, typer.Option("--keep-artifacts", help="Keep the run's graph database and agent checkpoints")] = False,
     verbose: Annotated[bool, typer.Option("-v", "--verbose")] = False,
 ) -> None:
     """Analyse one company and write the report."""
@@ -67,7 +70,9 @@ def run_cmd(
     logging.basicConfig(level=logging.INFO if verbose else logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
     if mode not in ("interactive", "auto", "deterministic"):
         raise typer.BadParameter("mode must be interactive, auto or deterministic")
-    if mode == "interactive" and not sys.stdin.isatty():
+    from ffi.agent.ui import stdin_interactive
+
+    if mode == "interactive" and not stdin_interactive():
         mode = "auto"
         console.print("[dim]No terminal attached: using --mode auto.[/dim]")
     opts = RunOptions(
@@ -75,7 +80,7 @@ def run_cmd(
         peers=[p for p in peers.split(",") if p.strip()] if peers else None,
         formats=tuple(f.strip().lower() for f in format.split(",")), out_dir=out, mode=mode, budget_usd=budget_usd,
         run_id=resume, offline=offline, max_cases=max_cases,
-        pause_on=tuple(p.strip() for p in pause_on.split(",")) if pause_on else (),
+        pause_on=tuple(p.strip() for p in pause_on.split(",")) if pause_on else (), keep_artifacts=keep_artifacts,
     )
     from ffi.agent.ui import TerminalUI
 
@@ -205,6 +210,36 @@ def detectors_cmd() -> None:
         needs = ", ".join(n for n, v in (("LLM", s.needs_llm), ("text", s.needs_text), ("peers", s.needs_peers)) if v)
         t.add_row(did, s.family, s.name, needs)
     console.print(t)
+
+
+@app.command("render")
+def render_cmd(
+    run: Annotated[str, typer.Argument(help="Run folder or run id, e.g. META_FY2025_0b4075 (default: the latest run)")] = "",
+    format: Annotated[str, typer.Option("--format", help="Comma list of html,md,json,pdf")] = "html,md,json",
+    out: Annotated[Path, typer.Option(help="Reports directory")] = Path("reports"),
+) -> None:
+    """Rebuild a saved run's report with the current templates: no downloads, no tests re-run, no AI calls."""
+    from ffi.report import snapshot
+    from ffi.report.render import render
+
+    folder = Path(run) if run and Path(run).is_dir() else out / run if run else None
+    if folder is None:
+        saved = sorted(out.glob(f"*/{snapshot.SNAPSHOT}"), key=lambda p: p.stat().st_mtime)
+        folder = saved[-1].parent if saved else None
+    if folder is None or not (folder / snapshot.SNAPSHOT).exists():
+        console.print(f"[red]No saved run found{' at ' + str(folder) if folder else ''}.[/red] Runs made before this "
+                      "feature, or with an older version, need a fresh `anomaly-report` run.")
+        raise typer.Exit(2)
+    try:
+        res = snapshot.load(folder)
+    except (ValueError, OSError, EOFError) as e:
+        console.print(f"[red]Could not load the saved run:[/red] {e}")
+        raise typer.Exit(2) from e
+    from ffi.detectors.stats import CURRENCY
+
+    CURRENCY.set(res.ctx.currency)
+    for kind, p in render(res, tuple(f.strip().lower() for f in format.split(","))).items():
+        console.print(f"[green]{kind.upper()}[/green] {p.resolve()}")
 
 
 @app.command("cache-info")

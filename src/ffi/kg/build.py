@@ -1,4 +1,4 @@
-"""Project run data into the knowledge graph (BLUEPRINT §6 ontology)."""
+"""Project run data into the knowledge graph."""
 
 from __future__ import annotations
 

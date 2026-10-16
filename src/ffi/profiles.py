@@ -1,4 +1,4 @@
-"""Company profiles: which detectors apply to which kind of company (BLUEPRINT §4.3).
+"""Company profiles: which detectors apply to which kind of company.
 
 Most forensic models were built for industrial companies: they read receivables as trade credit, need
 inventory and cost of sales, and treat operating cash flow as the cash yield of the business. For a

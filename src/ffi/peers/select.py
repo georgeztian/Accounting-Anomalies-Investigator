@@ -1,4 +1,4 @@
-"""Peer selection: same industry, nearest on size, growth and margins (BLUEPRINT §7)."""
+"""Peer selection: same industry, nearest on size, growth and margins."""
 
 from __future__ import annotations
 
@@ -9,10 +9,9 @@ from datetime import date
 import numpy as np
 import pandas as pd
 
-from ffi.edgar import endpoints
 from ffi.edgar.client import EdgarClient, EdgarError
 from ffi.peers.crosssection import calendar_year_of
-from ffi.xbrl.facts import FactStore, Panel
+from ffi.xbrl.facts import FactStore, Panel, load_companyfacts
 
 log = logging.getLogger(__name__)
 
@@ -115,9 +114,9 @@ def select_peers(
         cik, dist = item
         p = Peer(cik=int(cik), name=names.get(int(cik), str(cik)), distance=float(dist))
         try:
-            cf = endpoints.companyfacts(client, p.cik)
-            p.name = cf.get("entityName", p.name)
-            p.annual = FactStore.from_companyfacts(p.cik, cf, as_of).annual("first")
+            facts = load_companyfacts(client, p.cik)
+            p.name = facts.name or p.name
+            p.annual = FactStore(p.cik, facts.raw, as_of).annual("first")
         except (EdgarError, KeyError, ValueError) as exc:
             log.warning("peer %s skipped: %s", cik, exc)
         return p

@@ -1,4 +1,4 @@
-"""Per-node budgets and retry policies (BLUEPRINT §13.5)."""
+"""Per-node budgets and retry policies."""
 
 from __future__ import annotations
 

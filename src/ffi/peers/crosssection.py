@@ -1,4 +1,4 @@
-"""Cross-sectional data for industry-year models, built from XBRL frames (BLUEPRINT §5, §7).
+"""Cross-sectional data for industry-year models, built from XBRL frames.
 
 Frames return one concept for every filer in a calendar period. Annual (duration) frames give each
 firm's fiscal-year value and its period end; instant values are taken from whichever quarterly

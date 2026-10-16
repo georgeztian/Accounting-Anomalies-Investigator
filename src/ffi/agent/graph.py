@@ -1,4 +1,4 @@
-"""Investigation agent as a checkpointed LangGraph state graph (BLUEPRINT §13).
+"""Investigation agent as a checkpointed LangGraph state graph.
 
 intake -> hypothesize -> plan_evidence -> [review_plan] -> gather (fan-out per hypothesis) ->
 test_alternatives -> [review_explained] -> quantify -> draft -> verify -> [review_sensitive] ->
@@ -82,10 +82,14 @@ def build_graph(ctx: RunContext, finding, llm: LLM):
     items_hint = ", ".join(sorted(BY_ID))
     ratios_hint = ", ".join(RATIOS)
 
-    def _llm(node: str, schema, prompt: str, model: str | None = None, effort: str = "medium"):
+    def _llm(node: str, schema, prompt: list[str], model: str | None = None, effort: str = "medium"):
         b = DEFAULT_BUDGETS[node]
         before = llm.spend.usd
-        res = llm.structured(schema, SYSTEM, prompt[: b.max_input_chars], purpose=f"agent.{node}",
+        clipped, room = [], b.max_input_chars
+        for part in prompt:  # clip from the end so the shared leading parts stay identical across calls
+            clipped.append(part[:max(room, 0)])
+            room -= len(part)
+        res = llm.structured(schema, SYSTEM, clipped, purpose=f"agent.{node}",
                              model=model or llm.reasoning_model, effort=effort, max_tokens=b.max_output_tokens, max_usd=b.max_usd,
                              timeout_s=b.max_wall_seconds)
         return res, {"node": node, "usd": round(llm.spend.usd - before, 5)}
@@ -94,14 +98,25 @@ def build_graph(ctx: RunContext, finding, llm: LLM):
         return Command(update={"status": "over_budget", "pending": node, "decisions": [{"interrupt": "budget_guard", "choice": str(e), "auto": True}]},
                        goto="review_budget")
 
+    # Prompt parts, always in this order so every step of a case shares the longest possible cached prefix:
+    # finding | hypotheses | evidence ledger | alternatives tested + facts table | the step's own instruction.
+    def p_finding(state: CaseState) -> str:
+        return f"<finding>\n{json.dumps(state['finding'], indent=1)}\n</finding>"
+
+    def p_hypotheses(state: CaseState) -> str:
+        return f"<hypotheses>\n{json.dumps(state.get('hypotheses', []), indent=1)}\n</hypotheses>"
+
+    def p_ledger(state: CaseState) -> str:
+        return f"<ledger>\n{ledger_text(state)}\n</ledger>"
+
     # ------------------------------------------------------------------ nodes
     def intake(state: CaseState):
         return {"finding": finding_summary(ctx, finding), "status": "running", "audit_round": 0, "feedback": []}
 
     def hypothesize(state: CaseState):
         f = state["finding"]
-        prompt = (f"<finding>\n{json.dumps(f, indent=1)}\n</finding>\nPropose 1-3 hypotheses for which reporting choices "
-                  "could produce these signals, each with the innocent alternatives that must be tested.")
+        prompt = [p_finding(state), "Propose 1-3 hypotheses for which reporting choices "
+                  "could produce these signals, each with the innocent alternatives that must be tested."]
         try:
             res, sp = _llm("hypothesize", Hypotheses, prompt)
         except BudgetExceeded as e:
@@ -112,12 +127,12 @@ def build_graph(ctx: RunContext, finding, llm: LLM):
         return Command(update={"hypotheses": hyps, "spend": [sp]}, goto="plan_evidence")
 
     def plan_evidence(state: CaseState):
-        prompt = (f"<finding>\n{json.dumps(state['finding'], indent=1)}\n</finding>\n<hypotheses>\n{json.dumps(state['hypotheses'], indent=1)}\n</hypotheses>\n"
+        prompt = [p_finding(state), p_hypotheses(state),
                   f"Plan up to {DEFAULT_BUDGETS['plan_evidence'].max_tool_calls} evidence tasks that would confirm or refute each hypothesis "
                   "and its innocent alternatives. Tools: get_fact(item), ratio(numerator, denominator), peer_stats(ratio_key), "
                   "search_filing(query, section), explaining_text(item: MD&A passages discussing it), get_events(event_types: "
                   "AUDITOR_CHANGE, NON_RELIANCE, OFFICER_CHANGE, ACQUISITION, LATE_FILING, AMENDED_10K), diff_risk_factors().\n"
-                  f"Valid item ids: {items_hint}.\nValid ratio keys: {ratios_hint}.")
+                  f"Valid item ids: {items_hint}.\nValid ratio keys: {ratios_hint}."]
         try:
             res, sp = _llm("plan_evidence", EvidencePlan, prompt)
         except BudgetExceeded as e:
@@ -180,9 +195,9 @@ def build_graph(ctx: RunContext, finding, llm: LLM):
         alts = sorted({a for h in state["hypotheses"] for a in h.get("innocent_alternatives", [])})
         if not alts:
             return Command(update={"alternatives": [], "explained": False}, goto="quantify")
-        prompt = (f"<finding>\n{json.dumps(state['finding'], indent=1)}\n</finding>\n<ledger>\n{ledger_text(state)}\n</ledger>\n"
+        prompt = [p_finding(state), p_hypotheses(state), p_ledger(state),
                   f"<innocent_alternatives>\n{json.dumps(alts)}\n</innocent_alternatives>\nFor each alternative, judge strictly from the "
-                  "ledger whether it is supported. Mark supported=true only with specific ledger evidence.")
+                  "ledger whether it is supported. Mark supported=true only with specific ledger evidence."]
         try:
             res, sp = _llm("test_alternatives", AlternativeAssessments, prompt)
         except BudgetExceeded as e:
@@ -219,13 +234,13 @@ def build_graph(ctx: RunContext, finding, llm: LLM):
     def draft(state: CaseState):
         fb = state.get("feedback") or []
         facts_txt = "\n".join(f"- {r['source']}: {r['value']:.6g} {r['unit']}" for r in facts[:250])
-        prompt = (f"<finding>\n{json.dumps(state['finding'], indent=1)}\n</finding>\n<hypotheses>\n{json.dumps(state['hypotheses'], indent=1)}\n</hypotheses>\n"
-                  f"<ledger>\n{ledger_text(state)}\n</ledger>\n<alternatives_tested>\n{json.dumps(state.get('alternatives', []), indent=1)}\n</alternatives_tested>\n"
-                  f"<facts_table>\n{facts_txt}\n</facts_table>\n"
-                  "Write the finding for an analyst report. Rules: use only numbers that appear in the facts table or ledger "
-                  "(you may round them, e.g. $1.94B, 13.9%); cite ledger ids like [L0.2]; quote filing text only verbatim from the ledger; "
-                  "use neutral language (inconsistent with, warrants inquiry); no speculation beyond the evidence."
-                  + (f"\n<reviewer_feedback>\n{json.dumps(fb)}\n</reviewer_feedback>\nFix every point of feedback." if fb else ""))
+        prompt = [p_finding(state), p_hypotheses(state), p_ledger(state),
+                  f"<alternatives_tested>\n{json.dumps(state.get('alternatives', []), indent=1)}\n</alternatives_tested>\n"
+                  f"<facts_table>\n{facts_txt}\n</facts_table>",
+                  "Write the finding for an analyst report. Rules: use only numbers that appear in the finding, the facts table "
+                  "or the ledger (you may round them, e.g. $1.94B, 13.9%); cite ledger ids like [L0.2]; quote filing text only "
+                  "verbatim from the ledger; use neutral language (inconsistent with, warrants inquiry); no speculation beyond the evidence."
+                  + (f"\n<reviewer_feedback>\n{json.dumps(fb)}\n</reviewer_feedback>\nFix every point of feedback." if fb else "")]
         try:
             res, sp = _llm("draft", FindingNarrative, prompt)
         except BudgetExceeded as e:
@@ -246,8 +261,11 @@ def build_graph(ctx: RunContext, finding, llm: LLM):
         """Deterministic gate: every number traces to a source value, every quote exists, neutral language."""
         d = state["draft"] or {}
         text = " ".join([d.get("summary", ""), d.get("explanation", "")] + [a["assessment"] for a in d.get("alternatives", [])])
-        ledger_nums = [n for e in state.get("ledger", []) for n in e.get("numbers", [])]
-        rep = grounding.check(text, allowed + ledger_nums, docs)
+        # numbers the draft may legitimately repeat: tool outputs, the detectors' own results, and amounts in quoted filing text
+        ledger_nums = [n for e in state.get("ledger", []) for n in e.get("numbers", []) + grounding.numbers_in(e.get("text", ""))]
+        signal_nums = [n for s in state["finding"].get("signals", []) for n in grounding.numbers_in(s.get("rationale", ""))]
+        own = [state["finding"].get("title", "")] + [x for s in state["finding"].get("signals", []) for x in (s.get("name", ""), s.get("rationale", ""))]
+        rep = grounding.check(text, allowed + ledger_nums + signal_nums, docs, known_text=own)
         _, lint_hits = lint(text)
         problems = [f"number not in facts/ledger: {n}" for n in rep.unsupported_numbers] + \
                    [f"quote not found in filings: {q}" for q in rep.unverified_quotes]
@@ -291,8 +309,7 @@ def build_graph(ctx: RunContext, finding, llm: LLM):
     def degrade(state: CaseState):
         led = state.get("ledger", [])
         summary = finding.signals[0].rationale
-        expl = ("The investigation could not complete within its retry or budget limits, so this narrative is assembled "
-                "from the detector outputs" + (" and the evidence gathered:" if led else ".") + " " + " ".join(f"[{e['id']}] {e['text']}" for e in led[:4]))
+        expl = ""  # the report states that the investigation did not finish; the gathered evidence is still cited below
         return {"draft": {"summary": summary, "explanation": expl, "alternatives": [{"alternative": a, "assessment": "not tested"} for a in finding.alternatives],
                           "questions": finding.questions, "cited_ledger_ids": [e["id"] for e in led[:4]]},
                 "status": "degraded"}

@@ -1,14 +1,16 @@
-"""End-to-end run for one company (BLUEPRINT §3): resolve -> fetch -> normalize -> KG -> detect -> score -> agent -> report."""
+"""End-to-end run for one company: resolve -> fetch -> normalize -> KG -> detect -> score -> agent -> report."""
 
 from __future__ import annotations
 
-import hashlib
+import contextlib
+import contextvars
 import json
 import logging
 import re
 import time
 import uuid
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -30,10 +32,11 @@ from ffi.peers.select import PeerSet, select_peers
 from ffi.peers.universe import expanding_universe
 from ffi.pipeline.detect import DetectorResult, run_detectors
 from ffi.profiles import for_company
+from ffi.report import snapshot
 from ffi.resolve.resolver import CompanyRef, resolve
 from ffi.scoring.engine import ScoreResult, score
 from ffi.text.document import TextDoc, build_doc, find_auditor
-from ffi.xbrl.facts import FactStore
+from ffi.xbrl.facts import FactStore, load_companyfacts
 
 log = logging.getLogger(__name__)
 
@@ -55,6 +58,7 @@ class RunOptions:
     offline: bool = False
     max_cases: int = 3
     pause_on: tuple[str, ...] = ()
+    keep_artifacts: bool = False  # keep the run's graph database and agent checkpoints after a successful run
 
 
 @dataclass
@@ -171,7 +175,7 @@ def load_docs(client: EdgarClient, cik: int, filings, store_periods: list[pd.Tim
     docs = []
     for f, d in zip(picks, map_concurrent(load, picks, workers=3), strict=True):
         if isinstance(d, Exception):
-            log.warning("10-K text %s unavailable: %s", f.accession, d)
+            log.warning("annual report text %s unavailable: %s", f.accession, d)
         else:
             docs.append(d)
     return docs
@@ -250,8 +254,8 @@ def run(opts: RunOptions, choose=None, progress: Callable[[str], None] | None = 
     with step("Loading filings and events"):
         filings = endpoints.filings_table(client, company.cik)
     with step("Normalizing XBRL facts"):
-        cf = endpoints.companyfacts(client, company.cik)
-        store = FactStore.from_companyfacts(company.cik, cf, as_of)
+        cf = load_companyfacts(client, company.cik)
+        store = FactStore(company.cik, cf.raw, as_of)
         CURRENCY.set(store.currency)  # money in narratives and the report is shown in the reporting currency
         profile = for_company(company.sic, company.annual_form, store.currency, store.taxonomy)
         focus = pick_focus(store, opts.period, as_of)
@@ -259,7 +263,13 @@ def run(opts: RunOptions, choose=None, progress: Callable[[str], None] | None = 
         keep = [p for p in A.values.index if p <= focus][-(opts.years + 3):]
         A.values = A.values.loc[keep]
         A_latest.values = A_latest.values.loc[[p for p in A_latest.values.index if p in keep]]
-        events = load_events(client, company.cik, filings, as_of, focus)
+        # Filing text, earnings releases and events do not depend on the industry data, so they download in the
+        # background while the cross-section and peers are built (all traffic shares one SEC rate limiter).
+        background = ThreadPoolExecutor(max_workers=3, thread_name_prefix="ffi-prefetch")
+        bg = lambda fn, *a: background.submit(contextvars.copy_context().run, fn, *a)  # noqa: E731
+        events_fut = bg(load_events, client, company.cik, filings, as_of, focus)
+        docs_fut = bg(load_docs, client, company.cik, filings, list(A.values.index), focus, as_of)
+        releases_fut = bg(load_releases, client, company.cik, filings, focus, as_of)
 
     run_id = opts.run_id or f"{company.ticker or company.cik}_{store.fiscal_label(focus)}_{uuid.uuid4().hex[:6]}"
     run_dir = Path(opts.out_dir) / run_id
@@ -292,9 +302,11 @@ def run(opts: RunOptions, choose=None, progress: Callable[[str], None] | None = 
         except EdgarError as e:
             log.warning("peer data unavailable: %s", e)
 
-    with step("Parsing 10-K text and earnings releases"):
-        docs = load_docs(client, company.cik, filings, list(A.values.index), focus, as_of)
-        releases = load_releases(client, company.cik, filings, focus, as_of)
+    with step("Reading annual-report text and earnings releases"):
+        try:
+            events, docs, releases = events_fut.result(), docs_fut.result(), releases_fut.result()
+        finally:
+            background.shutdown(wait=False, cancel_futures=True)
         auditor = find_auditor(docs[-1]) if docs else None
 
     llm = None
@@ -344,7 +356,28 @@ def run(opts: RunOptions, choose=None, progress: Callable[[str], None] | None = 
 
         out.files = render(out, opts.formats)
     (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
+    try:
+        snapshot.save(out)  # lets `anomaly-report render` rebuild the report without re-running
+    except Exception as e:  # noqa: BLE001 - the report is already written; only re-rendering is lost
+        log.warning("could not save the run for re-rendering: %s", e)
+    if not opts.keep_artifacts:
+        _remove_working_files(run_dir, kg, agent_cases)
     return out
+
+
+def _remove_working_files(run_dir: Path, kg, cases: list[Any]) -> None:
+    """The graph database and agent checkpoints are only working files once the report is written (4-7 MB per run).
+    Checkpoints are kept when an investigation paused or failed, so `--resume` can continue it."""
+    with contextlib.suppress(Exception):
+        kg.con.close()
+    targets = [run_dir / "kg.duckdb", run_dir / "kg.duckdb.wal"]
+    if not any(isinstance(c, dict) and c.get("status") in ("paused", "error", "running") for c in cases):
+        targets.append(run_dir / "checkpoints.sqlite")
+    for f in targets:
+        try:
+            f.unlink(missing_ok=True)
+        except OSError as e:
+            log.debug("could not remove %s: %s", f, e)
 
 
 def audit_findings(ctx: RunContext, sc: ScoreResult, limit: int = 12) -> None:
@@ -362,7 +395,7 @@ def audit_findings(ctx: RunContext, sc: ScoreResult, limit: int = 12) -> None:
 def build_manifest(ctx: RunContext, results, sc: ScoreResult, run_id: str, opts: RunOptions, timings, kg_counts, cf) -> dict:
     from ffi.detectors.base import REGISTRY
 
-    src_hash = hashlib.sha256(json.dumps(cf, sort_keys=True).encode()).hexdigest()
+    src_hash = cf.sha256  # of the downloaded file (re-serialising the parsed JSON took seconds for large filers)
     return {
         "run_id": run_id,
         "package_version": __version__,

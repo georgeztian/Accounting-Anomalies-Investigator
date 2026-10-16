@@ -1,4 +1,4 @@
-"""Family A: accounting integrity checks (BLUEPRINT §9, Family A). Deterministic; run first."""
+"""Family A: accounting integrity checks. Deterministic; run first."""
 
 from __future__ import annotations
 
@@ -132,10 +132,17 @@ def a05(ctx: RunContext):
     div = div if finite(div) else 0.0
     resid = r1 - (r0 + ni - div)
     bb = ctx.a("BUYBACKS")
+    tw = ctx.a("SHARE_TAX_WITHHELD")
+    # equity outflows that companies may charge (wholly or partly) to retained earnings instead of paid-in capital
+    outflows = (bb if finite(bb) and bb > 0 else 0.0) + (tw if finite(tw) and tw > 0 else 0.0)
     explained = ""
-    if finite(bb) and bb > 0 and resid < 0 and abs(resid + bb) <= 0.35 * bb:
-        explained = " The residual is consistent with share repurchases charged to retained earnings."
-        resid_eff = resid + bb
+    if outflows > 0 and resid < 0 and -resid <= 1.10 * outflows:
+        parts = "share repurchases" + (f" ({fmt_money(bb)})" if finite(bb) and bb > 0 else "")
+        if finite(tw) and tw > 0:
+            parts += f" and taxes paid on net share settlement of stock awards ({fmt_money(tw)})"
+        explained = (f" The difference is within the {parts}, which companies commonly charge in part to retained earnings "
+                     "rather than paid-in capital.")
+        resid_eff = 0.0
     elif div > ni and resid > 0:
         # dividends above earnings are often charged to additional paid-in capital, so retained earnings fall less
         explained = (f" Dividends exceeded net income by {fmt_money(div - ni)}; companies often charge the excess to "
@@ -147,7 +154,7 @@ def a05(ctx: RunContext):
     sev = _residual_severity(resid_eff, base, 0.05, 0.30)
     return [mk("A.05", ctx, raw_value=resid, expected=0.0, severity=sev, unit="USD", scheme=Scheme.REPORTING_INTEGRITY,
                rationale=f"Retained earnings moved {fmt_money(r1 - r0)} vs NI less dividends {fmt_money(ni - div)}; residual {fmt_money(resid)}.{explained}",
-               evidence=ctx.evs(["RETAINED_EARNINGS"], ks=(0, 1)) + ctx.evs(["NET_INCOME", "DIVIDENDS_PAID"], ks=(0,)))]
+               evidence=ctx.evs(["RETAINED_EARNINGS"], ks=(0, 1)) + ctx.evs(["NET_INCOME", "DIVIDENDS_PAID", "BUYBACKS", "SHARE_TAX_WITHHELD"], ks=(0,)))]
 
 
 @detector("A.06", "Quarterly-to-annual consistency", F, Area.INTEGRITY)

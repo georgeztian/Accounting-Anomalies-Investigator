@@ -1,4 +1,4 @@
-"""Read-only, deterministic tools the agent can call (BLUEPRINT §13.6). Python computes every number."""
+"""Read-only, deterministic tools the agent can call. Python computes every number."""
 
 from __future__ import annotations
 

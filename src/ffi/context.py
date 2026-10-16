@@ -1,4 +1,4 @@
-"""RunContext: everything detectors may read for one company-period (BLUEPRINT §3, §8)."""
+"""RunContext: everything detectors may read for one company-period."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Family B: forensic scores and accrual models (BLUEPRINT §9, Family B). Scores are features, not verdicts."""
+"""Family B: forensic scores and accrual models. Scores are features, not verdicts."""
 
 from __future__ import annotations
 

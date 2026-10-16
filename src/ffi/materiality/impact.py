@@ -1,4 +1,4 @@
-"""Quantify financial significance (BLUEPRINT §10.1): statement effects, materiality ratios, SAB 99 flags."""
+"""Quantify financial significance: statement effects, materiality ratios, SAB 99 flags."""
 
 from __future__ import annotations
 

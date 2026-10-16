@@ -1,4 +1,4 @@
-"""Offline training and walk-forward backtest of the supervised misstatement model (D.06; BLUEPRINT §10.3, §15)."""
+"""Offline training and walk-forward backtest of the supervised misstatement model (D.06)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ import pandas as pd
 
 from ffi import __version__
 from ffi.detectors.d_stats import RATIOS, ratio_vector
-from ffi.edgar import endpoints
 from ffi.edgar.client import EdgarClient, EdgarError
 from ffi.models_store import save_model
 from ffi.peers.crosssection import build as build_xsec
@@ -23,10 +22,9 @@ FEATURES = list(RATIOS)
 def features_for(client: EdgarClient, cik: int, fy: int) -> dict[str, float] | None:
     """Ratios for fiscal year `fy`, as first reported and known by April 30 of fy+1 (point in time)."""
     try:
-        cf = endpoints.companyfacts(client, cik)
+        fs = FactStore.load(client, cik, as_of=date(fy + 1, 4, 30))
     except EdgarError:
         return None
-    fs = FactStore.from_companyfacts(cik, cf, as_of=date(fy + 1, 4, 30))
     a = fs.annual("first")
     per = [p for p in a.values.index if p.year == fy or (p.year == fy + 1 and p.month <= 3)]
     if not per:

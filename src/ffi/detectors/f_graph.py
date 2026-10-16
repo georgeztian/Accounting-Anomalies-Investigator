@@ -1,4 +1,4 @@
-"""Family F: graph-native detectors over the knowledge graph (BLUEPRINT §9, Family F)."""
+"""Family F: graph-native detectors over the knowledge graph."""
 
 from __future__ import annotations
 
@@ -30,7 +30,6 @@ def _resolve_counterparty(ctx: RunContext, name: str) -> int | None:
 @detector("F.01", "Counterparty asymmetry", F, Area.RELATED_PARTY, depends_on=("E.09",), needs_llm=True)
 def f01(ctx: RunContext):
     """Sales disclosed to a major customer that is an SEC filer vs that customer's own total cost base."""
-    from ffi.edgar import endpoints
     from ffi.xbrl.facts import FactStore
 
     cust = [(r, loc) for r, loc in ctx.relationships if r.kind == "major_customer"]
@@ -44,10 +43,9 @@ def f01(ctx: RunContext):
         if amt is None or cik is None:
             continue
         try:
-            cf = endpoints.companyfacts(ctx.client, cik)
+            fs = FactStore.load(ctx.client, cik, ctx.as_of)
         except Exception:  # noqa: BLE001
             continue
-        fs = FactStore.from_companyfacts(cik, cf, ctx.as_of)
         a = fs.annual()
         if a.values.empty:
             continue

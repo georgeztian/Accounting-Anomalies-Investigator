@@ -1,4 +1,4 @@
-"""Family D: statistical and ML detectors (BLUEPRINT §9, Family D): find patterns no rule encodes."""
+"""Family D: statistical and ML detectors: find patterns no rule encodes."""
 
 from __future__ import annotations
 
@@ -222,12 +222,44 @@ def _structural_features(gp_margin, turnover, log_assets) -> np.ndarray:
     return np.column_stack([gp_margin, turnover, log_assets])
 
 
+D04_PARAMS = {"n_estimators": 300, "learning_rate": 0.05, "num_leaves": 15, "min_child_samples": 15, "verbose": -1}
+
+
+def _fit_structural(X: np.ndarray, y: np.ndarray, tr: np.ndarray, cal: np.ndarray):
+    """Fit (or load) one structural model and its conformal half-width. Models are cached on disk by a hash of the exact
+    training data, so a re-run on unchanged industry data (most runs) loads them instead of retraining."""
+    import hashlib
+    import json
+
+    import lightgbm as lgb
+
+    from ffi.config import get_settings
+
+    h = hashlib.sha256()
+    for a in (X, y, tr, cal):
+        h.update(np.ascontiguousarray(a).tobytes())
+    h.update(json.dumps(D04_PARAMS, sort_keys=True).encode())
+    path = get_settings().cache_dir / "models" / "d04" / f"{h.hexdigest()[:32]}.json"
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        return lgb.Booster(model_str=saved["model"]), float(saved["q"])
+    except (OSError, ValueError, KeyError, lgb.basic.LightGBMError):
+        pass
+    model = lgb.LGBMRegressor(**D04_PARAMS)
+    model.fit(X[tr], y[tr])
+    q = float(np.quantile(np.abs(y[cal] - model.predict(X[cal])), 0.95))
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"model": model.booster_.model_to_string(), "q": q}), encoding="utf-8")
+    except OSError:
+        pass
+    return model.booster_, q
+
+
 @detector("D.04", "Structural expectation models (conformal)", F, Area.EARNINGS_QUALITY)
 def d04(ctx: RunContext):
     """Gradient-boosted models predict each balance's ratio to its driver from gross margin, asset turnover and size
     across the industry; a dollar gap outside a split-conformal 95% interval is anomalous."""
-    import lightgbm as lgb
-
     if ctx.xsec.empty:
         raise SkipDetector("no cross-section")
     xs = ctx.xsec
@@ -253,9 +285,7 @@ def d04(ctx: RunContext):
         idx = np.random.default_rng(0).permutation(len(d))
         cut = int(len(d) * 0.75)
         tr, cal = idx[:cut], idx[cut:]
-        model = lgb.LGBMRegressor(n_estimators=300, learning_rate=0.05, num_leaves=15, min_child_samples=15, verbose=-1)
-        model.fit(X[tr], y[tr])
-        q = float(np.quantile(np.abs(y[cal] - model.predict(X[cal])), 0.95))
+        model, q = _fit_structural(X, y, tr, cal)
         pred = float(model.predict(x_t)[0])
         resid = float(np.log(mine / drv)) - pred
         exp_usd = float(np.exp(pred) * drv)

@@ -1,4 +1,4 @@
-"""Industry universes from SEC's company-by-SIC listing (BLUEPRINT §7)."""
+"""Industry universes from SEC's company-by-SIC listing."""
 
 from __future__ import annotations
 

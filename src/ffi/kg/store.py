@@ -1,4 +1,4 @@
-"""Embedded knowledge graph: DuckDB tables + NetworkX views, bitemporal (BLUEPRINT §6).
+"""Embedded knowledge graph: DuckDB tables + NetworkX views, bitemporal.
 
 Every node and edge carries `recorded_at` (when it became public / was extracted). All reads go
 through `as_of`, so a run as of a past date cannot see later filings.
@@ -11,7 +11,7 @@ import threading
 from collections.abc import Iterable
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 import duckdb
 import networkx as nx
@@ -45,15 +45,6 @@ CREATE TABLE IF NOT EXISTS edge (
 NODE_COLS = ["id", "type", "label", "props", "valid_from", "valid_to", "recorded_at"]
 EDGE_COLS = ["src", "dst", "type", "props", "valid_from", "valid_to", "recorded_at", "source_accession", "confidence",
              "extractor", "verified"]
-
-
-class GraphStore(Protocol):
-    def upsert_nodes(self, nodes: Iterable[dict[str, Any]]) -> None: ...
-    def upsert_edges(self, edges: Iterable[dict[str, Any]]) -> None: ...
-    def graph(self, edge_types: Iterable[str] | None = None, verified_only: bool = True) -> nx.MultiDiGraph: ...
-    def neighborhood(self, node_id: str, edge_types: Iterable[str] | None = None, hops: int = 1) -> nx.MultiDiGraph: ...
-    def nodes(self, type_: str | None = None) -> pd.DataFrame: ...
-    def edges(self, type_: str | None = None, verified_only: bool = True) -> pd.DataFrame: ...
 
 
 def _ts(v: Any) -> Any:

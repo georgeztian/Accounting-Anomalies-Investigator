@@ -1,9 +1,8 @@
-"""Shared robust statistics for detectors (BLUEPRINT §7: robust z-scores and percentiles)."""
+"""Shared robust statistics for detectors (robust z-scores and percentiles)."""
 
 from __future__ import annotations
 
 import contextvars
-import math
 from collections.abc import Iterable
 
 import numpy as np
@@ -53,18 +52,6 @@ def severity_from_z(z: float, start: float = 1.5, full: float = 4.0) -> float:
     if not np.isfinite(z):
         return 0.0
     return float(np.clip((z - start) / (full - start), 0.0, 1.0))
-
-
-def severity_from_ratio(r: float, start: float, full: float) -> float:
-    if not np.isfinite(r):
-        return 0.0
-    lo, hi = (start, full) if full > start else (full, start)
-    s = (r - start) / (full - start)
-    return float(np.clip(s, 0.0, 1.0)) if lo <= hi else 0.0
-
-
-def logistic(x: float) -> float:
-    return 1.0 / (1.0 + math.exp(-x))
 
 
 CURRENCY: contextvars.ContextVar[str] = contextvars.ContextVar("reporting_currency", default="USD")

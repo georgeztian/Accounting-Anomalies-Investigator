@@ -17,7 +17,6 @@ a finding that still fails is marked unverified and loses weight in the risk ind
 
 from __future__ import annotations
 
-import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -105,7 +104,7 @@ def _allowed_numbers(ctx, finding, ledger: list[dict] | None = None) -> list[flo
         for m in grounding.NUM_RE.finditer(grounding.strip_dates(s.rationale)):  # code-generated detector outputs are a valid source
             vals += [abs(c) for c in grounding._candidates(m)] + grounding._candidates(m)
     for e in ledger or []:
-        vals += e.get("numbers", [])
+        vals += e.get("numbers", []) + grounding.numbers_in(e.get("text", ""))  # incl. amounts in quoted filing text
     return [float(v) for v in vals if v is not None and np.isfinite(v)]
 
 
@@ -166,7 +165,8 @@ def audit_finding(ctx, finding, ledger: list[dict] | None = None) -> list[AuditC
 
     text = finding.narrative or ""
     if text:
-        rep = grounding.check(text, _allowed_numbers(ctx, finding, ledger), list(ctx.docs) + list(ctx.releases))
+        own = [finding.title] + [x for s in finding.signals for x in (s.name, s.rationale)]
+        rep = grounding.check(text, _allowed_numbers(ctx, finding, ledger), list(ctx.docs) + list(ctx.releases), known_text=own)
         st = "pass" if rep.ok else "fail"
         checks.append(AuditCheck("narrative", st, f"{rep.numbers_checked} numbers traced to sources" if rep.ok else
                                  "untraceable: " + ", ".join(rep.unsupported_numbers[:4] + [f'quote "{q}"' for q in rep.unverified_quotes[:2]])))
@@ -252,6 +252,3 @@ def run_audit(ctx, finding, template_narrative, ledger: list[dict] | None = None
             break  # nothing left that can be corrected automatically
     return AuditResult("unverified", rounds)
 
-
-def _label_slug(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")

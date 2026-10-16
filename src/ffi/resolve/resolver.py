@@ -1,4 +1,4 @@
-"""Resolve 'Company Name (TICKER)' to exactly one SEC registrant (BLUEPRINT §4)."""
+"""Resolve 'Company Name (TICKER)' to exactly one SEC registrant."""
 
 from __future__ import annotations
 
@@ -140,8 +140,8 @@ def resolve(text: str, client: EdgarClient, choose=None) -> CompanyRef:
     except ResolutionError as err:
         if "has not filed an annual report" not in str(err):
             raise
-        # A ticker can move to a new registrant (e.g. a holding-company reorganisation) that has no 10-K history yet.
-        # Look for the operating predecessor by name among all EDGAR registrants that file 10-Ks.
+        # A ticker can move to a new registrant (e.g. a holding-company reorganisation) that has no annual report yet.
+        # Look for the operating predecessor by name among EDGAR registrants that file annual reports.
         new_name = endpoints.submissions(client, cik).get("name", "")
         for query in [q for q in (parsed.name, new_name) if q]:
             for alt_cik, alt_name in endpoints.company_search(client, normalize_name(query) or query):
@@ -153,8 +153,8 @@ def resolve(text: str, client: EdgarClient, choose=None) -> CompanyRef:
                     continue
                 ref.ticker = ref.ticker or parsed.ticker or ""
                 ref.display_name = display_name(ref.name, parsed.name)
-                ref.warnings.append(f"{parsed.ticker or query} now belongs to '{new_name}' (CIK {cik}), which has no 10-K history; "
-                                    f"analysing the 10-K filer '{ref.name}' (CIK {alt_cik}).")
+                ref.warnings.append(f"{parsed.ticker or query} now belongs to '{new_name}' (CIK {cik}), which has no annual report yet; "
+                                    f"analysing the predecessor '{ref.name}' (CIK {alt_cik}).")
                 return ref
         raise
 

@@ -1,4 +1,4 @@
-"""Family C: area-specific detectors (BLUEPRINT §9, Family C).
+"""Family C: area-specific detectors.
 
 Most detectors follow one pattern: compute a ratio at the focus year, compare it with the company's
 own history and with peers (robust z-scores), and size the dollar gap

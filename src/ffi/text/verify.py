@@ -9,7 +9,8 @@ from functools import lru_cache
 
 from ffi.text.document import TextDoc
 
-_TRANS = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"', "–": "-", "—": "-",
+# every quote mark becomes one character: a draft may write 'Venture' where the filing has “Venture”
+_TRANS = str.maketrans({"‘": "'", "’": "'", "“": "'", "”": "'", '"': "'", "–": "-", "—": "-",
                         " ": " ", " ": " ", " ": " "})
 
 

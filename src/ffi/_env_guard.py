@@ -1,4 +1,4 @@
-"""Refuse to run outside a Python virtual environment (BLUEPRINT §2.3)."""
+"""Refuse to run outside a Python virtual environment."""
 
 from __future__ import annotations
 
