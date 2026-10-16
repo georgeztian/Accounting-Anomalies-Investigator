@@ -1,0 +1,18 @@
+.venv/
+.cache/
+reports/
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+
+# Not needed to run the program
+tests/
+.github/
+BLUEPRINT.md
+ffi.toml.example
+data/

@@ -1,0 +1,41 @@
+{
+  "version": "0.1.0-2026-10-15",
+  "trained_on": "labels_4_02.csv, 961 firm-years",
+  "features": [
+    "gross_margin",
+    "op_margin",
+    "net_margin",
+    "sga_ratio",
+    "rnd_ratio",
+    "dso",
+    "dsi",
+    "dpo",
+    "asset_turnover",
+    "accruals_ta",
+    "cfo_ni",
+    "capex_da",
+    "dep_rate",
+    "soft_assets",
+    "goodwill_ta",
+    "leverage",
+    "etr",
+    "sbc_ratio",
+    "rev_growth",
+    "ar_growth_less_rev",
+    "inv_growth_less_cogs",
+    "other_ca_rev",
+    "deferred_rev_rev",
+    "interest_rate"
+  ],
+  "base_rate": 0.2518210197710718,
+  "label_source": "see labels CSV 'source' column",
+  "in_sample": {
+    "n": 961,
+    "positives": 242,
+    "roc_auc": 1.0,
+    "pr_auc": 0.9999999999999999,
+    "recall_top_decile": 0.39669421487603307,
+    "base_rate": 0.2518210197710718
+  },
+  "caveat": "8-K 4.02 labels are weak (restated year approximated); case-control sampling inflates the base rate."
+}

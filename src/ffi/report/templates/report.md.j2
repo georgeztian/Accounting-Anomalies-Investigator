@@ -1,0 +1,59 @@
+# {{ m.company.name }} ({{ m.company.ticker }}) — accounting anomaly analysis, {{ m.period }}
+
+Fiscal year ended {{ m.period_end }} · data as of {{ m.as_of }} · CIK {{ m.company.cik }} · run `{{ m.run_id }}` · mode: {{ m.mode }}
+
+> {{ m.disclaimer }}
+
+## Executive summary
+
+**Risk index: {{ "%.0f"|format(m.risk.index) }} / 100 ({{ m.risk.band }})** — a weighted combination of flagged signals and corroborated patterns, not a calibrated probability.
+
+{% for s in m.top_sentences %}{{ loop.index }}. {{ s }}
+{% endfor %}
+| Key figure (as first reported) | {{ m.period }} | Prior year |
+|---|---:|---:|
+{% for k in m.key_numbers %}| {{ k.label }} | {{ k.value }} | {{ k.prior }} |
+{% endfor %}
+
+## Findings
+{% for f in m.findings %}
+### {{ f.rank }}. {{ f.title }}
+
+*Strength {{ "%.2f"|format(f.score) }} · detectors {{ f.detectors|join(', ') }} · narrative: {{ f.narrative_source }}{% if f.audit %} · audit: {{ f.audit.label }}{% endif %}*
+
+{{ f.narrative }}
+
+- **Estimated impact:** {{ f.impact_text }}{% if f.impact %} ({{ f.impact.method|replace('_',' ') }}: {{ f.impact.basis }}){% endif %}
+{% if f.materiality_text %}- **Materiality:** {{ f.materiality_text }}
+{% endif %}{% if f.sab99 %}- **SAB 99:** {{ f.sab99|join('; ') }}
+{% endif %}
+**Evidence**
+
+| Evidence | Source | Value |
+|---|---|---:|
+{% for e in f.evidence %}| {{ e.label }}{% if e.quote %}: “{{ e.quote|replace('|','/')|replace('\n',' ') }}”{% endif %} | {% if e.doc_url %}[{{ e.accession or 'document' }}]({{ e.doc_url }}){% else %}{{ e.kind }}{% endif %} | {{ e.value_fmt or '' }} |
+{% endfor %}
+**Innocent explanations considered:** {{ f.alternatives|join(' ') }}
+
+**Questions:**
+{% for q in f.questions %}- {{ q }}
+{% endfor %}
+{% endfor %}
+## All detector results
+
+{{ m.statuses.ok }} ran · {{ m.statuses.skipped }} skipped · {{ m.statuses.error }} errored.
+{% for fam in m.families %}
+### Family {{ fam.code }} — {{ fam.name }} ({{ fam.flagged }} flagged)
+
+| ID | Detector | Status | Severity | Detail |
+|---|---|---|---:|---|
+{% for r in fam.rows %}| {{ r.id }} | {{ r.name }} | {{ r.status }} | {{ "%.2f"|format(r.severity) if r.severity is not none else '' }} | {{ r.detail|replace('|','/') }} |
+{% endfor %}{% endfor %}
+## Methodology
+
+- Company resolution: {{ m.company.match_note }}
+- Peer set: {{ m.peer_method }}
+- Industry cross-section: {{ m.industry.size }} registrants (SIC {{ m.industry.digits }}-digit)
+- LLM: {% if m.llm %}{{ m.llm.calls }} calls, ${{ "%.2f"|format(m.llm.usd) }}{% else %}not used{% endif %}
+{% for n in m.notes %}- Note: {{ n }}
+{% endfor %}

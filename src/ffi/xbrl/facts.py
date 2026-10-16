@@ -1,0 +1,276 @@
+"""Point-in-time fact store built from SEC companyfacts (BLUEPRINT §5, §6 bitemporal rule).
+
+Every reported value is kept with its filing date. Panels are built "as of" a date and in two
+versions: as-first-reported (what the market saw first) and latest (after any restatement).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import date
+
+import numpy as np
+import pandas as pd
+
+from ffi.xbrl.canonical import BY_ID, CONCEPT_TO_ITEMS
+
+ANNUAL_DAYS = (340, 390)
+QUARTER_DAYS = (80, 100)
+ANNUAL_FORMS = ("10-K", "10-K/A", "10-KT", "10-KT/A", "10-K405")
+DATE_TOL = pd.Timedelta(days=8)
+
+
+def flatten_companyfacts(cf: dict) -> pd.DataFrame:
+    rows: list[tuple] = []
+    for taxonomy, concepts in cf.get("facts", {}).items():
+        for concept, body in concepts.items():
+            if (taxonomy, concept) not in CONCEPT_TO_ITEMS:
+                continue
+            for unit, facts in body.get("units", {}).items():
+                for f in facts:
+                    rows.append(
+                        (taxonomy, concept, unit, f.get("start"), f["end"], f["val"], f["accn"],
+                         f.get("fy"), f.get("fp"), f.get("form", ""), f["filed"], f.get("frame"))
+                    )
+    df = pd.DataFrame(
+        rows,
+        columns=["taxonomy", "concept", "unit", "start", "end", "val", "accn", "fy", "fp", "form", "filed", "frame"],
+    )
+    if df.empty:
+        return df
+    df["start"] = pd.to_datetime(df["start"], errors="coerce")
+    df["end"] = pd.to_datetime(df["end"])
+    df["filed"] = pd.to_datetime(df["filed"])
+    df["val"] = df["val"].astype(float)
+    df["days"] = (df["end"] - df["start"]).dt.days
+    return df
+
+
+def map_canonical(df: pd.DataFrame) -> pd.DataFrame:
+    """Attach canonical item ids (a concept can feed several items) with priority rank."""
+    if df.empty:
+        return df.assign(item=pd.Series(dtype=str), rank=pd.Series(dtype=int))
+    keys = list(zip(df["taxonomy"], df["concept"], strict=True))
+    item_lists = [CONCEPT_TO_ITEMS.get(k, []) for k in keys]
+    df = df.assign(_m=item_lists).explode("_m").dropna(subset=["_m"])
+    df["item"] = df["_m"].map(lambda t: t[0])
+    df["rank"] = df["_m"].map(lambda t: t[1]).astype(int)
+    df = df.drop(columns="_m")
+    units = df["item"].map(lambda i: BY_ID[i].unit)
+    kinds = df["item"].map(lambda i: BY_ID[i].kind)
+    ok_unit = df["unit"] == units
+    ok_kind = np.where(kinds == "D", df["days"].notna(), df["days"].isna())
+    return df[ok_unit & ok_kind].reset_index(drop=True)
+
+
+@dataclass
+class FactRecord:
+    item: str
+    concept: str
+    taxonomy: str
+    unit: str
+    start: pd.Timestamp | None
+    end: pd.Timestamp
+    val: float
+    accn: str
+    form: str
+    filed: pd.Timestamp
+
+    @property
+    def fact_id(self) -> str:
+        s = self.start.date().isoformat() if self.start is not None and not pd.isna(self.start) else ""
+        return f"{self.taxonomy}:{self.concept}|{self.unit}|{s}|{self.end.date().isoformat()}|{self.accn}"
+
+
+@dataclass
+class Panel:
+    """Values by period (rows) x canonical item (columns), plus the fact behind each cell."""
+
+    freq: str  # "A" | "Q"
+    values: pd.DataFrame
+    labels: dict[pd.Timestamp, str]
+    prov: dict[tuple[str, pd.Timestamp], FactRecord] = field(default_factory=dict)
+    derived: set[tuple[str, pd.Timestamp]] = field(default_factory=set)
+
+    def get(self, item: str, period: pd.Timestamp) -> float:
+        if item not in self.values.columns or period not in self.values.index:
+            return float("nan")
+        return float(self.values.at[period, item])
+
+    def series(self, item: str) -> pd.Series:
+        if item not in self.values.columns:
+            return pd.Series(np.nan, index=self.values.index, dtype=float)
+        return self.values[item].astype(float)
+
+    @property
+    def periods(self) -> list[pd.Timestamp]:
+        return list(self.values.index)
+
+    def label(self, period: pd.Timestamp) -> str:
+        return self.labels.get(period, str(period.date()))
+
+
+class FactStore:
+    def __init__(self, cik: int, raw: pd.DataFrame, as_of: date | None = None) -> None:
+        self.cik = cik
+        mapped = map_canonical(raw)
+        if as_of is not None and not mapped.empty:
+            mapped = mapped[mapped["filed"] <= pd.Timestamp(as_of)]
+        self.df = mapped.reset_index(drop=True)
+        self.as_of = as_of
+        self._fye: list[pd.Timestamp] | None = None
+
+    @classmethod
+    def from_companyfacts(cls, cik: int, cf: dict, as_of: date | None = None) -> FactStore:
+        return cls(cik, flatten_companyfacts(cf), as_of)
+
+    # ------------------------------------------------------------------ periods
+    def fiscal_year_ends(self) -> list[pd.Timestamp]:
+        if self._fye is None:
+            d = self.df
+            ann = d[(d["form"].isin(ANNUAL_FORMS)) & d["days"].between(*ANNUAL_DAYS)]
+            ann = ann[ann["item"].isin(["REVENUE", "NET_INCOME", "CFO", "OPERATING_INCOME"])]
+            self._fye = _cluster_dates(sorted(ann["end"].unique()))
+        return self._fye
+
+    def quarter_ends(self) -> list[pd.Timestamp]:
+        d = self.df
+        q = d[d["days"].between(*QUARTER_DAYS) & d["item"].isin(["REVENUE", "NET_INCOME"])]
+        ends = _cluster_dates(sorted(set(q["end"].unique()) | set(self.fiscal_year_ends())))
+        return ends
+
+    def fiscal_label(self, end: pd.Timestamp) -> str:
+        return f"FY{end.year}"
+
+    def quarter_label(self, end: pd.Timestamp) -> str:
+        fyes = list(self.fiscal_year_ends()) or [end]
+        while fyes[-1] < end - DATE_TOL:  # project future fiscal year ends for quarters after the last 10-K
+            fyes.append(fyes[-1] + pd.Timedelta(days=364))
+        fy_end = next(f for f in fyes if f >= end - DATE_TOL)
+        months_before = round((fy_end - end).days / 30.44)
+        q = 4 - int(np.clip(round(months_before / 3), 0, 3))
+        return f"FY{fy_end.year}Q{q}"
+
+    # ------------------------------------------------------------------ selection (vectorized)
+    def _record(self, row) -> FactRecord:
+        start = row.start if not pd.isna(row.start) else None
+        return FactRecord(item=row.item, concept=row.concept, taxonomy=row.taxonomy, unit=row.unit, start=start,
+                          end=row.end, val=float(row.val), accn=row.accn, form=row.form, filed=row.filed)
+
+    @staticmethod
+    def _assign(d: pd.DataFrame, anchors: list[pd.Timestamp]) -> pd.DataFrame:
+        """Attach each row to the nearest anchor date within DATE_TOL (column 'period')."""
+        if d.empty or not anchors:
+            return d.iloc[0:0].assign(period=pd.Series(dtype="datetime64[ns]"))
+        a = np.array(sorted(anchors), dtype="datetime64[ns]")
+        e = d["end"].to_numpy(dtype="datetime64[ns]")
+        i = np.clip(np.searchsorted(a, e), 1, len(a) - 1) if len(a) > 1 else np.zeros(len(e), dtype=int)
+        if len(a) > 1:
+            left, right = a[i - 1], a[i]
+            nearest = np.where(np.abs(e - left) <= np.abs(right - e), left, right)
+        else:
+            nearest = np.repeat(a[0], len(e))
+        ok = np.abs(e - nearest) <= DATE_TOL.to_timedelta64()
+        out = d[ok].copy()
+        out["period"] = pd.to_datetime(nearest[ok])
+        return out
+
+    def _choose(self, d: pd.DataFrame, version: str, extra_sort: list[str] | None = None) -> pd.DataFrame:
+        keys = ["item", "period", "rank"] + (extra_sort or []) + ["filed"]
+        asc = [True, True, True] + [True] * len(extra_sort or []) + [version == "first"]
+        return d.sort_values(keys, ascending=asc).drop_duplicates(["item", "period"], keep="first")
+
+    def _panel(self, freq: str, chosen: pd.DataFrame, anchors: list[pd.Timestamp], labeler) -> Panel:
+        values = chosen.pivot_table(index="period", columns="item", values="val", aggfunc="first")
+        values = values.reindex(sorted(anchors)).astype(float)
+        values.index.name = "period"
+        values.columns.name = None
+        prov = {(r.item, r.period): self._record(r) for r in chosen.itertuples(index=False)}
+        labels = {p: labeler(p) for p in values.index}
+        return Panel(freq, values, labels, prov)
+
+    def annual(self, version: str = "first") -> Panel:
+        fyes = self.fiscal_year_ends()
+        d = self.df
+        kinds = d["item"].map(lambda i: BY_ID[i].kind)
+        stmt = d["item"].map(lambda i: BY_ID[i].statement)
+        is_ann = d["form"].isin(ANNUAL_FORMS)
+        dur = d[(kinds == "D") & (stmt != "DEI") & d["days"].between(*ANNUAL_DAYS) & (is_ann | d["form"].str.startswith("8-K"))]
+        inst = d[(kinds == "I") & (stmt != "DEI")].assign(_pref=(~is_ann).astype(int))
+        parts = [self._choose(self._assign(dur, fyes), version),
+                 self._choose(self._assign(inst, fyes), version, ["_pref"]).drop(columns="_pref")]
+        # cover-page (dei) values: latest-dated value inside each fiscal year window from a 10-K
+        dei = d[(stmt == "DEI") & is_ann]
+        rows = []
+        for fye in fyes:
+            w = dei[(dei["end"] > fye - pd.Timedelta(days=370)) & (dei["end"] <= fye + pd.Timedelta(days=120))]
+            if w.empty:
+                continue
+            w = w[w["end"] == w.groupby("item")["end"].transform("max")].assign(period=fye)
+            rows.append(self._choose(w, version))
+        if rows:
+            parts.append(pd.concat(rows))
+        chosen = pd.concat([p for p in parts if not p.empty]) if any(not p.empty for p in parts) else d.iloc[0:0].assign(period=pd.NaT)
+        return self._panel("A", chosen, fyes, self.fiscal_label)
+
+    def quarterly(self, version: str = "first") -> Panel:
+        qends = self.quarter_ends()
+        fyes = self.fiscal_year_ends()
+        d = self.df
+        kinds = d["item"].map(lambda i: BY_ID[i].kind)
+        stmt = d["item"].map(lambda i: BY_ID[i].statement)
+        dur = d[(kinds == "D") & d["days"].between(*QUARTER_DAYS)]
+        inst = d[(kinds == "I") & (stmt != "DEI")]
+        chosen = pd.concat([self._choose(self._assign(dur, qends), version), self._choose(self._assign(inst, qends), version)])
+        panel = self._panel("Q", chosen, qends, self.quarter_label)
+        # derive Q4 = FY - (Q1 + Q2 + Q3) for flow items where the fiscal-year value exists
+        ann = self.annual(version)
+        vals = panel.values
+        qidx = list(vals.index)
+        for fye in fyes:
+            if fye not in vals.index or fye not in ann.values.index:
+                continue
+            prior = [q for q in qidx if fye - pd.Timedelta(days=380) < q < fye - DATE_TOL][-3:]
+            if len(prior) != 3:
+                continue
+            for item in ann.values.columns:
+                if BY_ID[item].kind != "D" or BY_ID[item].statement == "DEI" or BY_ID[item].unit == "USD/shares":
+                    continue
+                if item in vals.columns and np.isfinite(vals.at[fye, item]):
+                    continue
+                fy = ann.values.at[fye, item]
+                if not np.isfinite(fy) or item not in vals.columns:
+                    continue
+                qs = vals.loc[prior, item]
+                if qs.isna().any():
+                    continue
+                vals.at[fye, item] = float(fy - qs.sum())
+                panel.prov[(item, fye)] = ann.prov[(item, fye)]
+                panel.derived.add((item, fye))
+        return panel
+
+    # ------------------------------------------------------------------ versions
+    def versions(self, freq: str = "A") -> pd.DataFrame:
+        """All distinct reported values per (item, period) with the filing that reported each one."""
+        d = self.df
+        if d.empty:
+            return d
+        rng = ANNUAL_DAYS if freq == "A" else QUARTER_DAYS
+        is_d = d["item"].map(lambda i: BY_ID[i].kind) == "D"
+        sel = d[(~is_d) | d["days"].between(*rng)].copy()
+        if freq == "A":
+            sel = sel[sel["form"].isin(ANNUAL_FORMS)]
+        best = sel.groupby(["item", "end"])["rank"].transform("min")
+        sel = sel[sel["rank"] == best]
+        return sel.sort_values(["item", "end", "filed"]).reset_index(drop=True)
+
+
+def _cluster_dates(dates: list) -> list[pd.Timestamp]:
+    out: list[pd.Timestamp] = []
+    for d in dates:
+        d = pd.Timestamp(d)
+        if out and d - out[-1] <= DATE_TOL:
+            out[-1] = d  # keep the later of near-duplicates (52/53-week calendars)
+        else:
+            out.append(d)
+    return out
