@@ -34,7 +34,10 @@ def a01(ctx: RunContext):
     if finite(le):
         checks.append(("Assets vs Liabilities & equity", ta - le, ["TOTAL_ASSETS", "LIABILITIES_AND_EQUITY"]))
     if finite(tl, eq):
-        checks.append(("Assets vs Liabilities + Equity", ta - (tl + eq), ["TOTAL_ASSETS", "TOTAL_LIABILITIES", "EQUITY"]))
+        temp = ctx.a("TEMPORARY_EQUITY")  # redeemable interests sit between liabilities and equity
+        temp = temp if finite(temp) else 0.0
+        label = "Assets vs Liabilities + redeemable interests + Equity" if temp else "Assets vs Liabilities + Equity"
+        checks.append((label, ta - (tl + temp + eq), ["TOTAL_ASSETS", "TOTAL_LIABILITIES", "TEMPORARY_EQUITY", "EQUITY"]))
     if not checks:
         raise SkipDetector("total liabilities and liabilities-and-equity not reported")
     worst = max(checks, key=lambda c: abs(c[1]))
@@ -101,11 +104,20 @@ def a04(ctx: RunContext):
     base = max(abs(e1), abs(e0), 1.0)
     # employee tax withholding on vesting and other items routinely leave a few percent unexplained
     sev = _residual_severity(resid, base, 0.04, 0.15) * 0.7
+    nci_note = ""
+    nci, incl = ctx.a("NCI"), ctx.a("EQUITY_INCL_NCI")
+    if not finite(nci) and finite(incl):
+        nci = incl - e1  # many filers tag NCI only by class; total equity less the parent's share is the total
+    if finite(nci, incl) and incl > 0 and nci / incl >= 0.2:
+        # partnership (Up-C) structures: unit exchanges move equity between NCI and the parent without cash
+        sev *= 0.5
+        nci_note = (f" Noncontrolling interests are {fmt_pct(nci / incl)} of total equity; exchanges of their units "
+                    "into common stock move equity to the parent without any cash flow.")
     return [mk("A.04", ctx, raw_value=resid, expected=0.0, severity=sev, unit="USD", scheme=Scheme.REPORTING_INTEGRITY,
                rationale=(f"Equity moved {fmt_money(e1 - e0)}; NI, OCI, dividends, buybacks, issuance and SBC explain "
                           f"{fmt_money(expected_end - e0)}. Unexplained {fmt_money(resid)} "
                           f"({fmt_pct(safe_div(resid, base))} of equity). Untagged equity offerings, convertible-note "
-                          "components, warrant exercises and tax withholding on vesting are common causes."),
+                          "components, warrant exercises and tax withholding on vesting are common causes." + nci_note),
                evidence=ctx.evs(["EQUITY"], ks=(0, 1)) + ctx.evs(["NET_INCOME", "BUYBACKS", "DIVIDENDS_PAID"], ks=(0,)))]
 
 
@@ -124,6 +136,11 @@ def a05(ctx: RunContext):
     if finite(bb) and bb > 0 and resid < 0 and abs(resid + bb) <= 0.35 * bb:
         explained = " The residual is consistent with share repurchases charged to retained earnings."
         resid_eff = resid + bb
+    elif div > ni and resid > 0:
+        # dividends above earnings are often charged to additional paid-in capital, so retained earnings fall less
+        explained = (f" Dividends exceeded net income by {fmt_money(div - ni)}; companies often charge the excess to "
+                     "additional paid-in capital, which explains up to that amount.")
+        resid_eff = max(0.0, resid - (div - ni))
     else:
         resid_eff = resid
     base = max(abs(ni), abs(r1) * 0.1, 1.0)
@@ -171,10 +188,14 @@ def a06(ctx: RunContext):
 @detector("A.07", "Income-statement tie-outs", F, Area.INTEGRITY)
 def a07(ctx: RunContext):
     """Pre-tax income - tax = income from continuing operations; EPS x shares = NI."""
-    pt, tax, ico = ctx.a("PRETAX_INCOME"), ctx.a("INCOME_TAX"), ctx.a("INCOME_CONT_OPS")
-    if not finite(ico):
-        ico = ctx.a("NET_INCOME")
-    need(pt, tax, ico)
+    pt, tax = ctx.a("PRETAX_INCOME"), ctx.a("INCOME_TAX")
+    ni, nci = ctx.a("NET_INCOME"), ctx.a("NCI_INCOME")
+    # pre-tax income includes the noncontrolling holders' share, so any after-tax subtotal may tie: continuing
+    # operations, net income including NCI, or the parent's net income plus the NCI share
+    cands = [v for v in (ctx.a("INCOME_CONT_OPS"), ctx.a("NET_INCOME_INCL_NCI"),
+                         ni + nci if finite(ni, nci) else float("nan"), ni) if finite(v)]
+    need(pt, tax, *(cands[:1] or [float("nan")]))
+    ico = min(cands, key=lambda v: abs((pt - tax) - v))
     resid = (pt - tax) - ico
     base = max(abs(pt), 1.0)
     # equity-method income and discontinued ops can legitimately sit between these lines
@@ -369,7 +390,7 @@ def a16(ctx: RunContext):
     if rec is None:
         raise SkipDetector("focus 10-K not identified")
     d = ctx.store.df
-    vals = d[(d["accn"] == rec.accn) & (d["unit"] == "USD")]["val"].abs()
+    vals = d[(d["accn"] == rec.accn) & (d["unit"] == ctx.currency)]["val"].abs()
     vals = vals[vals >= 1e4]
     if len(vals) < 30:
         raise SkipDetector("too few monetary facts")

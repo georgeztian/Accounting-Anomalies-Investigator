@@ -122,7 +122,10 @@ def d02(ctx: RunContext):
     peers = [ratio_vector(p.annual, ctx.peers.aligned_period(p, ctx.focus)) for p in ctx.peers.loaded
              if ctx.peers.aligned_period(p, ctx.focus) is not None]
     rows = []
+    excluded = ctx.profile.excluded_ratios if ctx.profile else set()
     for k, val in mine.items():
+        if k in excluded:
+            continue
         ref = [pr[k] for pr in peers if np.isfinite(pr.get(k, np.nan))]
         if len(ref) < 5 or not np.isfinite(val):
             continue
@@ -162,7 +165,7 @@ def d03(ctx: RunContext):
 
     if not ctx.peers or len(ctx.peers.loaded) < 5:
         raise SkipDetector("needs at least 5 peers")
-    keys = list(RATIOS)
+    keys = [k for k in RATIOS if not ctx.profile or k not in ctx.profile.excluded_ratios]
     pool, labels = [], []
     for p in ctx.peers.loaded:
         for per in list(p.annual.values.index)[-6:]:
@@ -290,7 +293,7 @@ def d05(ctx: RunContext):
     if rec is None:
         raise SkipDetector("focus 10-K not identified")
     d = ctx.store.df
-    vals = d[(d["accn"] == rec.accn) & (d["unit"] == "USD")].drop_duplicates(["concept", "start", "end"])["val"].abs()
+    vals = d[(d["accn"] == rec.accn) & (d["unit"] == ctx.currency)].drop_duplicates(["concept", "start", "end"])["val"].abs()
     vals = vals[vals >= 10]
     if len(vals) < 100:
         raise SkipDetector(f"only {len(vals)} monetary facts; Benford needs 100+")

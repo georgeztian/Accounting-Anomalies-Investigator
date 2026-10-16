@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import math
 from collections.abc import Iterable
 
@@ -66,18 +67,30 @@ def logistic(x: float) -> float:
     return 1.0 / (1.0 + math.exp(-x))
 
 
+CURRENCY: contextvars.ContextVar[str] = contextvars.ContextVar("reporting_currency", default="USD")
+CURRENCY_SYMBOLS = {"USD": "$", "EUR": "€", "GBP": "£", "JPY": "¥", "CNY": "CN¥", "CAD": "C$", "AUD": "A$", "HKD": "HK$",
+                    "INR": "₹", "KRW": "₩", "BRL": "R$", "MXN": "MX$", "TWD": "NT$", "SGD": "S$"}
+
+
+def money_prefix(currency: str | None = None) -> str:
+    cur = currency or CURRENCY.get()
+    return CURRENCY_SYMBOLS.get(cur, f"{cur} ")
+
+
 def fmt_money(v: float | None) -> str:
+    """Amount in the run's reporting currency (set by the pipeline; USD by default)."""
     if v is None or not np.isfinite(v):
         return "n/a"
     a = abs(v)
     sign = "-" if v < 0 else ""
+    c = money_prefix()
     if a >= 1e9:
-        return f"{sign}${a / 1e9:,.2f}B"
+        return f"{sign}{c}{a / 1e9:,.2f}B"
     if a >= 1e6:
-        return f"{sign}${a / 1e6:,.1f}M"
+        return f"{sign}{c}{a / 1e6:,.1f}M"
     if a >= 1e3:
-        return f"{sign}${a / 1e3:,.0f}K"
-    return f"{sign}${a:,.0f}"
+        return f"{sign}{c}{a / 1e3:,.0f}K"
+    return f"{sign}{c}{a:,.0f}"
 
 
 def fmt_pct(v: float | None, digits: int = 1) -> str:

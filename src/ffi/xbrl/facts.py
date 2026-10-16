@@ -16,8 +16,40 @@ from ffi.xbrl.canonical import BY_ID, CONCEPT_TO_ITEMS
 
 ANNUAL_DAYS = (340, 390)
 QUARTER_DAYS = (80, 100)
-ANNUAL_FORMS = ("10-K", "10-K/A", "10-KT", "10-KT/A", "10-K405")
+ANNUAL_FORMS = ("10-K", "10-K/A", "10-KT", "10-KT/A", "10-K405", "20-F", "20-F/A", "40-F", "40-F/A")
 DATE_TOL = pd.Timedelta(days=8)
+CURRENCY_ANCHORS = ("REVENUE", "NET_INCOME", "TOTAL_ASSETS", "EQUITY")
+
+
+FOREIGN_INTERIM_FORMS = ("6-K", "6-K/A")
+
+
+def _anchor_rows(raw: pd.DataFrame) -> pd.Series:
+    anchor_concepts = {(t, c) for (t, c), items in CONCEPT_TO_ITEMS.items() if any(i in CURRENCY_ANCHORS for i, _ in items)}
+    keys = pd.Series(list(zip(raw["taxonomy"], raw["concept"], strict=True)), index=raw.index)
+    return keys.isin(anchor_concepts)
+
+
+def annual_forms_for(raw: pd.DataFrame) -> tuple[str, ...]:
+    """Forms whose full-year facts count as annual statements. Most 40-F filers (and some 20-F filers) attach the
+    XBRL for their audited annual statements to a Form 6-K, so 6-K is accepted when no annual form carries any."""
+    if raw.empty or (_anchor_rows(raw) & raw["form"].isin(ANNUAL_FORMS)).any():
+        return ANNUAL_FORMS
+    return ANNUAL_FORMS + FOREIGN_INTERIM_FORMS
+
+
+def reporting_currency(raw: pd.DataFrame, forms: tuple[str, ...] = ANNUAL_FORMS) -> str:
+    """The currency of the company's own annual statements.
+
+    Foreign issuers report in their home currency, and some add USD 'convenience translations' of the latest
+    year; the currency used for the anchor line items in the most annual reports wins.
+    """
+    if raw.empty:
+        return "USD"
+    d = raw[_anchor_rows(raw) & raw["form"].isin(forms) & raw["unit"].str.fullmatch(r"[A-Z]{3}")]
+    if d.empty:
+        return "USD"
+    return str(d.groupby("unit")["accn"].nunique().sort_values(ascending=False).index[0])
 
 
 def flatten_companyfacts(cf: dict) -> pd.DataFrame:
@@ -46,8 +78,11 @@ def flatten_companyfacts(cf: dict) -> pd.DataFrame:
     return df
 
 
-def map_canonical(df: pd.DataFrame) -> pd.DataFrame:
-    """Attach canonical item ids (a concept can feed several items) with priority rank."""
+def map_canonical(df: pd.DataFrame, currency: str = "USD") -> pd.DataFrame:
+    """Attach canonical item ids (a concept can feed several items) with priority rank.
+
+    Monetary items accept only the reporting currency, so a company's amounts are never mixed across currencies.
+    """
     if df.empty:
         return df.assign(item=pd.Series(dtype=str), rank=pd.Series(dtype=int))
     keys = list(zip(df["taxonomy"], df["concept"], strict=True))
@@ -56,7 +91,7 @@ def map_canonical(df: pd.DataFrame) -> pd.DataFrame:
     df["item"] = df["_m"].map(lambda t: t[0])
     df["rank"] = df["_m"].map(lambda t: t[1]).astype(int)
     df = df.drop(columns="_m")
-    units = df["item"].map(lambda i: BY_ID[i].unit)
+    units = df["item"].map(lambda i: BY_ID[i].unit.replace("USD", currency))
     kinds = df["item"].map(lambda i: BY_ID[i].kind)
     ok_unit = df["unit"] == units
     ok_kind = np.where(kinds == "D", df["days"].notna(), df["days"].isna())
@@ -111,14 +146,18 @@ class Panel:
 
 
 class FactStore:
-    def __init__(self, cik: int, raw: pd.DataFrame, as_of: date | None = None) -> None:
+    def __init__(self, cik: int, raw: pd.DataFrame, as_of: date | None = None, currency: str | None = None) -> None:
         self.cik = cik
-        mapped = map_canonical(raw)
+        self.annual_forms = annual_forms_for(raw)
+        self.currency = currency or reporting_currency(raw, self.annual_forms)
+        mapped = map_canonical(raw, self.currency)
         if as_of is not None and not mapped.empty:
             mapped = mapped[mapped["filed"] <= pd.Timestamp(as_of)]
         self.df = mapped.reset_index(drop=True)
         self.as_of = as_of
         self._fye: list[pd.Timestamp] | None = None
+        counts = self.df["taxonomy"].value_counts() if not self.df.empty else pd.Series(dtype=int)
+        self.taxonomy = "ifrs-full" if counts.get("ifrs-full", 0) > counts.get("us-gaap", 0) else "us-gaap"
 
     @classmethod
     def from_companyfacts(cls, cik: int, cf: dict, as_of: date | None = None) -> FactStore:
@@ -128,7 +167,7 @@ class FactStore:
     def fiscal_year_ends(self) -> list[pd.Timestamp]:
         if self._fye is None:
             d = self.df
-            ann = d[(d["form"].isin(ANNUAL_FORMS)) & d["days"].between(*ANNUAL_DAYS)]
+            ann = d[(d["form"].isin(self.annual_forms)) & d["days"].between(*ANNUAL_DAYS)]
             ann = ann[ann["item"].isin(["REVENUE", "NET_INCOME", "CFO", "OPERATING_INCOME"])]
             self._fye = _cluster_dates(sorted(ann["end"].unique()))
         return self._fye
@@ -194,7 +233,7 @@ class FactStore:
         d = self.df
         kinds = d["item"].map(lambda i: BY_ID[i].kind)
         stmt = d["item"].map(lambda i: BY_ID[i].statement)
-        is_ann = d["form"].isin(ANNUAL_FORMS)
+        is_ann = d["form"].isin(self.annual_forms)
         dur = d[(kinds == "D") & (stmt != "DEI") & d["days"].between(*ANNUAL_DAYS) & (is_ann | d["form"].str.startswith("8-K"))]
         inst = d[(kinds == "I") & (stmt != "DEI")].assign(_pref=(~is_ann).astype(int))
         parts = [self._choose(self._assign(dur, fyes), version),
@@ -259,7 +298,7 @@ class FactStore:
         is_d = d["item"].map(lambda i: BY_ID[i].kind) == "D"
         sel = d[(~is_d) | d["days"].between(*rng)].copy()
         if freq == "A":
-            sel = sel[sel["form"].isin(ANNUAL_FORMS)]
+            sel = sel[sel["form"].isin(self.annual_forms)]
         best = sel.groupby(["item", "end"])["rank"].transform("min")
         sel = sel[sel["rank"] == best]
         return sel.sort_values(["item", "end", "filed"]).reset_index(drop=True)

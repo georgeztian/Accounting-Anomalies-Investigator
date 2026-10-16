@@ -17,7 +17,7 @@ LEGAL_SUFFIXES = {
     "inc", "incorporated", "corp", "corporation", "co", "company", "ltd", "limited", "plc", "llc",
     "lp", "holdings", "holding", "group", "the", "sa", "nv", "ag", "se", "de", "del",
 }
-FINANCIAL_SIC = range(6000, 6800)
+ANNUAL_REPORT_FORMS = {"10-K": ("10-K", "10-K405", "10-KT"), "20-F": ("20-F",), "40-F": ("40-F",)}
 
 
 class ResolutionError(RuntimeError):
@@ -40,6 +40,7 @@ class CompanyRef:
     former_names: list[str] = field(default_factory=list)
     match_note: str = ""
     warnings: list[str] = field(default_factory=list)
+    annual_form: str = "10-K"  # the annual report form the company files: 10-K | 20-F | 40-F
 
 
 @dataclass
@@ -134,7 +135,7 @@ def resolve(text: str, client: EdgarClient, choose=None) -> CompanyRef:
     try:
         return _company_ref(client, cik, tickers, note, warnings)
     except ResolutionError as err:
-        if "fewer than 2 annual reports" not in str(err):
+        if "has not filed an annual report" not in str(err):
             raise
         # A ticker can move to a new registrant (e.g. a holding-company reorganisation) that has no 10-K history yet.
         # Look for the operating predecessor by name among all EDGAR registrants that file 10-Ks.
@@ -191,20 +192,30 @@ def _company_ref(client: EdgarClient, cik: int, tickers: pd.DataFrame, note: str
         match_note=note,
         warnings=warnings,
     )
-    check_eligibility(ref, sub)
+    check_eligibility(ref, sub, client)
     return ref
 
 
-def check_eligibility(ref: CompanyRef, sub: dict) -> None:
-    if ref.sic is not None and ref.sic in FINANCIAL_SIC:
+def annual_report_counts(forms: list[str]) -> dict[str, int]:
+    return {k: sum(1 for f in forms if f in v) for k, v in ANNUAL_REPORT_FORMS.items()}
+
+
+def check_eligibility(ref: CompanyRef, sub: dict, client: EdgarClient | None = None) -> None:
+    """Any company with at least one annual report (10-K, 20-F or 40-F) on EDGAR can be analysed.
+
+    The company type (bank, insurer, REIT, ...) selects a detector profile later; it never blocks a run.
+    """
+    counts = annual_report_counts(sub.get("filings", {}).get("recent", {}).get("form", []))
+    if sum(counts.values()) < 2 and client is not None and sub.get("filings", {}).get("files"):
+        # Prolific filers (large banks issue thousands of prospectus supplements) push older annual reports
+        # out of the 'recent' block; count across the full filing history.
+        counts = annual_report_counts([f.form for f in endpoints.filings_table(client, ref.cik)])
+    total = sum(counts.values())
+    if total == 0:
         raise ResolutionError(
-            f"{ref.name} is a financial company (SIC {ref.sic} {ref.sic_description}). Banks, insurers and "
-            "REITs need dedicated detector profiles that are not in v1.",
-            exit_code=4,
-        )
-    forms = sub.get("filings", {}).get("recent", {}).get("form", [])
-    n10k = sum(1 for f in forms if f in ("10-K", "10-K405", "10-KT"))
-    if n10k < 2:
-        if any(f in ("20-F", "40-F") for f in forms):
-            raise ResolutionError(f"{ref.name} files 20-F/40-F (foreign private issuer); v1 supports 10-K filers.", exit_code=4)
-        raise ResolutionError(f"{ref.name} has fewer than 2 annual reports (10-K) on EDGAR.", exit_code=4)
+            f"{ref.name} has not filed an annual report (10-K, 20-F or 40-F) on EDGAR yet, so there are no audited "
+            "annual financial statements to analyse.", exit_code=4)
+    ref.annual_form = max(counts, key=lambda k: counts[k])
+    if total == 1:
+        ref.warnings.append(f"{ref.name} has filed only one annual report; trend detectors use the prior-year comparatives "
+                            "in that report and many history-based checks will be skipped.")

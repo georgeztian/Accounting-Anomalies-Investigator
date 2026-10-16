@@ -10,6 +10,9 @@ import pandas as pd
 from ffi.detectors.base import Signal
 from ffi.xbrl.canonical import BY_ID, CONCEPT_TO_ITEMS
 
+KG_FORMS = {"10-K", "10-K/A", "10-Q", "10-Q/A", "8-K", "NT 10-K", "NT 10-Q", "CORRESP", "UPLOAD",
+            "20-F", "20-F/A", "40-F", "40-F/A", "NT 20-F"}
+
 # MD&A / note paragraphs that discuss a line item AND a change create EXPLAINS edges (rule-based extractor).
 ITEM_KEYWORDS: dict[str, str] = {
     "REVENUE": r"\b(?:net sales|revenues?)\b",
@@ -53,7 +56,7 @@ def build(ctx) -> dict[str, int]:
     # ---- filings in the analysis window
     lo = ctx.focus - pd.Timedelta(days=6 * 366)
     for f in ctx.filings:
-        if pd.Timestamp(f.filing_date) < lo or f.form not in ("10-K", "10-K/A", "10-Q", "10-Q/A", "8-K", "NT 10-K", "NT 10-Q", "CORRESP", "UPLOAD"):
+        if pd.Timestamp(f.filing_date) < lo or f.form not in KG_FORMS:
             continue
         fid = f"filing:{f.accession}"
         nodes.append({"id": fid, "type": "Filing", "label": f"{f.form} {f.filing_date}", "recorded_at": _ts(f.filing_date),

@@ -62,7 +62,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-sp
 .pill { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 99px; border: 1px solid var(--border); white-space: nowrap; }
 .pill.flagged { border-color: var(--serious); color: var(--text-primary); }
 .pill.flagged::before { content: "▲ "; color: var(--serious); }
-.pill.suppressed { color: var(--text-muted); } .pill.skipped, .pill.error { color: var(--text-muted); }
+.pill.suppressed { color: var(--text-muted); } .pill.skipped, .pill.error, .pill.na { color: var(--text-muted); }
 .pill.error::before { content: "! "; color: var(--critical); }
 .heat { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
 .heat div { border-radius: 6px; padding: 8px 10px; font-size: 13px; background: var(--surface-2); }
@@ -112,6 +112,7 @@ nav.toc { font-size: 13.5px; } nav.toc a { margin-right: 14px; white-space: nowr
   <h1>{{ m.company.name }} ({{ m.company.ticker }})</h1>
   <div class="muted">CIK {{ m.company.cik }} · SIC {{ m.company.sic }} {{ m.company.sic_description }}{% if m.company.auditor %} · Auditor: {{ m.company.auditor }}{% endif %} · Run {{ m.run_id }} · Generated {{ m.generated }} · ffi {{ m.version }} · mode: {{ m.mode }}</div>
   {% for w in m.company.warnings %}<p class="muted">⚠ {{ w }}</p>{% endfor %}
+  {% if m.profile %}<p class="muted">Company profile: <strong>{{ m.profile.label }}</strong> · annual report form {{ m.annual_form }} · amounts in {{ m.currency }}{% if m.profile.excluded %} · {{ m.profile.excluded }} detectors not applicable to this profile{% endif %}</p>{% endif %}
   <nav class="toc" aria-label="Sections"><a href="#summary">Summary</a><a href="#dashboard">Dashboard</a><a href="#findings">Findings</a><a href="#detectors">All detectors</a><a href="#text">Disclosure changes</a><a href="#quality">Data quality</a><a href="#method">Methodology</a></nav>
 </header>
 
@@ -151,8 +152,8 @@ nav.toc { font-size: 13.5px; } nav.toc a { margin-right: 14px; white-space: nowr
   <p class="muted">Highest flagged severity per accounting area (0 = nothing flagged).</p>
   <div class="heat">{% for a in m.areas %}{% set lvl = 0 if a.score < 0.01 else (1 if a.score < 0.3 else (2 if a.score < 0.5 else (3 if a.score < 0.7 else (4 if a.score < 0.85 else 5)))) %}<div class="l{{ lvl }}" title="{{ a.area }}: {{ a.score }}">{{ a.area|replace('_',' ') }}<b>{{ "%.2f"|format(a.score) }}</b></div>{% endfor %}</div>
 </div>
-<div class="card">{{ m.charts.earnings_cash|safe }}<p class="muted">Persistent gaps between earnings and operating cash flow are the most common footprint of aggressive accruals.</p></div>
-<div class="card">{{ m.charts.scores|safe }}<p class="muted">Published cut-offs are reference points from the original studies, not verdicts; peer position matters more.</p></div>
+{% if m.charts.earnings_cash %}<div class="card">{{ m.charts.earnings_cash|safe }}<p class="muted">Persistent gaps between earnings and operating cash flow are the most common footprint of aggressive accruals.</p></div>{% endif %}
+{% if m.charts.scores %}<div class="card">{{ m.charts.scores|safe }}<p class="muted">Published cut-offs are reference points from the original studies, not verdicts; peer position matters more.</p></div>{% endif %}
 {% if m.pressure %}<div class="card"><h3>Pressure and governance context</h3><ul class="tight">{% for p in m.pressure %}<li><strong>{{ p.id }} {{ p.name }}:</strong> {{ p.rationale }}</li>{% endfor %}</ul></div>{% endif %}
 </section>
 
@@ -197,11 +198,11 @@ nav.toc { font-size: 13.5px; } nav.toc a { margin-right: 14px; white-space: nowr
 
 <section id="detectors">
 <h2>All detector results</h2>
-<p class="muted">{{ m.statuses.ok }} detectors ran, {{ m.statuses.skipped }} were skipped (with reasons), {{ m.statuses.error }} errored. Severity is 0-1; flagged at 0.5 unless noted.</p>
+<p class="muted">{{ m.statuses.ok }} detectors ran, {{ m.statuses.skipped }} were skipped for missing data (with reasons), {{ m.statuses['n/a'] }} do not apply to this company profile, {{ m.statuses.error }} errored. Severity is 0-1; flagged at 0.5 unless noted.</p>
 {% for fam in m.families %}
 <details class="card" {% if fam.flagged %}open{% endif %}><summary><strong>Family {{ fam.code }} · {{ fam.name }}</strong> - {{ fam.flagged }} flagged of {{ fam.ran }} that ran</summary>
 <div class="tablewrap"><table><thead><tr><th>ID</th><th>Detector</th><th>Status</th><th class="num">Severity</th><th class="num">Peer pctl</th><th>Detail</th></tr></thead><tbody>
-{% for r in fam.rows %}<tr><td>{{ r.id }}</td><td>{{ r.name }}{% if r.period %}<div class="muted">{{ r.period }}</div>{% endif %}</td><td><span class="pill {{ r.status }}">{{ r.status }}</span></td>
+{% for r in fam.rows %}<tr><td>{{ r.id }}</td><td>{{ r.name }}{% if r.period %}<div class="muted">{{ r.period }}</div>{% endif %}</td><td><span class="pill {{ r.status|replace('/', '') }}">{{ r.status }}</span></td>
 <td class="num">{{ "%.2f"|format(r.severity) if r.severity is not none else '' }}</td><td class="num">{{ r.pct_peer if r.pct_peer is not none else '' }}</td><td>{{ r.detail }}</td></tr>{% endfor %}
 </tbody></table></div></details>
 {% endfor %}
@@ -226,6 +227,7 @@ nav.toc { font-size: 13.5px; } nav.toc a { margin-right: 14px; white-space: nowr
 <div class="card">
 <dl class="kv">
   <dt>Company resolution</dt><dd>{{ m.company.match_note }}</dd>
+  {% if m.profile %}<dt>Company profile</dt><dd>{{ m.profile.label }}: {{ m.profile.description }}{% for n in m.profile.notes %} {{ n }}{% endfor %}</dd>{% endif %}
   <dt>Point in time</dt><dd>Only filings public on or before {{ m.as_of }} were used; the company's own numbers are as first reported.</dd>
   <dt>Peer set</dt><dd>{{ m.peer_method }}. Industry cross-section: {{ m.industry.size }} registrants at the {{ m.industry.digits }}-digit SIC level (XBRL frames; frames carry latest values).</dd>
   <dt>Knowledge graph</dt><dd>{% for k, v in m.kg.items() %}{{ k }}: {{ v }}{{ ', ' if not loop.last }}{% endfor %}</dd>

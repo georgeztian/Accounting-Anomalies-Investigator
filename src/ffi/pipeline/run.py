@@ -19,6 +19,7 @@ import pandas as pd
 from ffi import __version__
 from ffi.config import get_settings, get_tuning
 from ffi.context import Event, RunContext
+from ffi.detectors.stats import CURRENCY
 from ffi.edgar import endpoints
 from ffi.edgar.client import EdgarClient, EdgarError
 from ffi.kg import build as kg_build
@@ -28,6 +29,7 @@ from ffi.peers.crosssection import calendar_year_of
 from ffi.peers.select import PeerSet, select_peers
 from ffi.peers.universe import expanding_universe
 from ffi.pipeline.detect import DetectorResult, run_detectors
+from ffi.profiles import for_company
 from ffi.resolve.resolver import CompanyRef, resolve
 from ffi.scoring.engine import ScoreResult, score
 from ffi.text.document import TextDoc, build_doc, find_auditor
@@ -100,10 +102,10 @@ def load_events(client: EdgarClient, cik: int, filings, as_of: date, focus: pd.T
         if not (lo <= f.filing_date <= as_of):
             continue
         url = endpoints.document_url(cik, f)
-        if f.form in ("NT 10-K", "NT 10-Q"):
+        if f.form in ("NT 10-K", "NT 10-Q", "NT 20-F"):
             out.append(Event(f"{f.accession}:late", "LATE_FILING", f.filing_date, f.accession, f"{f.form} notification of late filing", url))
-        elif f.form == "10-K/A":
-            out.append(Event(f"{f.accession}:amend", "AMENDED_10K", f.filing_date, f.accession, "Amended annual report (10-K/A)", url))
+        elif f.form in ("10-K/A", "20-F/A", "40-F/A"):
+            out.append(Event(f"{f.accession}:amend", "AMENDED_10K", f.filing_date, f.accession, f"Amended annual report ({f.form})", url))
         elif f.form == "8-K":
             for item, etype in EVENT_ITEMS.items():
                 if item in (f.items or "").split(","):
@@ -145,7 +147,7 @@ def _officer_change_kind(raw_html: str) -> str:
 def load_docs(client: EdgarClient, cik: int, filings, store_periods: list[pd.Timestamp], focus: pd.Timestamp, as_of: date, n: int = 3) -> list[TextDoc]:
     from ffi.concurrency import map_concurrent
 
-    tenks = [f for f in filings if f.form in ("10-K", "10-KT") and f.filing_date <= as_of and f.report_date]
+    tenks = [f for f in filings if f.form in ANNUAL_TEXT_FORMS and f.filing_date <= as_of and f.report_date]
     wanted = [p for p in store_periods if p <= focus][-n:]
     picks = []
     for p in wanted:
@@ -155,7 +157,16 @@ def load_docs(client: EdgarClient, cik: int, filings, store_periods: list[pd.Tim
 
     def load(f):
         url = endpoints.document_url(cik, f)
-        return build_doc(f.accession, f.form, str(f.report_date), url, client.get_text(url))
+        raw = client.get_text(url)
+        if f.form == "40-F":  # the AIF, MD&A and audited statements are exhibits to the 40-F cover document
+            return build_doc(f.accession, f.form, str(f.report_date), url, raw, _exhibits(client, cik, f, EXHIBITS_40F))
+        doc = build_doc(f.accession, f.form, str(f.report_date), url, raw)
+        if f.form.startswith("10-K") and len(doc.section_paragraphs("item7")) < 20:
+            # MD&A and the statements incorporated by reference from the annual report to shareholders (Exhibit 13)
+            appendix = _exhibits(client, cik, f, EXHIBITS_10K)
+            if appendix:
+                doc = build_doc(f.accession, f.form, str(f.report_date), url, raw, appendix)
+        return doc
 
     docs = []
     for f, d in zip(picks, map_concurrent(load, picks, workers=3), strict=True):
@@ -164,6 +175,35 @@ def load_docs(client: EdgarClient, cik: int, filings, store_periods: list[pd.Tim
         else:
             docs.append(d)
     return docs
+
+
+ANNUAL_TEXT_FORMS = ("10-K", "10-KT", "20-F", "40-F")
+# (exhibit type prefix, pattern on description or file name, synthetic 10-K section header)
+EXHIBITS_10K = [("EX-13", r"", "Item 7. Management Discussion and Analysis (Exhibit 13 annual report)")]
+EXHIBITS_40F = [
+    ("EX-99", r"annual information form|\baif\b", "Item 1. Business (Annual Information Form)"),
+    ("EX-99", r"management.?s discussion|md&a|\bmda\b", "Item 7. Management Discussion and Analysis"),
+    ("EX-99", r"financial statements|financial report", "Item 8. Financial Statements"),
+]
+
+
+def _exhibits(client: EdgarClient, cik: int, f, wanted: list[tuple[str, str, str]]) -> list[tuple[str, str]]:
+    """Fetch the annual-report exhibits of a filing as (synthetic section header, HTML) pairs."""
+    try:
+        rows = endpoints.filing_index(client, cik, f)
+    except EdgarError:
+        return []
+    out: list[tuple[str, str]] = []
+    for prefix, pat, header in wanted:
+        row = next((r for r in rows if r["type"].upper().startswith(prefix) and r["document"].lower().endswith((".htm", ".html"))
+                    and re.search(pat, f"{r['description']} {r['document']}", re.I)), None)
+        if row is None:
+            continue
+        try:
+            out.append((header, client.get_text(endpoints.document_url(cik, f, row["document"]))))
+        except EdgarError as e:
+            log.warning("exhibit %s of %s unavailable: %s", row["document"], f.accession, e)
+    return out
 
 
 def load_releases(client: EdgarClient, cik: int, filings, focus: pd.Timestamp, as_of: date, n: int = 6) -> list[TextDoc]:
@@ -186,7 +226,7 @@ def load_releases(client: EdgarClient, cik: int, filings, focus: pd.Timestamp, a
 def pick_focus(store: FactStore, period: str | None, as_of: date) -> pd.Timestamp:
     fyes = [p for p in store.fiscal_year_ends()]
     if not fyes:
-        raise ValueError("no annual (10-K) financial data found")
+        raise ValueError("no annual financial data (10-K, 20-F or 40-F XBRL) found for this company")
     if period:
         want = period.upper().replace(" ", "")
         for p in fyes:
@@ -212,6 +252,8 @@ def run(opts: RunOptions, choose=None, progress: Callable[[str], None] | None = 
     with step("Normalizing XBRL facts"):
         cf = endpoints.companyfacts(client, company.cik)
         store = FactStore.from_companyfacts(company.cik, cf, as_of)
+        CURRENCY.set(store.currency)  # money in narratives and the report is shown in the reporting currency
+        profile = for_company(company.sic, company.annual_form, store.currency, store.taxonomy)
         focus = pick_focus(store, opts.period, as_of)
         A, A_latest, Q = store.annual("first"), store.annual("latest"), store.quarterly("first")
         keep = [p for p in A.values.index if p <= focus][-(opts.years + 3):]
@@ -240,8 +282,13 @@ def run(opts: RunOptions, choose=None, progress: Callable[[str], None] | None = 
                     tick = endpoints.company_tickers(client)
                     override = [int(tick.loc[tick["ticker"] == t.strip().upper(), "cik"].iloc[0]) for t in opts.peers
                                 if (tick["ticker"] == t.strip().upper()).any()]
+                own = {k: A.get(k, focus) for k in ("REVENUE", "NET_INCOME", "CFO", "COGS", "SGA", "OPERATING_INCOME",
+                                                     "GROSS_PROFIT", "TOTAL_ASSETS", "AR", "PPE_NET", "INVENTORY")}
+                prior = A.periods[-2] if len(A.periods) > 1 else None
+                own["REV_PRIOR"] = A.get("REVENUE", prior) if prior is not None else float("nan")
                 peers = select_peers(client, company.cik, sorted(industry), digits,
-                                     xsec[xsec["cik"].isin(industry)], focus, tuning["peers"]["count"], as_of, override)
+                                     xsec[xsec["cik"].isin(industry)], focus, tuning["peers"]["count"], as_of, override,
+                                     target_row=own, size_comparable=store.currency == "USD")
         except EdgarError as e:
             log.warning("peer data unavailable: %s", e)
 
@@ -264,7 +311,7 @@ def run(opts: RunOptions, choose=None, progress: Callable[[str], None] | None = 
     ctx = RunContext(company=company, store=store, A=A, A_latest=A_latest, Q=Q, filings=filings, focus=focus, as_of=as_of,
                      kg=kg, peers=peers, xsec=xsec, industry_ciks=industry, industry_digits=digits, docs=docs, releases=releases,
                      events=events, auditor=auditor, llm=llm, mode=opts.mode if llm else "deterministic", tuning=tuning,
-                     notes=notes, client=client)
+                     notes=notes, client=client, profile=profile, currency=store.currency, annual_form=company.annual_form)
 
     with step("Building knowledge graph"):
         kg_counts = kg_build.build(ctx)
@@ -316,7 +363,10 @@ def build_manifest(ctx: RunContext, results, sc: ScoreResult, run_id: str, opts:
         "run_id": run_id,
         "package_version": __version__,
         "company": {"cik": ctx.company.cik, "ticker": ctx.company.ticker, "name": ctx.company.name, "sic": ctx.company.sic,
-                    "resolution": ctx.company.match_note, "warnings": ctx.company.warnings},
+                    "resolution": ctx.company.match_note, "warnings": ctx.company.warnings,
+                    "annual_form": ctx.annual_form, "currency": ctx.currency},
+        "profile": ({"key": ctx.profile.key, "label": ctx.profile.label, "not_applicable": ctx.profile.excluded,
+                     "excluded_ratios": sorted(ctx.profile.excluded_ratios)} if ctx.profile else None),
         "focus_period": ctx.focus_label, "focus_end": str(ctx.focus.date()), "as_of": str(ctx.as_of),
         "options": {k: (str(v) if isinstance(v, Path | date) else v) for k, v in opts.__dict__.items()},
         "mode": ctx.mode,

@@ -70,7 +70,12 @@ def select_peers(
     as_of: date | None,
     override: list[int] | None = None,
     names: dict[int, str] | None = None,
+    target_row: dict[str, float] | None = None,
+    size_comparable: bool = True,
 ) -> PeerSet:
+    """`target_row` supplies the company's own metrics when it is missing from the frames cross-section (IFRS or
+    non-USD filers, or revenue tagged with a concept the frames do not sample). Without `size_comparable`
+    (amounts in another currency) peers are matched on margins and growth only."""
     names = names or {}
     if override:
         chosen = [(c, 0.0) for c in override if c != target_cik]
@@ -79,13 +84,21 @@ def select_peers(
         year = calendar_year_of(focus_fye)
         cur = xsec[xsec["year"] == year].set_index("cik")
         prev = xsec[xsec["year"] == year - 1].set_index("cik")
-        if cur.empty or target_cik not in cur.index:
+        if (cur.empty or target_cik not in cur.index) and not (target_row and not cur.empty):
             year -= 1
             cur, prev = prev, xsec[xsec["year"] == year - 1].set_index("cik")
         cur = cur.copy()
         cur["REV_PRIOR"] = prev["REVENUE"].reindex(cur.index)
+        own = ""
+        if target_cik not in cur.index and target_row:
+            row = pd.DataFrame([target_row], index=pd.Index([target_cik], name=cur.index.name))
+            cur = pd.concat([cur, row.reindex(columns=cur.columns)])
+            own = "; company metrics from its own filings"
         cur = cur[cur["REVENUE"].notna() & cur["TOTAL_ASSETS"].notna() & (cur["REVENUE"] > 0)]
         feats = _features(cur).replace([np.inf, -np.inf], np.nan)
+        if not size_comparable:
+            feats = feats.drop(columns=["log_rev", "log_assets"])
+            own += "; size not compared (different reporting currency)"
         feats = feats.fillna(feats.median())
         if target_cik not in feats.index or len(feats) < 3:
             return PeerSet([], sic_digits, len(universe), "insufficient frames data", ["No peer metrics available."])
@@ -94,7 +107,8 @@ def select_peers(
         w = weights.reindex(z.columns).fillna(1.0)
         d = np.sqrt((((z - z.loc[target_cik]) ** 2) * w).sum(axis=1)).drop(target_cik)
         chosen = list(d.nsmallest(k).items())
-        method = f"nearest {k} of {len(d)} SIC-{sic_digits} filers on size, margins and growth (CY{year})"
+        basis = "size, margins and growth" if size_comparable else "margins and growth"
+        method = f"nearest {k} of {len(d)} SIC-{sic_digits} filers on {basis} (CY{year}){own}"
     from ffi.concurrency import map_concurrent
 
     def load(item: tuple[int, float]) -> Peer:

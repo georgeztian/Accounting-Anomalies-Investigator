@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -97,7 +98,8 @@ def investigate(ctx, score, run_dir: Path, run_id: str, opts, ui: TerminalUI | N
                 if case["status"] == "paused":
                     break
         else:
+            jobs = [(contextvars.copy_context(), f) for f in targets]  # keep per-run settings (currency) in worker threads
             with ThreadPoolExecutor(max_workers=min(3, len(targets))) as pool:
-                cases = list(pool.map(lambda f: _run_case(ctx, f, saver, run_id, ui), targets))
+                cases = list(pool.map(lambda job: job[0].run(_run_case, ctx, job[1], saver, run_id, ui), jobs))
     score.findings.sort(key=lambda x: -x.priority)
     return cases

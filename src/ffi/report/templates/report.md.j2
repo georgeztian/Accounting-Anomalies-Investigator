@@ -1,6 +1,11 @@
 # {{ m.company.name }} ({{ m.company.ticker }}) — accounting anomaly analysis, {{ m.period }}
 
 Fiscal year ended {{ m.period_end }} · data as of {{ m.as_of }} · CIK {{ m.company.cik }} · run `{{ m.run_id }}` · mode: {{ m.mode }}
+{% if m.profile %}
+Company profile: **{{ m.profile.label }}** · annual report form {{ m.annual_form }} · amounts in {{ m.currency }}
+{% endif %}{% for w in m.company.warnings %}
+> ⚠ {{ w }}
+{% endfor %}
 
 > {{ m.disclaimer }}
 
@@ -41,7 +46,7 @@ Fiscal year ended {{ m.period_end }} · data as of {{ m.as_of }} · CIK {{ m.com
 {% endfor %}
 ## All detector results
 
-{{ m.statuses.ok }} ran · {{ m.statuses.skipped }} skipped · {{ m.statuses.error }} errored.
+{{ m.statuses.ok }} ran · {{ m.statuses.skipped }} skipped (missing data) · {{ m.statuses['n/a'] }} not applicable to this profile · {{ m.statuses.error }} errored.
 {% for fam in m.families %}
 ### Family {{ fam.code }} — {{ fam.name }} ({{ fam.flagged }} flagged)
 
@@ -52,6 +57,8 @@ Fiscal year ended {{ m.period_end }} · data as of {{ m.as_of }} · CIK {{ m.com
 ## Methodology
 
 - Company resolution: {{ m.company.match_note }}
+{% if m.profile %}- Company profile: {{ m.profile.label }}. {{ m.profile.description }}{% for n in m.profile.notes %} {{ n }}{% endfor %}
+{% endif %}
 - Peer set: {{ m.peer_method }}
 - Industry cross-section: {{ m.industry.size }} registrants (SIC {{ m.industry.digits }}-digit)
 - LLM: {% if m.llm %}{{ m.llm.calls }} calls, ${{ "%.2f"|format(m.llm.usd) }}{% else %}not used{% endif %}

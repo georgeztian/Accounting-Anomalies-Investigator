@@ -11,6 +11,7 @@ import re
 from typing import Literal
 
 import numpy as np
+import pandas as pd
 from pydantic import BaseModel, Field
 
 from ffi.context import RunContext
@@ -255,6 +256,28 @@ def e11(ctx: RunContext):
     raise SkipDetector("no earnings-call transcripts supplied")
 
 
+RELEASE_ITEMS = {"REVENUE": ("REVENUE",),
+                 # releases quote net income attributable to the parent, including NCI, or available to common holders
+                 "NET_INCOME": ("NET_INCOME", "NET_INCOME_INCL_NCI", "NET_INCOME_TO_COMMON")}
+
+
+def _release_period_totals(ctx: RunContext, released: pd.Timestamp) -> dict[str, list[float]] | None:
+    """Reported totals for the quarter a release announces (the latest quarter ending within 120 days before it),
+    plus the fiscal year when that quarter closes one. None when that quarter has not been filed in XBRL."""
+    qs = [p for p in ctx.Q.periods if released - pd.Timedelta(days=120) <= p <= released]
+    if not qs:
+        return None
+    q = qs[-1]
+    fy = next((p for p in ctx.A.periods if abs((p - q).days) <= 8), None)
+    out: dict[str, list[float]] = {}
+    for key, items in RELEASE_ITEMS.items():
+        if key == "REVENUE" and ctx.profile is not None and ctx.profile.key == "bank":
+            continue  # banks headline revenue on a managed (taxable-equivalent) basis, a non-GAAP figure
+        vals = [ctx.Q.get(i, q) for i in items] + ([ctx.A.get(i, fy) for i in items] if fy is not None else [])
+        out[key] = [v for v in vals if finite(v)]
+    return out if any(out.values()) else None
+
+
 @detector("E.12", "Earnings release vs filing", F, Area.INTEGRITY)
 def e12(ctx: RunContext):
     """Company-wide revenue / net income in 8-K Ex. 99 earnings releases vs the later 10-Q/10-K XBRL totals."""
@@ -262,15 +285,18 @@ def e12(ctx: RunContext):
 
     if not ctx.releases:
         raise SkipDetector("no earnings releases fetched")
-    known = {item: [v for v in ctx.Q.series(item).tail(8).tolist() + ctx.A.series(item).tail(3).tolist() if finite(v)]
-             for item in ("REVENUE", "NET_INCOME")}
-    checked, bad = 0, []
+    checked, bad, used = 0, [], 0
     for rel in ctx.releases[-4:]:
+        known = _release_period_totals(ctx, pd.Timestamp(rel.period_end))
+        if known is None:
+            continue  # the quarter this release reports is not in the XBRL filed by the as-of date
+        used += 1
         c, b = check_amounts(rel.text[:20000], known, quarter_ok=True)
         checked += c
         bad += [(rel, x) for x in b]
     if checked == 0:
-        raise SkipDetector("no company-wide revenue / net income totals in a recognisable form in the releases")
+        raise SkipDetector("no company-wide revenue / net income totals in a recognisable form in the releases"
+                           if used else "the quarters these releases report are not yet in filed XBRL")
     sev = min(1.0, 0.4 * len(bad))
     ev = []
     for rel, x in bad[:3]:

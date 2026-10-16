@@ -15,8 +15,10 @@ import pandas as pd
 from ffi.edgar import endpoints
 from ffi.edgar.client import EdgarClient
 
+XSEC_VERSION = 2  # bump when the concept lists change, so cached cross-sections are rebuilt
 DURATION_CONCEPTS: dict[str, tuple[str, ...]] = {
-    "REVENUE": ("Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet"),
+    "REVENUE": ("Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet",
+                "RevenuesNetOfInterestExpense"),  # last: banks and card issuers report revenue net of interest expense
     "NET_INCOME": ("NetIncomeLoss",),
     "CFO": ("NetCashProvidedByUsedInOperatingActivities",),
     "COGS": ("CostOfRevenue", "CostOfGoodsAndServicesSold", "CostOfGoodsSold"),
@@ -68,7 +70,7 @@ def build(client: EdgarClient, ciks: list[int] | None, years: list[int], max_age
     if ciks is None:
         import time
 
-        path = client.cache_dir.parent / "xsec" / f"xsec_{'_'.join(map(str, sorted(years)))}.parquet"
+        path = client.cache_dir.parent / "xsec" / f"xsec_v{XSEC_VERSION}_{'_'.join(map(str, sorted(years)))}.parquet"
         if path.exists() and (client.offline or time.time() - path.stat().st_mtime < max_age_days * 86400):
             return pd.read_parquet(path)
         df = _build(client, None, years)

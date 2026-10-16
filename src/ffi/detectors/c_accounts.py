@@ -1117,13 +1117,22 @@ def cgov01(ctx: RunContext):
 
 @detector("C.GOV.02", "Non-reliance / restatement filings", F, Area.GOVERNANCE)
 def cgov02(ctx: RunContext):
-    """8-K Item 4.02 non-reliance and 10-K/A amendments within three years."""
+    """8-K Item 4.02 non-reliance and annual-report amendments (10-K/A, 20-F/A, 40-F/A) within three years.
+
+    Amendments filed on the same day are one action (issuers sometimes amend several years at once), and an
+    amendment that re-files financial statements carries XBRL financial data; exhibit-only and Part III
+    amendments do not and are routine."""
     nr = ctx.events_of("NON_RELIANCE", within_days=1095)
     am = ctx.events_of("AMENDED_10K", within_days=1095)
-    sev = min(1.0, 0.8 * len(nr) + 0.2 * len(am))
-    return [mk("C.GOV.02", ctx, raw_value=len(nr) + len(am), severity=sev, unit="events", tags=["pressure"],
+    fin_accns = set(ctx.store.df["accn"]) if not ctx.store.df.empty else set()
+    fin_days = {e.date for e in am if e.accession in fin_accns}
+    other_days = {e.date for e in am} - fin_days
+    sev = min(1.0, 0.8 * len(nr) + 0.35 * len(fin_days) + 0.1 * len(other_days))
+    return [mk("C.GOV.02", ctx, raw_value=len(nr) + len(fin_days) + len(other_days), severity=sev, unit="events", tags=["pressure"],
                scheme=Scheme.REPORTING_INTEGRITY,
-               rationale=f"{len(nr)} non-reliance 8-K(s) and {len(am)} 10-K/A amendment(s) in the last three years.",
+               rationale=(f"{len(nr)} non-reliance 8-K(s) and {len(am)} amended annual report(s) in the last three years, filed on "
+                          f"{len(fin_days) + len(other_days)} day(s); {len(fin_days)} of those day(s) re-filed financial statements "
+                          "(the others amended exhibits or Part III information only)."),
                evidence=[ctx.ev_event(e, "primary") for e in (nr + am)[:4]])]
 
 

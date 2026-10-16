@@ -7,6 +7,7 @@ already ~2 s).
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import time
 import traceback
@@ -26,7 +27,7 @@ class DetectorResult:
     id: str
     name: str
     family: str
-    status: str  # ok | skipped | error
+    status: str  # ok | skipped | n/a (not applicable to the company profile) | error
     reason: str = ""
     seconds: float = 0.0
     signals: list[Signal] = field(default_factory=list)
@@ -40,6 +41,10 @@ def _run_one(ctx: RunContext, did: str, results: dict[str, DetectorResult]) -> D
     spec = REGISTRY[did]
     r = DetectorResult(did, spec.name, spec.family, "ok")
     t0 = time.perf_counter()
+    na = ctx.profile.skip_reason(did) if ctx.profile is not None else None
+    if na:
+        r.status, r.reason = "n/a", na
+        return r
     try:
         if spec.needs_llm and ctx.llm is None:
             raise SkipDetector("needs the LLM (deterministic mode or no ANTHROPIC_API_KEY)")
@@ -87,7 +92,7 @@ def run_detectors(ctx: RunContext, only: set[str] | None = None,
             running: dict[Future, str] = {}
             while ts.is_active():
                 for did in ts.get_ready():
-                    running[pool.submit(_run_one, ctx, did, results)] = did
+                    running[pool.submit(contextvars.copy_context().run, _run_one, ctx, did, results)] = did
                 if not running:
                     break
                 finished, _ = wait(running, return_when=FIRST_COMPLETED)

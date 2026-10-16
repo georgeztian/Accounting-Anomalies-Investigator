@@ -230,19 +230,23 @@ def b09(ctx: RunContext):
     ni = ctx.qhist("NET_INCOME", 12)
     ta = ctx.qhist("TOTAL_ASSETS", 12).reindex(ni.index).ffill()
     eps = ctx.qhist("EPS_DILUTED", 16)
+    # leveraged balance sheets (banks, insurers, REITs) earn a quarterly ROA of 0-0.5% as a matter of course, and the
+    # Roychowdhury production / discretionary-spend models describe industrial operating cycles
+    industrial = ctx.profile is None or ctx.profile.key == "industrial"
     if len(ni.dropna()) >= 8:
         roa = (ni / ta).dropna()
-        small_profit = int(((roa >= 0) & (roa <= 0.005)).sum())
+        small_profit = int(((roa >= 0) & (roa <= 0.005)).sum()) if industrial else 0
         yoy = (eps - eps.shift(4)).dropna().tail(12)
         small_inc = int(((yoy >= 0) & (yoy <= 0.01)).sum())
-        n = len(roa)
+        n = len(roa) if industrial else 0
         rate = (small_profit + small_inc) / max(n + len(yoy), 1)
         sev = float(np.clip((rate - 0.10) / 0.25, 0, 1)) * 0.8
+        roa_txt = f"{small_profit} of {n} quarters with ROA in [0, 0.5%] and " if industrial else ""
         out.append(mk("B.09", ctx, raw_value=rate, expected=0.05, severity=sev, unit="share of quarters",
                       tags=["threshold"], scheme=Scheme.COOKIE_JAR if sev > 0 else None,
-                      rationale=(f"{small_profit} of {n} quarters with ROA in [0, 0.5%] and {small_inc} of {len(yoy)} quarters "
-                                 "with diluted EPS up by 0-1 cent year over year.")))
-    rem = roychowdhury(ctx)
+                      rationale=(f"{roa_txt}{small_inc} of {len(yoy)} quarters with diluted EPS up by 0-1 cent year over year."
+                                 + ("" if industrial else " (The small-ROA test does not apply to this company profile.)"))))
+    rem = roychowdhury(ctx) if industrial else None
     if rem:
         parts, score, zs = [], 0.0, {}
         for k, sign in (("CFO", -1), ("PROD", 1), ("DISX", -1)):

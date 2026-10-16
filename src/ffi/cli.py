@@ -117,10 +117,13 @@ def _summary(res) -> None:
         console.print(t)
     else:
         console.print("No findings met the reporting threshold.")
-    stat = {"ok": 0, "skipped": 0, "error": 0}
+    stat = {"ok": 0, "skipped": 0, "n/a": 0, "error": 0}
     for r in res.results:
-        stat[r.status] += 1
-    console.print(f"Detectors: {stat['ok']} ran, {stat['skipped']} skipped, {stat['error']} errored. Timings: "
+        stat[r.status] = stat.get(r.status, 0) + 1
+    if ctx.profile is not None:
+        console.print(f"Profile: {ctx.profile.label} · {ctx.annual_form} filer · amounts in {ctx.currency}")
+    console.print(f"Detectors: {stat['ok']} ran, {stat['skipped']} skipped (missing data), {stat['n/a']} not applicable "
+                  f"to this profile, {stat['error']} errored. Timings: "
                   + ", ".join(f"{k} {v}s" for k, v in res.timings.items()))
     for kind, p in res.files.items():
         console.print(f"[green]{kind.upper()}[/green] {p.resolve()}")

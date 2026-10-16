@@ -11,7 +11,7 @@ from ffi import __version__
 from ffi.detectors import scores as S
 from ffi.detectors.d_stats import RATIOS
 from ffi.detectors.scores import V
-from ffi.detectors.stats import fmt_money, fmt_num, fmt_pct
+from ffi.detectors.stats import fmt_money, fmt_num, fmt_pct, money_prefix
 from ffi.report import charts
 from ffi.report.linter import lint
 from ffi.scoring.engine import template_narrative
@@ -62,12 +62,14 @@ def _ratio_chart(out, detector_id: str) -> str:
 def _scores_chart(out) -> str:
     ctx = out.ctx
     rows = []
-    for label, fn, ref, ref_label in (
-        ("Beneish M-score", lambda P, p: S.beneish(P, p)["M"], -1.78, "-1.78"),
-        ("Dechow F-score", lambda P, p: S.dechow_f(P, p)["F"], 1.0, "1.0"),
-        ("Sloan accrual ratio", S.sloan_accruals, None, ""),
-        ("Montier C-score", lambda P, p: S.montier_c(P, p)["C"], None, ""),
+    for did, label, fn, ref, ref_label in (
+        ("B.01", "Beneish M-score", lambda P, p: S.beneish(P, p)["M"], -1.78, "-1.78"),
+        ("B.02", "Dechow F-score", lambda P, p: S.dechow_f(P, p)["F"], 1.0, "1.0"),
+        ("B.05", "Sloan accrual ratio", S.sloan_accruals, None, ""),
+        ("B.06", "Montier C-score", lambda P, p: S.montier_c(P, p)["C"], None, ""),
     ):
+        if ctx.profile is not None and did in ctx.profile.excluded:
+            continue
         try:
             v = float(fn(ctx.A, ctx.focus))
         except Exception:  # noqa: BLE001
@@ -75,11 +77,13 @@ def _scores_chart(out) -> str:
         peers = ctx.peer_values(lambda P, p, k, fn=fn: fn(P, p))
         rows.append({"label": label, "value": v, "peers": peers, "ref": ref, "ref_label": ref_label,
                      "kind": "pct" if "Sloan" in label else "num"})
-    return charts.dot_strip("Forensic scores vs peers", rows)
+    return charts.dot_strip("Forensic scores vs peers", rows) if rows else ""
 
 
 def _earnings_cash_chart(out) -> str:
     ctx = out.ctx
+    if ctx.profile is not None and "C.CF.01" in ctx.profile.excluded:
+        return ""  # operating cash flow is not the cash yield of earnings for this business model
     periods = ctx.periods[-7:]
     labels = [ctx.label(p) for p in periods]
     ni = [ctx.A.get("NET_INCOME", p) for p in periods]
@@ -92,7 +96,8 @@ def _earnings_cash_chart(out) -> str:
 def _ev_dict(e) -> dict:
     d = e.to_dict()
     if e.value is not None:
-        d["value_fmt"] = fmt_money(e.value) if e.unit == "USD" or (e.unit is None and e.kind == "fact") else fmt_num(e.value, 3)
+        is_money = (e.unit is not None and len(e.unit) == 3 and e.unit.isalpha() and e.unit.isupper()) or (e.unit is None and e.kind == "fact")
+        d["value_fmt"] = fmt_money(e.value) if is_money else fmt_num(e.value, 3)
     return d
 
 
@@ -130,7 +135,7 @@ def build_model(out) -> dict[str, Any]:
             "materiality_text": (
                 f"{fmt_pct(m.pct_pretax)} of pre-tax income, {fmt_pct(m.pct_revenue, 2)} of revenue; "
                 f"{m.multiple:.1f}x the {m.benchmark} materiality threshold"
-                + (f"; EPS effect ${m.eps_effect:.2f}" if m.eps_effect is not None else "")
+                + (f"; EPS effect {money_prefix()}{m.eps_effect:.2f}" if m.eps_effect is not None else "")
                 + (f"; about {fmt_pct(m.pct_market_value)} of market value" if m.pct_market_value is not None else "")
                 if m else ""),
             "sab99": m.sab99 if m else [],
@@ -159,7 +164,7 @@ def build_model(out) -> dict[str, Any]:
         families.append({"code": fam, "name": name, "rows": rows,
                          "flagged": sum(1 for x in rows if x["status"] == "flagged"),
                          "ran": sum(1 for x in rows if x["status"] in ("flagged", "normal", "suppressed"))})
-    statuses = {"ok": 0, "skipped": 0, "error": 0}
+    statuses = {"ok": 0, "skipped": 0, "n/a": 0, "error": 0}
     for r in out.results:
         statuses[r.status] = statuses.get(r.status, 0) + 1
     text_changes = []
@@ -188,6 +193,9 @@ def build_model(out) -> dict[str, Any]:
         "period": ctx.focus_label, "period_end": str(ctx.focus.date()), "as_of": str(ctx.as_of),
         "run_id": out.manifest["run_id"], "generated": datetime.now().strftime("%Y-%m-%d %H:%M"), "version": __version__,
         "mode": ctx.mode,
+        "profile": ({"key": ctx.profile.key, "label": ctx.profile.label, "description": ctx.profile.description,
+                     "notes": ctx.profile.notes, "excluded": len(ctx.profile.excluded)} if ctx.profile else None),
+        "currency": ctx.currency, "annual_form": ctx.annual_form,
         "risk": {"index": sc.risk_index, "band": sc.band, "probability": sc.probability,
                  "peer_note": ctx.peers.method if ctx.peers else "no peer set"},
         "top_sentences": top_sentences,

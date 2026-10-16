@@ -14,6 +14,7 @@ from ffi.detectors.base import EvidenceRef, Signal
 from ffi.edgar.endpoints import FilingRef
 from ffi.kg.store import DuckNXGraphStore
 from ffi.peers.select import PeerSet
+from ffi.profiles import Profile
 from ffi.resolve.resolver import CompanyRef
 from ffi.text.document import TextDoc
 from ffi.xbrl.canonical import BY_ID
@@ -58,6 +59,9 @@ class RunContext:
     notes: list[str] = field(default_factory=list)
     relationships: list[Any] = field(default_factory=list)  # (Relationship, (start, end)) from E.09
     client: Any | None = None  # EdgarClient, for detectors that fetch extra documents
+    profile: Profile | None = None  # company type: which detectors and peer ratios apply
+    currency: str = "USD"  # reporting currency of all monetary amounts
+    annual_form: str = "10-K"  # 10-K | 20-F | 40-F
 
     # ------------------------------------------------------------------ periods
     @property

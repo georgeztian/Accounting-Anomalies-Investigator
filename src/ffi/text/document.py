@@ -25,6 +25,18 @@ ITEM_NAMES = {
     "9c": "Foreign Jurisdictions", "10": "Directors and Officers", "11": "Executive Compensation",
     "12": "Security Ownership", "13": "Relationships", "14": "Accountant Fees", "15": "Exhibits", "16": "Summary",
 }
+# 20-F (foreign private issuer annual report): its own item numbers, mapped onto the 10-K section keys detectors use.
+ITEM_RE_20F = re.compile(
+    r"^\s*(?:part\s+i+\s*[,.\-–—]?\s*)?item\s*(16[a-j]|1[0-9]|[1-9])\b\s*[\.:\-–—]?\s*(.*)$", re.IGNORECASE)
+ITEM_NAMES_20F = {
+    "1": "Identity", "2": "Offer", "3": "Key Information", "4": "Information on the Company", "4a": "Unresolved",
+    "5": "Operating and Financial Review", "6": "Directors", "7": "Major Shareholders", "8": "Financial Information",
+    "9": "Offer", "10": "Additional Information", "11": "Quantitative", "12": "Description", "13": "Defaults",
+    "14": "Material Modifications", "15": "Controls", "16": "Reserved", "16a": "Audit", "16b": "Code", "16c": "Principal",
+    "16d": "Exemptions", "16e": "Purchases", "16f": "Change", "16g": "Corporate", "16h": "Mine", "16i": "Disclosure",
+    "16j": "Insider", "17": "Financial Statements", "18": "Financial Statements", "19": "Exhibits",
+}
+SECTION_MAP_20F = {"3": "item1a", "4": "item1", "5": "item7", "8": "item3", "11": "item7a", "15": "item9a", "16f": "item9"}
 BLOCK_CLOSE = re.compile(r"(?i)</(p|div|tr|li|h[1-6]|table|section|center)>")
 CELL_CLOSE = re.compile(r"(?i)</t[dh]>")
 BR = re.compile(r"(?i)<br\s*/?>")
@@ -99,8 +111,23 @@ def html_to_lines(raw_html: str) -> list[tuple[str, bool]]:
     return lines
 
 
-def build_doc(accession: str, form: str, period_end: str, url: str, raw_html: str) -> TextDoc:
+AUDIT_REPORT_RE = re.compile(r"(?i)^report of independent (?:registered public accounting firm|auditors?)\b")
+
+
+def build_doc(accession: str, form: str, period_end: str, url: str, raw_html: str,
+              appendix: list[tuple[str, str]] | None = None) -> TextDoc:
+    """`appendix`: (synthetic Item header, exhibit HTML) pairs for annual-report content filed as exhibits
+    (10-K Exhibit 13, 40-F Exhibits 99.x). They are appended after the main document; their headers come
+    last, so they win over the main document's short 'incorporated by reference' Items."""
     lines = html_to_lines(raw_html)
+    for header, html in appendix or []:
+        part = html_to_lines(html)
+        if header.startswith("Item 7"):
+            # an annual-report exhibit holds MD&A and then the audited statements: start Item 8 at the audit report
+            cut = next((j for j, (ln, _) in enumerate(part) if j > len(part) // 4 and len(ln) < 120 and AUDIT_REPORT_RE.match(ln)), None)
+            if cut is not None:
+                part = part[:cut] + [("Item 8. Financial Statements", False)] + part[cut:]
+        lines += [(header, False)] + part
     parts: list[str] = []
     offsets: list[tuple[int, int]] = []
     pos = 0
@@ -111,14 +138,16 @@ def build_doc(accession: str, form: str, period_end: str, url: str, raw_html: st
     text = "\n".join(parts)
 
     # ---- locate Item headers: keep the last short header per item (the TOC comes first)
+    is_20f = form.upper().startswith("20-F")
+    item_re, names = (ITEM_RE_20F, ITEM_NAMES_20F) if is_20f else (ITEM_RE, ITEM_NAMES)
     hits: dict[str, int] = {}
     for i, (line, _is_row) in enumerate(lines):
         if len(line) > 260:
             continue
-        m = ITEM_RE.match(line.replace(" | ", " "))
+        m = item_re.match(line.replace(" | ", " "))
         if m:
             key = m.group(1).lower()
-            title_words = ITEM_NAMES.get(key, "").split()[0].lower()[:6]
+            title_words = (names.get(key) or "item").split()[0].lower()[:6]
             if len(line) > 140 and title_words not in line.lower():
                 continue  # a long sentence that merely starts with "Item N" is a cross-reference, not a header
             hits[key] = i
@@ -127,6 +156,8 @@ def build_doc(accession: str, form: str, period_end: str, url: str, raw_html: st
     for n, (idx, key) in enumerate(starts):
         end_idx = starts[n + 1][0] if n + 1 < len(starts) else len(lines)
         sections[f"item{key}"] = (idx, end_idx)
+    if is_20f:
+        sections = _map_20f_sections(sections, len(lines))
 
     def section_of(i: int) -> str:
         for name, (a, b) in sections.items():
@@ -147,6 +178,19 @@ def build_doc(accession: str, form: str, period_end: str, url: str, raw_html: st
         a, b = offsets[i]
         paragraphs.append(Paragraph(f"{accession}#{sec}#{i}#{a}-{b}", sec, note, a, b, line, is_row))
     return TextDoc(accession, form, period_end, url, text, paragraphs, sections)
+
+
+def _map_20f_sections(found: dict[str, tuple[int, int]], n_lines: int) -> dict[str, tuple[int, int]]:
+    """Rename 20-F items to the 10-K keys detectors read. The audited statements (F-pages) follow Items 18-19
+    at the end of the document, so 'item8' runs from Item 18 (or 17) to the end."""
+    out: dict[str, tuple[int, int]] = {}
+    for k20, k10 in SECTION_MAP_20F.items():
+        if f"item{k20}" in found:
+            out[k10] = found[f"item{k20}"]
+    fs = found.get("item18") or found.get("item17")
+    if fs:
+        out["item8"] = (fs[0], n_lines)
+    return out
 
 
 AUDITOR_RE = re.compile(r"/s/\s*([A-Z][A-Za-z&,.' ]{2,60}?(?:LLP|LLC|P\.C\.|PC|Ltd\.?))")

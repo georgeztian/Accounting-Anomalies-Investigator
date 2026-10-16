@@ -13,13 +13,16 @@ from dataclasses import dataclass
 
 AMOUNT_RE = re.compile(
     r"(?P<what>total net sales|total net revenues?|total revenues?|net sales|net revenues?|revenues?|net income)\s+"
-    r"(?:was|were|of|totaled|totaling|amounted to|(?:increased|decreased|grew|declined|rose|fell)[^$.]{0,60}?to)\s+"
-    r"\$\s?(?P<num>[\d,]+(?:\.\d+)?)\s*(?P<scale>billion|million)",
+    r"(?:was|were|of|totaled|totaling|amounted to|(?:increased|decreased|grew|declined|rose|fell)[^$€£¥.]{0,60}?to)\s+"
+    r"(?:[A-Z]{0,3}\$|€|£|¥|₹|₩|(?:EUR|GBP|JPY|CHF|CAD|AUD|SEK|DKK|NOK|CNY|RMB|HKD|INR|KRW|BRL)\b)\s?"
+    r"(?P<num>[\d,]+(?:\.\d+)?)\s*(?P<scale>billion|million)",
     re.IGNORECASE,
 )
 SKIP_CONTEXT = re.compile(
     r"(?i)segment|product|service[s]? revenue|subscription|region|americas|europe|asia|international|domestic|"
     r"guidance|outlook|expect|forecast|non-gaap|adjusted|organic|constant currency|backlog|per share|"
+    r"managed|taxable.equivalent|\bFTE\b|segment revenues|fee.related|distributable|"
+    r"excluding|significant items?|notable items?|"
     r"\bq[1-4]\b|first quarter|second quarter|third quarter|fourth quarter|quarter ended|three months|six months|nine months"
 )
 
