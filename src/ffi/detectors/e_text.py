@@ -523,8 +523,12 @@ def e04(ctx: RunContext):
                              purpose="E.04 MD&A claims")
     except LLMError as e:
         raise SkipDetector(f"LLM unavailable: {e}") from e
-    contradictions, checked = [], 0
+    contradictions, checked, seen = [], 0, set()
     for c in res.claims:
+        key = (c.metric, c.direction, c.magnitude_pct)
+        if key in seen:
+            continue  # the same claim made twice in MD&A is checked (and reported) once
+        seen.add(key)
         fn = METRIC_FN.get(c.metric)
         if fn is None:
             continue
@@ -543,8 +547,19 @@ def e04(ctx: RunContext):
     sev = min(1.0, 0.45 * len(contradictions))
     return [mk("E.04", ctx, raw_value=len(contradictions), severity=sev, unit="contradictions", scheme=Scheme.MISLEADING_METRICS,
                rationale=(f"{checked} verifiable MD&A claims checked against XBRL; {len(contradictions)} inconsistent"
-                          + (": " + "; ".join(f"'{c.metric} {c.direction}' vs actual {fmt_pct(a)}" for c, a, _ in contradictions[:3]) if contradictions else "") + "."),
+                          + (": " + "; ".join(_claim_gap(c, a) for c, a, _ in contradictions[:3]) if contradictions else "") + "."),
                evidence=[ctx.ev_span(cur, loc[0], loc[1], f"MD&A claim: {c.metric}") for c, _, loc in contradictions[:3]])]
+
+
+def _claim_gap(c: Claim, actual: float) -> str:
+    """One contradiction in words: what MD&A says against what the reported figures show."""
+    if c.metric == "gross margin":
+        said = f"gross margin {'rose' if c.direction == 'increase' else 'fell' if c.direction == 'decrease' else 'was flat'}"
+        return f"MD&A says {said}, but the reported figures show it moved {actual * 100:+.1f} percentage points"
+    verb = {"increase": "rose", "decrease": "fell", "flat": "was flat"}[c.direction]
+    stated = f" {abs(c.magnitude_pct):.1f}%" if c.magnitude_pct is not None and c.direction != "flat" else ""
+    shown = f"{'a rise' if actual > 0 else 'a fall'} of {fmt_pct(abs(actual))}" if abs(actual) >= 0.01 else "almost no change"
+    return f"MD&A says {c.metric} {verb}{stated}, but the reported figures show {shown}"
 
 
 class Relationship(BaseModel):

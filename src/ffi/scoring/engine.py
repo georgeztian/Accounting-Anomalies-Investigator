@@ -137,6 +137,7 @@ class Finding:
     priority: float = 0.0
     ledger: list[dict] = field(default_factory=list)  # agent evidence ledger (tool results)
     audit: Any = None  # AuditResult from the independent auditor
+    client: dict | None = None  # plain-language explanation for the report (report/explain.py)
 
     @property
     def detectors(self) -> list[str]:

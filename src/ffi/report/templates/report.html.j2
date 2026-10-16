@@ -118,7 +118,7 @@ nav.toc { font-size: 13.5px; } nav.toc a { margin-right: 14px; white-space: nowr
   <div class="muted">Industry: {{ m.company.sic_description or 'not stated' }} · Auditor: {{ m.company.auditor or 'not identified' }} · Prepared {{ m.generated }}</div>
   <p class="muted">Company type: <strong>{{ m.profile.label }}</strong> · amounts in {{ m.currency }} · {{ m.profile.excluded }} tests do not apply to this type of company</p>
   <p class="muted"><strong>Caveats:</strong> {% if m.company.warnings %}{{ m.company.warnings|join(' ') }}{% else %}{{ m.none_text }}{% endif %}</p>
-  <nav class="toc" aria-label="Sections"><a href="#summary">Summary</a><a href="#dashboard">Overview</a><a href="#findings">Findings</a><a href="#tests">All tests</a><a href="#text">Disclosure changes</a><a href="#method">How this review works</a><a href="#glossary">Glossary</a></nav>
+  <nav class="toc" aria-label="Sections"><a href="#summary">Summary</a><a href="#dashboard">Overview</a><a href="#findings">Suspicious anomalies</a><a href="#tests">All tests</a><a href="#text">Disclosure changes</a><a href="#method">How this review works</a><a href="#glossary">Glossary</a></nav>
 </header>
 
 <section id="summary">
@@ -159,13 +159,15 @@ nav.toc { font-size: 13.5px; } nav.toc a { margin-right: 14px; white-space: nowr
 </section>
 
 <section id="findings">
-<h2>Findings</h2>
+<h2>Suspicious Accounting Anomalies</h2>
 {% for f in m.findings %}
 <article class="card finding" id="f-{{ f.rank }}">
   <h3>{{ f.rank }}. {{ f.title }}</h3>
   <div class="meta"><span>Strength of evidence: {{ f.strength }} ({{ "%.2f"|format(f.score) }} of 1)</span><span>Based on: {{ f.tests|join('; ') }}</span>
     <span class="audit {{ f.audit.status if f.audit else 'unverified' }}">{{ '✓' if f.audit and f.audit.status != 'unverified' else '!' }} {{ f.audit_label }}</span></div>
-  <p><strong>In brief:</strong> {{ f.summary }}</p>
+  <p><strong>What we found:</strong> {{ f.what_found }}</p>
+  <p><strong>Why this is unusual:</strong> {{ f.why_unusual }}</p>
+  <p><strong>What it could mean financially:</strong> {{ f.what_it_means }}</p>
   <p><strong>Investigation ({{ f.investigation_status }}):</strong> {{ f.investigation }}</p>
   <dl class="kv">
     <dt>Estimated effect on profit</dt><dd>{{ f.impact_text }}{% if f.impact_basis %} <span class="muted">(how it was estimated: {{ f.impact_basis }})</span>{% endif %}</dd>
@@ -201,7 +203,7 @@ nav.toc { font-size: 13.5px; } nav.toc a { margin-right: 14px; white-space: nowr
   <details><summary>Innocent explanations to rule out</summary><ul class="tight">{% for a in f.alternatives %}<li>{{ a }}</li>{% endfor %}</ul></details>
   <details open><summary>Questions to ask management or the auditors</summary><ul class="tight">{% for q in f.questions %}<li>{{ q }}</li>{% endfor %}</ul></details>
 </article>
-{% else %}<p>No findings met the reporting threshold.</p>
+{% else %}<p>No accounting anomaly met the reporting threshold.</p>
 {% endfor %}
 </section>
 

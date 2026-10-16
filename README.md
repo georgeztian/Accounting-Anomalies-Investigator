@@ -1,4 +1,4 @@
-# Forensic Filings Investigator
+# Accounting Anomaly Investigator
 
 Give it a public company. It reads the company's SEC filings and writes an **accounting-anomaly report**. Every number in the report links back to the filing it came from.
 

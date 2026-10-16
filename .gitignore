@@ -1,6 +1,7 @@
 .venv/
 .cache/
-reports/
+reports/*
+!reports/.gitkeep
 .env
 __pycache__/
 *.pyc
@@ -14,4 +15,5 @@ dist/
 tests/
 .github/
 BLUEPRINT.md
-data/
+data/*
+!data/.gitkeep

@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     cache_dir: Path = Field(default=PROJECT_ROOT / ".cache", alias="FFI_CACHE_DIR")
     reasoning_model: str = Field(default="claude-opus-5-5", alias="FFI_REASONING_MODEL")
     extraction_model: str = Field(default="claude-haiku-5-5", alias="FFI_EXTRACTION_MODEL")
+    writing_model: str = Field(default="claude-sonnet-5-5", alias="FFI_WRITING_MODEL")  # plain-language finding explanations
     sec_max_rps: float = 8.0
     # auto: the API when ANTHROPIC_API_KEY is set, otherwise the Claude Code CLI (Claude subscription login)
     llm_backend: str = Field(default="auto", alias="FFI_LLM_BACKEND")  # auto | api | claude-code

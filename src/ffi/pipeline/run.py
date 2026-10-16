@@ -348,6 +348,10 @@ def run(opts: RunOptions, choose=None, progress: Callable[[str], None] | None = 
 
     with step("Independent audit of findings"):
         audit_findings(ctx, sc)
+    with step("Explaining findings in plain language"):
+        from ffi.report.explain import explain_findings
+
+        explain_findings(ctx, sc)
 
     manifest = build_manifest(ctx, results, sc, run_id, opts, timings, kg_counts, cf)
     out = RunOutput(ctx, results, sc, run_dir, manifest, timings, agent_cases)

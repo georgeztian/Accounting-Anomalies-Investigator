@@ -45,13 +45,17 @@ These are not warning signs in themselves, but pressure (financial strain, leade
 {% for p in m.pressure %}- **{{ p.name }}:** {{ p.rationale }}
 {% else %}- {{ m.none_text }}
 {% endfor %}
-## Findings
+## Suspicious Accounting Anomalies
 {% for f in m.findings %}
 ### {{ f.rank }}. {{ f.title }}
 
 *Strength of evidence: {{ f.strength }} ({{ "%.2f"|format(f.score) }} of 1) · based on: {{ f.tests|join('; ') }} · {{ f.audit_label }}*
 
-**In brief:** {{ f.summary }}
+**What we found:** {{ f.what_found }}
+
+**Why this is unusual:** {{ f.why_unusual }}
+
+**What it could mean financially:** {{ f.what_it_means }}
 
 **Investigation ({{ f.investigation_status }}):** {{ f.investigation }}
 
@@ -89,7 +93,7 @@ These are not warning signs in themselves, but pressure (financial strain, leade
 
 {% for q in f.questions %}- {{ q }}
 {% endfor %}{% else %}
-No findings met the reporting threshold.
+No accounting anomaly met the reporting threshold.
 {% endfor %}
 ## All tests performed
 

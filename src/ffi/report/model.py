@@ -14,6 +14,7 @@ from ffi.detectors.scores import V
 from ffi.detectors.stats import fmt_money, fmt_num, fmt_pct, money_prefix
 from ffi.report import charts
 from ffi.report import plain as P
+from ffi.report.explain import for_report
 from ffi.report.linter import lint
 
 FAMILY_NAMES = {"A": "Accounting integrity", "B": "Forensic scores & accrual models", "C": "Account-level detectors",
@@ -187,6 +188,7 @@ def build_model(out) -> dict[str, Any]:
     findings = []
     for i, f in enumerate(sc.findings[:12]):
         summary, inv_status, inv_text = _investigation(f)
+        plain_text = for_report(f)  # what we found / why unusual / what it could mean
         summary, _ = lint(summary)
         inv_text, _ = lint(inv_text)
         evidence = [_ev_dict(e, ctx) for e in _dedupe(f.evidence)]
@@ -202,6 +204,8 @@ def build_model(out) -> dict[str, Any]:
                          "reading": P.plain(interpret("ok", s.severity, flag_at, s.flagged, s.percentile_peer, s.suppressed_by)),
                          **_about(s.detector_id)} for s in f.signals],
             "summary": P.plain(summary), "investigation_status": inv_status, "investigation": P.plain(inv_text),
+            **{k: P.plain(plain_text[src], terms=plain_text["source"] != "ai")
+               for k, src in (("what_found", "what"), ("why_unusual", "why"), ("what_it_means", "means"))},
             "impact_basis": P.plain(f.impact.basis) if f.impact else "",
             "impact_text": (f"{fmt_money(m.impact_low)} to {fmt_money(m.impact_high)} (central estimate {fmt_money(m.impact_mid)})"
                             if m else "Not quantified: this test measures a pattern, not an amount of profit."),

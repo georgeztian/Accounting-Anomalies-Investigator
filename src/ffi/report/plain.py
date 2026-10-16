@@ -235,8 +235,9 @@ def title(text: str) -> str:
     return plain(name(did) + suffix if did else text, expand=False)
 
 
-def plain(text: str | None, expand: bool = True) -> str:
-    """Rewrite one passage for a client reader."""
+def plain(text: str | None, expand: bool = True, terms: bool = True) -> str:
+    """Rewrite one passage for a client reader. `terms=False` keeps the wording as written (text the AI already wrote
+    for a client, which defines its own terms) and only removes internal codes and references."""
     if not text:
         return text or ""
     for pat, rep in _REWRITES:
@@ -249,7 +250,7 @@ def plain(text: str | None, expand: bool = True) -> str:
         if internal in out and did in PLAIN_NAMES and len(internal) > 8:
             out = out.replace(f"{internal}:", f"{PLAIN_NAMES[did]}:")
     out = re.sub(r"`[^`]*`", "", out)  # command lines and file names
-    for pat, first, later in _TERMS:
+    for pat, first, later in _TERMS if terms else []:
         if later is None or not expand:
             out = pat.sub(later if (later and not expand) else first, out)
         else:
@@ -264,6 +265,8 @@ def plain(text: str | None, expand: bool = True) -> str:
 
             out = pat.sub(rep, out)
     out = re.sub(r"(?<!\.)\.\.(?!\.)", ".", out)
+    out = re.sub(r"\b(\w+(?: \w+)?) or \1(?=[.,;:!?)]|$)", r"\1", out)  # rewrites can collide: "reported or tagged." -> "reported." (a repeat followed by more words, as in "cash and cash equivalents", is real text)
+    out = re.sub(r"(?<![A-Za-z])([Aa])n (?=Management's)", lambda m: m.group(1) + " ", out)  # "an MD&A" once expanded
     if expand and out[:1].islower():
         out = out[:1].upper() + out[1:]
     return re.sub(r"\s{2,}", " ", out).replace(" .", ".").strip()
