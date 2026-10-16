@@ -1,66 +1,115 @@
-# {{ m.company.name }} ({{ m.company.ticker }}) — accounting anomaly analysis, {{ m.period }}
+# {{ m.company.name }}{% if m.company.ticker %} ({{ m.company.ticker }}){% endif %} — accounting review, {{ m.period }}
 
-Fiscal year ended {{ m.period_end }} · data as of {{ m.as_of }} · CIK {{ m.company.cik }} · run `{{ m.run_id }}` · mode: {{ m.mode }}
+Fiscal year ended {{ m.period_end }} · based on filings available on {{ m.as_of }} · prepared {{ m.generated }}{% if m.company.sic_description %} · industry: {{ m.company.sic_description }}{% endif %}{% if m.company.auditor %} · auditor: {{ m.company.auditor }}{% endif %}
 {% if m.profile %}
-Company profile: **{{ m.profile.label }}** · annual report form {{ m.annual_form }} · amounts in {{ m.currency }}
+Company type: **{{ m.profile.label }}** · amounts in {{ m.currency }}{% if m.profile.excluded %} · {{ m.profile.excluded }} tests do not apply to this type of company and were not run{% endif %}
 {% endif %}{% for w in m.company.warnings %}
-> ⚠ {{ w }}
+> Note: {{ w }}
 {% endfor %}
 
 > {{ m.disclaimer }}
 
-## Executive summary
+## Summary
 
-**Risk index: {{ "%.0f"|format(m.risk.index) }} / 100 ({{ m.risk.band }})** — a weighted combination of flagged signals and corroborated patterns, not a calibrated probability.
+**Risk index: {{ "%.0f"|format(m.risk.index) }} out of 100 ({{ m.risk.band }}).** The index summarises how many warning signs were found and how strong they are. It is a screening score, not the probability that anything is wrong (Low below 25, Elevated below 50, High below 75, Severe 75 and above).
+
+{% if m.findings %}{{ m.findings|length }} matter{{ 's' if m.findings|length != 1 }} worth following up, most important first:
 
 {% for s in m.top_sentences %}{{ loop.index }}. {{ s }}
 {% endfor %}
-| Key figure (as first reported) | {{ m.period }} | Prior year |
+Every finding was independently re-checked against the original filings: {{ m.audit_summary.verified }} confirmed, {{ m.audit_summary.corrected }} confirmed after corrections, {{ m.audit_summary.unverified }} could not be fully confirmed.
+{% else %}None of the tests found a warning sign strong enough to report as a finding. Every test result is listed under *All tests performed*.
+{% endif %}
+Comparison group: {{ m.peer_method }}
+
+| Key figures (as first reported) | {{ m.period }} | Prior year |
 |---|---:|---:|
 {% for k in m.key_numbers %}| {{ k.label }} | {{ k.value }} | {{ k.prior }} |
 {% endfor %}
+{% if m.pressure %}
+### Context: pressures on management
 
+These are not warning signs in themselves, but pressure makes earnings management more likely.
+
+{% for p in m.pressure %}- **{{ p.name }}:** {{ p.rationale }}
+{% endfor %}{% endif %}
 ## Findings
-{% for f in m.findings %}
+{% if not m.findings %}
+No findings met the reporting threshold.
+{% endif %}{% for f in m.findings %}
 ### {{ f.rank }}. {{ f.title }}
 
-*Strength {{ "%.2f"|format(f.score) }} · detectors {{ f.detectors|join(', ') }} · narrative: {{ f.narrative_source }}{% if f.audit %} · audit: {{ f.audit.label }}{% endif %}*
+*Strength of evidence: {{ f.strength }} ({{ "%.2f"|format(f.score) }} of 1) · based on: {{ f.tests|join('; ') }}{% if f.audit %} · {{ f.audit.label }}{% endif %}*
 
 {{ f.narrative }}
 
-- **Estimated impact:** {{ f.impact_text }}{% if f.impact %} ({{ f.impact.method|replace('_',' ') }}: {{ f.impact.basis }}){% endif %}
-{% if f.materiality_text %}- **Materiality:** {{ f.materiality_text }}
-{% endif %}{% if f.sab99 %}- **SAB 99:** {{ f.sab99|join('; ') }}
+- **Estimated effect on profit:** {{ f.impact_text }}{% if f.impact_basis %} (how it was estimated: {{ f.impact_basis }}){% endif %}
+{% if f.materiality_text %}- **Is it material?** {{ f.materiality_text }}
+{% endif %}{% if f.sab99 %}- **Other reasons it could matter:** {{ f.sab99|join('; ') }} (qualitative factors from SEC guidance on materiality)
 {% endif %}
-**Evidence**
+**What the tests found**
+{% for s in f.signals %}
+- **{{ s.name }}** (severity {{ "%.2f"|format(s.severity) }}{% if s.period %}, {{ s.period }}{% endif %}): {{ s.rationale }}
+  - *What this result means:* {{ s.reading }}
+{% if s.what %}  - *What the test checks:* {{ s.what }}
+  - *Why it matters:* {{ s.why }}
+  - *How to interpret it:* {{ s.how_to_read }}
+{% endif %}{% endfor %}
+**Supporting evidence**
 
 | Evidence | Source | Value |
 |---|---|---:|
-{% for e in f.evidence %}| {{ e.label }}{% if e.quote %}: “{{ e.quote|replace('|','/')|replace('\n',' ') }}”{% endif %} | {% if e.doc_url %}[{{ e.accession or 'document' }}]({{ e.doc_url }}){% else %}{{ e.kind }}{% endif %} | {{ e.value_fmt or '' }} |
+{% for e in f.evidence %}| {{ e.label }} ({{ e.kind_label|lower }}){% if e.quote %}: “{{ e.quote|replace('|','/')|replace('\n',' ') }}”{% endif %} | {% if e.doc_url %}[{{ e.source }}]({{ e.doc_url }}){% else %}{{ e.source }}{% endif %} | {{ e.value_fmt or '' }} |
 {% endfor %}
-**Innocent explanations considered:** {{ f.alternatives|join(' ') }}
-
-**Questions:**
+**Innocent explanations to rule out:**
+{% for a in f.alternatives %}- {{ a }}
+{% endfor %}
+**Questions to ask management or the auditors:**
 {% for q in f.questions %}- {{ q }}
-{% endfor %}
-{% endfor %}
-## All detector results
-
-{{ m.statuses.ok }} ran · {{ m.statuses.skipped }} skipped (missing data) · {{ m.statuses['n/a'] }} not applicable to this profile · {{ m.statuses.error }} errored.
-{% for fam in m.families %}
-### Family {{ fam.code }} — {{ fam.name }} ({{ fam.flagged }} flagged)
-
-| ID | Detector | Status | Severity | Detail |
-|---|---|---|---:|---|
-{% for r in fam.rows %}| {{ r.id }} | {{ r.name }} | {{ r.status }} | {{ "%.2f"|format(r.severity) if r.severity is not none else '' }} | {{ r.detail|replace('|','/') }} |
 {% endfor %}{% endfor %}
-## Methodology
+## All tests performed
 
-- Company resolution: {{ m.company.match_note }}
-{% if m.profile %}- Company profile: {{ m.profile.label }}. {{ m.profile.description }}{% for n in m.profile.notes %} {{ n }}{% endfor %}
-{% endif %}
-- Peer set: {{ m.peer_method }}
-- Industry cross-section: {{ m.industry.size }} registrants (SIC {{ m.industry.digits }}-digit)
-- LLM: {% if m.llm %}{{ m.llm.calls }} calls, ${{ "%.2f"|format(m.llm.usd) }}{% else %}not used{% endif %}
-{% for n in m.notes %}- Note: {{ n }}
+{{ m.statuses.ok }} tests ran; {{ m.statuses.skipped }} could not run because data was missing; {{ m.statuses['n/a'] }} do not apply to this type of company{% if m.statuses.error %}; {{ m.statuses.error }} failed{% endif %}. Severity runs from 0 (nothing unusual) to 1 (strongest); a result is flagged at {{ "%.1f"|format(m.flag_at) }}. "Explained" means the result was unusual but a known legitimate cause was found.
+{% for fam in m.families %}
+### {{ fam.name }} ({{ fam.flagged }} flagged of {{ fam.ran }} that ran)
+
+| Test | Result | Severity | What was found |
+|---|---|---:|---|
+{% for r in fam.rows %}| {{ r.name }}{% if r.period %} ({{ r.period }}){% endif %} | {{ r.status_label }} | {{ "%.2f"|format(r.severity) if r.severity is not none else '' }} | {{ r.detail|replace('|','/') }} |
+{% endfor %}
+<details><summary>About these tests and how to read the results</summary>
+
+{% for r in fam.rows %}{% if r.first %}
+**{{ r.name }}** — {{ r.status_label }}
+{% if r.what %}
+- *What it checks:* {{ r.what }}
+- *Why it matters:* {{ r.why }}
+- *How to interpret it:* {{ r.how_to_read }}
+{% endif %}{% endif %}{% if r.reading != r.detail %}- *This result{% if r.period %} ({{ r.period }}){% endif %}:* {{ r.reading }}
+{% endif %}{% endfor %}
+</details>
+{% endfor %}
+## Changes in the company's disclosures
+{% if not m.text_changes %}
+The text review did not find disclosure changes worth highlighting for this period.
+{% endif %}{% for t in m.text_changes %}
+**{{ t.name }}.** {{ t.rationale }}
+{% for q in t.quotes %}
+> {{ q.quote|replace('\n',' ') }} ([{{ q.source }}]({{ q.doc_url }}))
+{% endfor %}{% endfor %}
+## How this review works
+
+- **Company:** {{ m.company.match_note }}
+{% if m.profile %}- **Company type:** {{ m.profile.label }}. {{ m.profile.description }}{% for n in m.profile.notes %} {{ n }}{% endfor %}
+{% endif %}- **What was analysed:** {{ m.analysis_type }}. The figures come from the company's filings with the US Securities and Exchange Commission (SEC).
+- **Point in time:** only filings public on or before {{ m.as_of }} were used, and the company's figures are taken as first reported.
+- **Comparison group:** {{ m.peer_method }}{% if m.peers %} ({{ m.peers|map(attribute='name')|join(', ') }}){% endif %}
+- **Legitimate causes checked:** {% if m.explain_conditions %}{% for k, v in m.explain_conditions.items() %}{{ v }}{{ '; ' if not loop.last }}{% endfor %}{% else %}no acquisition, change in accounting standards or stock split was found in the year reviewed.{% endif %}
+{% for n in m.notes %}- **Data note:** {{ n }}
+{% endfor %}- **Filings read:** {% for d in m.documents %}[{{ d.label }}]({{ d.url }}){{ '; ' if not loop.last }}{% endfor %}
+- **Limitations:** this review looks for unusual patterns in public filings. It cannot verify cash, assets or transactions, and segment-level figures are not used.
+
+## Glossary
+
+{% for term, meaning in m.glossary %}- **{{ term }}:** {{ meaning }}
 {% endfor %}

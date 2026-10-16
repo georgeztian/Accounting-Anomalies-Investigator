@@ -305,8 +305,12 @@ def run(opts: RunOptions, choose=None, progress: Callable[[str], None] | None = 
 
             llm = LLM(budget_usd=opts.budget_usd, offline=opts.offline)
         else:
-            notes.append("ANTHROPIC_API_KEY not set: ran in deterministic mode (LLM detectors and the investigation agent skipped).")
+            notes.append("No LLM available (no ANTHROPIC_API_KEY and no logged-in Claude Code CLI): ran in deterministic mode "
+                         "(LLM detectors and the investigation agent skipped).")
 
+    for (item, p), factor in sorted(A.rescaled.items(), key=lambda kv: kv[0][1]):
+        notes.append(f"XBRL data quality: {item.replace('_', ' ').lower()} for {A.label(p)} is tagged in "
+                     f"{'millions' if factor == 1e6 else 'thousands'}; rescaled using net income / EPS.")
     kg = DuckNXGraphStore(run_dir / "kg.duckdb", as_of=as_of)
     ctx = RunContext(company=company, store=store, A=A, A_latest=A_latest, Q=Q, filings=filings, focus=focus, as_of=as_of,
                      kg=kg, peers=peers, xsec=xsec, industry_ciks=industry, industry_digits=digits, docs=docs, releases=releases,
@@ -377,7 +381,7 @@ def build_manifest(ctx: RunContext, results, sc: ScoreResult, run_id: str, opts:
         "kg": kg_counts,
         "sources": {"companyfacts_sha256": src_hash,
                     "documents": [{"accession": d.accession, "url": d.url} for d in ctx.docs + ctx.releases]},
-        "llm": ({"reasoning_model": ctx.llm.reasoning_model, "extraction_model": ctx.llm.extraction_model,
+        "llm": ({"backend": ctx.llm.backend, "reasoning_model": ctx.llm.reasoning_model, "extraction_model": ctx.llm.extraction_model,
                  "calls": ctx.llm.spend.calls, "usd": round(ctx.llm.spend.usd, 4), "by_purpose": ctx.llm.spend.by_purpose}
                 if ctx.llm else None),
         "risk_index": sc.risk_index, "band": sc.band,

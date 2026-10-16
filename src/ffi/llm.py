@@ -16,7 +16,7 @@ from typing import TypeVar
 
 from pydantic import BaseModel
 
-from ffi.config import get_settings
+from ffi.config import find_claude_cli, get_settings
 
 log = logging.getLogger(__name__)
 T = TypeVar("T", bound=BaseModel)
@@ -73,12 +73,18 @@ class LLM:
     """Structured-output client with a disk cache (identical requests are free and reproducible)."""
 
     def __init__(self, cache_dir: Path | None = None, budget_usd: float = 6.0, offline: bool = False) -> None:
-        import anthropic
-
         s = get_settings()
-        if not s.anthropic_api_key and not offline:
-            raise LLMError("ANTHROPIC_API_KEY is not set")
-        self.client = anthropic.Anthropic(api_key=s.anthropic_api_key or "offline", max_retries=3)
+        self.backend = s.backend or ("api" if offline else None)
+        if self.backend is None:
+            raise LLMError("no LLM available: set ANTHROPIC_API_KEY, or install Claude Code and log in with your Claude subscription")
+        self.client = None
+        self.cli: str | None = None
+        if self.backend == "api":
+            import anthropic
+
+            self.client = anthropic.Anthropic(api_key=s.anthropic_api_key or "offline", max_retries=3)
+        else:
+            self.cli = find_claude_cli(s.claude_cli)
         self.reasoning_model = s.reasoning_model
         self.extraction_model = s.extraction_model
         self.cache_dir = (cache_dir or s.cache_dir) / "llm"
@@ -119,6 +125,12 @@ class LLM:
         if self.remaining() < projected or (max_usd is not None and projected > max_usd):
             raise BudgetExceeded(f"{purpose}: projected ${projected:.3f} exceeds remaining ${self.remaining():.3f}")
 
+        if self.backend == "claude-code":
+            parsed = self._via_claude_code(schema, system, prompt, purpose=purpose, model=model, effort=effort, timeout_s=timeout_s)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(parsed.model_dump_json(), encoding="utf-8")
+            return parsed
+
         import anthropic
 
         try:
@@ -155,3 +167,66 @@ class LLM:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(parsed.model_dump_json(), encoding="utf-8")
         return parsed
+
+    # ------------------------------------------------------------------ Claude Code (subscription) backend
+    def _via_claude_code(self, schema: type[T], system: str, prompt: str, *, purpose: str, model: str, effort: str,
+                         timeout_s: float | None) -> T:
+        """One headless Claude Code turn (`claude -p`) with structured output and no tools.
+
+        It authenticates with the Claude subscription you are logged in with. ANTHROPIC_API_KEY is removed from the
+        child's environment so the call is never billed to an API account. It runs in an empty temporary folder,
+        with no tools, MCP servers or skills, so the model only reads the prompt and returns the schema."""
+        import os
+        import subprocess
+        import tempfile
+
+        assert self.cli
+        env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
+        with tempfile.TemporaryDirectory(prefix="ffi-llm-") as tmp:
+            sys_file = Path(tmp) / "system.txt"
+            sys_file.write_text(system, encoding="utf-8")
+            args = [self.cli, "-p", "--output-format", "json", "--json-schema", json.dumps(schema.model_json_schema()),
+                    "--system-prompt-file", str(sys_file), "--tools", "", "--model", model, "--effort", effort,
+                    "--no-session-persistence", "--strict-mcp-config", "--disable-slash-commands"]
+            try:
+                r = subprocess.run(args, input=prompt, capture_output=True, text=True, encoding="utf-8", cwd=tmp, env=env,
+                                   timeout=timeout_s or 600)
+            except subprocess.TimeoutExpired as e:
+                raise LLMError(f"{purpose}: connection error (timeout after {timeout_s}s)") from e
+            except OSError as e:
+                raise LLMError(f"{purpose}: could not start Claude Code ({e})") from e
+        try:
+            out = json.loads(r.stdout)
+        except json.JSONDecodeError as e:
+            detail = (r.stderr or r.stdout).strip()[:300]
+            if "login" in detail.lower() or "auth" in detail.lower():
+                raise LLMError(f"{purpose}: Claude Code is not logged in; run `claude` once and log in with your Claude account") from e
+            raise LLMError(f"{purpose}: API error 500 (Claude Code returned no JSON: {detail})") from e
+        usage = _Usage(**{k: out.get("usage", {}).get(k, 0) or 0 for k in ("input_tokens", "output_tokens",
+                                                                          "cache_read_input_tokens", "cache_creation_input_tokens")})
+        with self._lock:
+            # subscription calls are not billed per token; the notional API price still drives the run budget
+            self.spend.add(purpose, float(out.get("total_cost_usd") or cost_usd(model, usage)), usage)
+        if out.get("is_error"):
+            msg = str(out.get("result") or out.get("subtype") or "")
+            status = out.get("api_error_status")
+            if "limit" in msg.lower() and ("usage" in msg.lower() or "reset" in msg.lower()):
+                raise LLMError(f"{purpose}: Claude subscription usage limit reached ({msg[:160]})")
+            raise LLMError(f"{purpose}: API error {status or 500} ({msg[:200]})")
+        if out.get("stop_reason") == "refusal":
+            raise LLMRefusal(f"{purpose}: model declined")
+        data = out.get("structured_output")
+        if data is None:
+            raise LLMError(f"{purpose}: no parsed output")
+        try:
+            return schema.model_validate(data)
+        except ValueError as e:
+            raise LLMError(f"{purpose}: no parsed output (schema validation failed: {str(e)[:200]})") from e
+
+
+@dataclass
+class _Usage:
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0

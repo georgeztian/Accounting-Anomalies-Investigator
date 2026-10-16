@@ -249,9 +249,15 @@ def a10(ctx: RunContext):
     expected = g0 + c["GOODWILL_ACQUIRED"] - c["GOODWILL_IMPAIRMENT"] + c["GOODWILL_FX"] + c["GOODWILL_MEASUREMENT_ADJ"] + c["GOODWILL_OTHER"] - c["GOODWILL_DISPOSED"]
     resid = g1 - expected
     sev = _residual_severity(resid, max(g1, 1.0), 0.02, 0.10)
+    note = ""
+    if not finite(comps["GOODWILL_ACQUIRED"]) and not finite(comps["GOODWILL_DISPOSED"]):
+        # only FX / other lines tagged: the roll-forward is incomplete rather than broken
+        sev = min(sev, 0.3)
+        note = (" Goodwill from acquisitions and disposals is not tagged (often reported only by segment), so the "
+                "roll-forward is incomplete rather than inconsistent.")
     return [mk("A.10", ctx, raw_value=resid, expected=0.0, severity=sev, unit="USD", area=Area.MA,
                scheme=Scheme.REPORTING_INTEGRITY,
-               rationale=f"Goodwill moved {fmt_money(g1 - g0)}; tagged roll-forward components explain {fmt_money(expected - g0)}; residual {fmt_money(resid)}.",
+               rationale=f"Goodwill moved {fmt_money(g1 - g0)}; tagged roll-forward components explain {fmt_money(expected - g0)}; residual {fmt_money(resid)}.{note}",
                evidence=ctx.evs(["GOODWILL"], ks=(0, 1)))]
 
 
@@ -271,6 +277,10 @@ def a12(ctx: RunContext):
     tol = max(0.02, abs(eps) * 0.02)  # preferred dividends / participating securities create small gaps
     sev = float(np.clip((abs(diff) - tol) / (abs(eps) * 0.15 + 0.05), 0, 1)) if abs(diff) > tol else 0.0
     msgs = [f"NI / diluted shares = {implied:.2f} vs reported diluted EPS {eps:.2f}"]
+    factor = ctx.A.rescaled.get(("SHARES_DILUTED", ctx.focus))
+    if factor:
+        msgs.append(f"diluted shares are tagged in {'millions' if factor == 1e6 else 'thousands'} in the XBRL "
+                    "(a tagging scale error, corrected here; the financial statements themselves are consistent)")
     if finite(epsb) and ni > 0 and eps > epsb + 0.005:
         sev = max(sev, 0.8)
         msgs.append(f"diluted EPS {eps:.2f} exceeds basic {epsb:.2f}")

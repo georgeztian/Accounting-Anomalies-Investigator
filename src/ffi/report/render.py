@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+from ffi.detectors.catalog import explain
 from ffi.report.model import build_model
 
 TEMPLATES = Path(__file__).parent / "templates"
@@ -37,7 +38,9 @@ def _findings_json(out) -> dict:
             "audit": f.audit.to_dict() if f.audit is not None else None,
         } for f in sc.findings],
         "signals": [s.to_dict() for r in out.results for s in r.signals],
-        "detectors": [{"id": r.id, "name": r.name, "family": r.family, "status": r.status, "reason": r.reason} for r in out.results],
+        "detectors": [{"id": r.id, "name": r.name, "family": r.family, "status": r.status, "reason": r.reason,
+                       **({"what": ex.what, "why": ex.why, "how_to_read": ex.read} if (ex := explain(r.id)) else {})}
+                      for r in out.results],
     }
 
 

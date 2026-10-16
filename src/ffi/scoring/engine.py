@@ -163,7 +163,7 @@ def template_narrative(f) -> str:
     others = [s for s in f.signals[1:4]]
     parts = [lead.rationale]
     if others:
-        parts.append("Corroborating signals: " + " ".join(f"{s.detector_id} {s.name}: {s.rationale}" for s in others))
+        parts.append("Other tests point the same way. " + " ".join(f"{s.name}: {s.rationale}" for s in others))
     if f.materiality:
         m = f.materiality
         parts.append(f"Estimated pre-tax effect {fmt_money(m.impact_low)}-{fmt_money(m.impact_high)} (mid {fmt_money(m.impact_mid)}), "

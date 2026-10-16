@@ -18,6 +18,11 @@ ANNUAL_DAYS = (340, 390)
 QUARTER_DAYS = (80, 100)
 ANNUAL_FORMS = ("10-K", "10-K/A", "10-KT", "10-KT/A", "10-K405", "20-F", "20-F/A", "40-F", "40-F/A")
 DATE_TOL = pd.Timedelta(days=8)
+# Items whose concepts include both totals and components (a filer may tag "DepreciationDepletionAndAmortization"
+# for one part and "DepreciationAndAmortization" for the cash-flow total): within a filing the largest value wins.
+LARGEST_WINS = {"DA"}
+# Share counts tagged in thousands or millions (a common XBRL scaling error) are detected from NI / EPS.
+SHARE_ITEMS = {"SHARES_DILUTED": "EPS_DILUTED", "SHARES_BASIC": "EPS_BASIC"}
 CURRENCY_ANCHORS = ("REVENUE", "NET_INCOME", "TOTAL_ASSETS", "EQUITY")
 
 
@@ -126,6 +131,7 @@ class Panel:
     labels: dict[pd.Timestamp, str]
     prov: dict[tuple[str, pd.Timestamp], FactRecord] = field(default_factory=dict)
     derived: set[tuple[str, pd.Timestamp]] = field(default_factory=set)
+    rescaled: dict[tuple[str, pd.Timestamp], float] = field(default_factory=dict)  # (item, period) -> factor applied
 
     def get(self, item: str, period: pd.Timestamp) -> float:
         if item not in self.values.columns or period not in self.values.index:
@@ -215,6 +221,10 @@ class FactStore:
         return out
 
     def _choose(self, d: pd.DataFrame, version: str, extra_sort: list[str] | None = None) -> pd.DataFrame:
+        big = d["item"].isin(LARGEST_WINS)
+        if big.any():
+            d = d.copy()
+            d.loc[big, "rank"] = d[big].groupby(["item", "period", "accn"])["val"].rank(ascending=False, method="first") - 1
         keys = ["item", "period", "rank"] + (extra_sort or []) + ["filed"]
         asc = [True, True, True] + [True] * len(extra_sort or []) + [version == "first"]
         return d.sort_values(keys, ascending=asc).drop_duplicates(["item", "period"], keep="first")
@@ -226,7 +236,7 @@ class FactStore:
         values.columns.name = None
         prov = {(r.item, r.period): self._record(r) for r in chosen.itertuples(index=False)}
         labels = {p: labeler(p) for p in values.index}
-        return Panel(freq, values, labels, prov)
+        return _fix_share_scale(Panel(freq, values, labels, prov))
 
     def annual(self, version: str = "first") -> Panel:
         fyes = self.fiscal_year_ends()
@@ -302,6 +312,28 @@ class FactStore:
         best = sel.groupby(["item", "end"])["rank"].transform("min")
         sel = sel[sel["rank"] == best]
         return sel.sort_values(["item", "end", "filed"]).reset_index(drop=True)
+
+
+def _fix_share_scale(panel: Panel) -> Panel:
+    """Rescale share counts that were tagged in thousands or millions, when NI / EPS shows the true count.
+    The original fact stays in the provenance; the factor is recorded in `panel.rescaled`."""
+    v = panel.values
+    if "NET_INCOME" not in v:
+        return panel
+    for sh_item, eps_item in SHARE_ITEMS.items():
+        if sh_item not in v or eps_item not in v:
+            continue
+        implied = (v["NET_INCOME"] / v[eps_item]).abs()
+        for p in v.index:
+            sh, imp = v.at[p, sh_item], implied.get(p, np.nan)
+            if not (np.isfinite(sh) and np.isfinite(imp) and sh > 0 and imp > 0):
+                continue
+            for factor in (1e6, 1e3):
+                if abs(imp / (sh * factor) - 1) <= 0.05:
+                    v.at[p, sh_item] = sh * factor
+                    panel.rescaled[(sh_item, p)] = factor
+                    break
+    return panel
 
 
 def _cluster_dates(dates: list) -> list[pd.Timestamp]:

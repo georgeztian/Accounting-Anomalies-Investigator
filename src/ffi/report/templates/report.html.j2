@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{ m.company.ticker }} {{ m.period }} anomaly report</title>
+<title>{{ m.company.name }} accounting review</title>
 <style>
 :root {
   color-scheme: light;
@@ -63,6 +63,11 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-sp
 .pill.flagged { border-color: var(--serious); color: var(--text-primary); }
 .pill.flagged::before { content: "▲ "; color: var(--serious); }
 .pill.suppressed { color: var(--text-muted); } .pill.skipped, .pill.error, .pill.na { color: var(--text-muted); }
+.reading { margin-top: 4px; color: var(--text-secondary); font-size: 13px; }
+details.about { margin-top: 4px; font-size: 13px; } details.about summary { cursor: pointer; color: var(--text-secondary); }
+details.about dl.kv { margin: 6px 0 2px; }
+.glossary dt { font-weight: 600; } .glossary dd { margin: 0 0 8px; color: var(--text-secondary); }
+.lead { font-size: 15.5px; }
 .pill.error::before { content: "! "; color: var(--critical); }
 .heat { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
 .heat div { border-radius: 6px; padding: 8px 10px; font-size: 13px; background: var(--surface-2); }
@@ -108,34 +113,34 @@ nav.toc { font-size: 13.5px; } nav.toc a { margin-right: 14px; white-space: nowr
 <div class="toolbar"><button type="button" onclick="(function(){var r=document.documentElement;var d=r.getAttribute('data-theme')==='dark'||(r.getAttribute('data-theme')===null&&matchMedia('(prefers-color-scheme: dark)').matches);r.setAttribute('data-theme',d?'light':'dark');})()">Theme</button></div>
 <main>
 <header>
-  <div class="sub">Accounting anomaly analysis · {{ m.period }} (fiscal year ended {{ m.period_end }}) · data as of {{ m.as_of }}</div>
-  <h1>{{ m.company.name }} ({{ m.company.ticker }})</h1>
-  <div class="muted">CIK {{ m.company.cik }} · SIC {{ m.company.sic }} {{ m.company.sic_description }}{% if m.company.auditor %} · Auditor: {{ m.company.auditor }}{% endif %} · Run {{ m.run_id }} · Generated {{ m.generated }} · ffi {{ m.version }} · mode: {{ m.mode }}</div>
-  {% for w in m.company.warnings %}<p class="muted">⚠ {{ w }}</p>{% endfor %}
-  {% if m.profile %}<p class="muted">Company profile: <strong>{{ m.profile.label }}</strong> · annual report form {{ m.annual_form }} · amounts in {{ m.currency }}{% if m.profile.excluded %} · {{ m.profile.excluded }} detectors not applicable to this profile{% endif %}</p>{% endif %}
-  <nav class="toc" aria-label="Sections"><a href="#summary">Summary</a><a href="#dashboard">Dashboard</a><a href="#findings">Findings</a><a href="#detectors">All detectors</a><a href="#text">Disclosure changes</a><a href="#quality">Data quality</a><a href="#method">Methodology</a></nav>
+  <div class="sub">Accounting review · {{ m.period }} (fiscal year ended {{ m.period_end }}) · based on filings available on {{ m.as_of }}</div>
+  <h1>{{ m.company.name }}{% if m.company.ticker %} ({{ m.company.ticker }}){% endif %}</h1>
+  <div class="muted">{% if m.company.sic_description %}Industry: {{ m.company.sic_description }} · {% endif %}{% if m.company.auditor %}Auditor: {{ m.company.auditor }} · {% endif %}Prepared {{ m.generated }}</div>
+  {% if m.profile %}<p class="muted">Company type: <strong>{{ m.profile.label }}</strong> · amounts in {{ m.currency }}{% if m.profile.excluded %} · {{ m.profile.excluded }} tests do not apply to this type of company and were not run{% endif %}</p>{% endif %}
+  {% for w in m.company.warnings %}<p class="muted">Note: {{ w }}</p>{% endfor %}
+  <nav class="toc" aria-label="Sections"><a href="#summary">Summary</a><a href="#dashboard">Overview</a><a href="#findings">Findings</a><a href="#tests">All tests</a><a href="#text">Disclosure changes</a><a href="#method">How this review works</a><a href="#glossary">Glossary</a></nav>
 </header>
 
 <section id="summary">
-<h2>Executive summary</h2>
+<h2>Summary</h2>
 <div class="card hero">
   <div>
     <div class="muted">Risk index (0-100)</div>
     <div class="index">{{ "%.0f"|format(m.risk.index) }}</div>
     <div class="band {{ m.risk.band }}"><i></i>{{ m.risk.band }}</div>
     <div class="scale" aria-hidden="true">{% for b in [25,50,75,100] %}<span class="{{ 'on' if m.risk.index >= b - 25 else '' }}"></span>{% endfor %}</div>
-    <div class="muted">Low &lt;25 · Elevated &lt;50 · High &lt;75 · Severe</div>
+    <div class="muted">Low below 25 · Elevated below 50 · High below 75 · Severe 75 and above</div>
   </div>
   <div>
     {% if m.findings %}
-    <p><strong>{{ m.findings|length }} finding{{ 's' if m.findings|length != 1 }}</strong> ranked by strength × materiality. Top items:</p>
+    <p class="lead"><strong>{{ m.findings|length }} matter{{ 's' if m.findings|length != 1 }} worth following up</strong>, most important first:</p>
     <ol class="tight">{% for s in m.top_sentences %}<li>{{ s }}</li>{% endfor %}</ol>
     {% else %}
-    <p>No detector pattern reached the reporting threshold. Individual signals are listed under <a href="#detectors">All detectors</a>.</p>
+    <p class="lead">None of the tests found a warning sign strong enough to report as a finding. Every test result is listed under <a href="#tests">All tests</a>.</p>
     {% endif %}
-    <p class="muted">Independent audit of the findings: {{ m.audit_summary.verified }} verified, {{ m.audit_summary.corrected }} verified after corrections, {{ m.audit_summary.unverified }} unverified (correction loop of at most 3 rounds; unverified findings carry half weight).</p>
-    <p class="muted">The index is a weighted combination of flagged signals and corroborated patterns, not a calibrated probability{% if m.risk.probability is not none %} (model probability {{ "%.1f"|format(m.risk.probability*100) }}%){% endif %}. Peer set: {{ m.peer_note }}.</p>
-    {% if m.findings and m.findings[0].questions %}<p><strong>What would most change the conclusion:</strong> {{ m.findings[0].questions[0] }}</p>{% endif %}
+    {% if m.findings %}<p class="muted">Every finding was independently re-checked against the original filings: {{ m.audit_summary.verified }} confirmed, {{ m.audit_summary.corrected }} confirmed after corrections, {{ m.audit_summary.unverified }} could not be fully confirmed and count for half.</p>{% endif %}
+    <p class="muted">The risk index summarises how many warning signs were found and how strong they are. It is a screening score, not the probability that anything is wrong. Comparison group: {{ m.peer_method }}</p>
+    {% if m.findings and m.findings[0].questions %}<p><strong>The question that would most change this conclusion:</strong> {{ m.findings[0].questions[0] }}</p>{% endif %}
   </div>
 </div>
 <div class="card tablewrap"><table>
@@ -146,15 +151,15 @@ nav.toc { font-size: 13.5px; } nav.toc a { margin-right: 14px; white-space: nowr
 </section>
 
 <section id="dashboard">
-<h2>Risk dashboard</h2>
+<h2>Overview</h2>
 <div class="card">
-  <h3>Signal strength by area</h3>
-  <p class="muted">Highest flagged severity per accounting area (0 = nothing flagged).</p>
-  <div class="heat">{% for a in m.areas %}{% set lvl = 0 if a.score < 0.01 else (1 if a.score < 0.3 else (2 if a.score < 0.5 else (3 if a.score < 0.7 else (4 if a.score < 0.85 else 5)))) %}<div class="l{{ lvl }}" title="{{ a.area }}: {{ a.score }}">{{ a.area|replace('_',' ') }}<b>{{ "%.2f"|format(a.score) }}</b></div>{% endfor %}</div>
+  <h3>Warning-sign strength by accounting area</h3>
+  <p class="muted">The strongest test result in each area, from 0 (nothing unusual) to 1 (strongest).</p>
+  <div class="heat">{% for a in m.areas %}{% set lvl = 0 if a.score < 0.01 else (1 if a.score < 0.3 else (2 if a.score < 0.5 else (3 if a.score < 0.7 else (4 if a.score < 0.85 else 5)))) %}<div class="l{{ lvl }}" title="{{ a.area }}: {{ a.score }}">{{ a.area }}<b>{{ "%.2f"|format(a.score) }}</b></div>{% endfor %}</div>
 </div>
-{% if m.charts.earnings_cash %}<div class="card">{{ m.charts.earnings_cash|safe }}<p class="muted">Persistent gaps between earnings and operating cash flow are the most common footprint of aggressive accruals.</p></div>{% endif %}
-{% if m.charts.scores %}<div class="card">{{ m.charts.scores|safe }}<p class="muted">Published cut-offs are reference points from the original studies, not verdicts; peer position matters more.</p></div>{% endif %}
-{% if m.pressure %}<div class="card"><h3>Pressure and governance context</h3><ul class="tight">{% for p in m.pressure %}<li><strong>{{ p.id }} {{ p.name }}:</strong> {{ p.rationale }}</li>{% endfor %}</ul></div>{% endif %}
+{% if m.charts.earnings_cash %}<div class="card">{{ m.charts.earnings_cash|safe }}<p class="muted">Over time, profits should turn into cash. A persistent gap between net income and the cash the business generates is the most common sign that profits rely heavily on estimates.</p></div>{% endif %}
+{% if m.charts.scores %}<div class="card">{{ m.charts.scores|safe }}<p class="muted">Academic scoring models that resemble the financial profile of companies later found to have misstated their results. The dashed line is each model's published warning level; the grey dots are the comparison companies. Where the company sits relative to its peers matters more than the line.</p></div>{% endif %}
+{% if m.pressure %}<div class="card"><h3>Context: pressures on management</h3><p class="muted">These are not warning signs in themselves, but pressure (financial strain, leadership changes) makes earnings management more likely.</p><ul class="tight">{% for p in m.pressure %}<li><strong>{{ p.name }}:</strong> {{ p.rationale }}</li>{% endfor %}</ul></div>{% endif %}
 </section>
 
 <section id="findings">
@@ -163,82 +168,85 @@ nav.toc { font-size: 13.5px; } nav.toc a { margin-right: 14px; white-space: nowr
 {% for f in m.findings %}
 <article class="card finding" id="f-{{ f.rank }}">
   <h3>{{ f.rank }}. {{ f.title }}</h3>
-  <div class="meta"><span>Strength {{ "%.2f"|format(f.score) }}</span><span>Detectors: {{ f.detectors|join(', ') }}</span><span>Narrative: {{ f.narrative_source }}</span>
+  <div class="meta"><span>Strength of evidence: {{ f.strength }} ({{ "%.2f"|format(f.score) }} of 1)</span><span>Based on: {{ f.tests|join('; ') }}</span>
     {% if f.audit %}<span class="audit {{ f.audit.status }}">{{ '✓' if f.audit.status != 'unverified' else '!' }} {{ f.audit.label }}</span>{% endif %}</div>
   <p>{{ f.narrative }}</p>
   <dl class="kv">
-    <dt>Estimated impact</dt><dd>{{ f.impact_text }}{% if f.impact %} <span class="muted">({{ f.impact.method|replace('_',' ') }}: {{ f.impact.basis }})</span>{% endif %}</dd>
-    {% if f.materiality_text %}<dt>Materiality</dt><dd>{{ f.materiality_text }}</dd>{% endif %}
-    {% if f.sab99 %}<dt>SAB 99 qualitative</dt><dd>{{ f.sab99|join('; ') }}</dd>{% endif %}
+    <dt>Estimated effect on profit</dt><dd>{{ f.impact_text }}{% if f.impact_basis %} <span class="muted">(how it was estimated: {{ f.impact_basis }})</span>{% endif %}</dd>
+    {% if f.materiality_text %}<dt>Is it material?</dt><dd>{{ f.materiality_text }}</dd>{% endif %}
+    {% if f.sab99 %}<dt>Other reasons it could matter</dt><dd>{{ f.sab99|join('; ') }} <span class="muted">(qualitative factors from SEC guidance on materiality)</span></dd>{% endif %}
   </dl>
   {{ f.chart|safe }}
-  <details open><summary>Signals ({{ f.signals|length }})</summary>
-    <div class="tablewrap"><table><thead><tr><th>Detector</th><th class="num">Severity</th><th>What was observed</th></tr></thead><tbody>
-    {% for s in f.signals %}<tr><td>{{ s.id }} {{ s.name }}</td><td class="num">{{ "%.2f"|format(s.severity) }}</td><td>{{ s.rationale }}</td></tr>{% endfor %}
-    </tbody></table></div>
+  <details open><summary>What the tests found ({{ f.signals|length }})</summary>
+    {% for s in f.signals %}<div class="card">
+      <h3>{{ s.name }} <span class="muted">· severity {{ "%.2f"|format(s.severity) }}{% if s.period %} · {{ s.period }}{% endif %}</span></h3>
+      <p>{{ s.rationale }}</p>
+      <p class="reading"><strong>What this result means:</strong> {{ s.reading }}</p>
+      {% if s.what %}<dl class="kv"><dt>What the test checks</dt><dd>{{ s.what }}</dd><dt>Why it matters</dt><dd>{{ s.why }}</dd><dt>How to interpret it</dt><dd>{{ s.how_to_read }}</dd></dl>{% endif %}
+    </div>{% endfor %}
   </details>
-  <details><summary>Evidence ({{ f.evidence|length }})</summary>
+  <details><summary>Supporting evidence ({{ f.evidence|length }})</summary>
     {{ f.graph|safe }}
     <div class="tablewrap"><table><thead><tr><th>Evidence</th><th>Source</th><th class="num">Value</th></tr></thead><tbody>
-    {% for e in f.evidence %}<tr><td>{{ e.label }}{% if e.quote %}<blockquote>{{ e.quote }}</blockquote>{% endif %}{% if e.concept %}<div class="muted">{{ e.concept }}</div>{% endif %}</td>
-      <td>{% if e.doc_url %}<a href="{{ e.doc_url }}" target="_blank" rel="noopener">{{ e.accession or 'document' }}</a>{% else %}{{ e.kind }}{% endif %}{% if e.filed %}<div class="muted">filed {{ e.filed }}</div>{% endif %}</td>
+    {% for e in f.evidence %}<tr><td>{{ e.label }} <span class="muted">· {{ e.kind_label }}</span>{% if e.quote %}<blockquote>{{ e.quote }}</blockquote>{% endif %}</td>
+      <td>{% if e.doc_url %}<a href="{{ e.doc_url }}" target="_blank" rel="noopener">{{ e.source }}</a>{% else %}{{ e.source }}{% endif %}</td>
       <td class="num">{{ e.value_fmt or '' }}</td></tr>{% endfor %}
     </tbody></table></div>
   </details>
-  {% if f.audit %}<details><summary>Independent audit ({{ f.audit.rounds|length }} round{{ 's' if f.audit.rounds|length != 1 }})</summary>
+  {% if f.audit %}<details><summary>Independent re-check ({{ f.audit.rounds|length }} round{{ 's' if f.audit.rounds|length != 1 }})</summary>
+    <p class="muted">A separate check re-reads every figure and quote from the original filings and recalculates the impact. Problems are corrected and re-checked, up to three rounds.</p>
     <div class="tablewrap"><table><thead><tr><th>Round</th><th>Check</th><th>Result</th><th>Detail</th></tr></thead><tbody>
-    {% for r in f.audit.rounds %}{% for c in r.checks %}<tr><td>{{ r.round }}</td><td>{{ c.name|replace('_',' ') }}</td><td><span class="pill {{ 'flagged' if c.status == 'fail' else 'normal' }}">{{ c.status }}</span></td><td>{{ c.detail }}</td></tr>{% endfor %}
-    {% for fix in r.corrections %}<tr><td>{{ r.round }}</td><td>correction</td><td><span class="pill normal">applied</span></td><td>{{ fix }}</td></tr>{% endfor %}{% endfor %}
+    {% for r in f.audit.rounds %}{% for c in r.checks %}<tr><td>{{ r.round }}</td><td>{{ c.label }}</td><td><span class="pill {{ 'flagged' if c.status == 'fail' else 'normal' }}">{{ {'pass': 'passed', 'fail': 'failed', 'warn': 'note'}.get(c.status, c.status) }}</span></td><td>{{ c.detail }}</td></tr>{% endfor %}
+    {% for fix in r.corrections %}<tr><td>{{ r.round }}</td><td>Correction</td><td><span class="pill normal">applied</span></td><td>{{ fix }}</td></tr>{% endfor %}{% endfor %}
     </tbody></table></div></details>{% endif %}
-  <details><summary>Innocent explanations considered</summary><ul class="tight">{% for a in f.alternatives %}<li>{{ a }}</li>{% endfor %}</ul></details>
-  <details open><summary>Questions for management or auditors</summary><ul class="tight">{% for q in f.questions %}<li>{{ q }}</li>{% endfor %}</ul></details>
+  <details><summary>Innocent explanations to rule out</summary><ul class="tight">{% for a in f.alternatives %}<li>{{ a }}</li>{% endfor %}</ul></details>
+  <details open><summary>Questions to ask management or the auditors</summary><ul class="tight">{% for q in f.questions %}<li>{{ q }}</li>{% endfor %}</ul></details>
 </article>
 {% endfor %}
 </section>
 
-<section id="detectors">
-<h2>All detector results</h2>
-<p class="muted">{{ m.statuses.ok }} detectors ran, {{ m.statuses.skipped }} were skipped for missing data (with reasons), {{ m.statuses['n/a'] }} do not apply to this company profile, {{ m.statuses.error }} errored. Severity is 0-1; flagged at 0.5 unless noted.</p>
+<section id="tests">
+<h2>All tests performed</h2>
+<p class="muted">{{ m.statuses.ok }} tests ran; {{ m.statuses.skipped }} could not run because data was missing; {{ m.statuses['n/a'] }} do not apply to this type of company{% if m.statuses.error %}; {{ m.statuses.error }} failed{% endif %}. Severity runs from 0 (nothing unusual) to 1 (strongest); a result is flagged at {{ "%.1f"|format(m.flag_at) }}. "Explained" means the result was unusual but a known legitimate cause was found. Open "About this test" for what each test checks, why it matters and how to read it.</p>
 {% for fam in m.families %}
-<details class="card" {% if fam.flagged %}open{% endif %}><summary><strong>Family {{ fam.code }} · {{ fam.name }}</strong> - {{ fam.flagged }} flagged of {{ fam.ran }} that ran</summary>
-<div class="tablewrap"><table><thead><tr><th>ID</th><th>Detector</th><th>Status</th><th class="num">Severity</th><th class="num">Peer pctl</th><th>Detail</th></tr></thead><tbody>
-{% for r in fam.rows %}<tr><td>{{ r.id }}</td><td>{{ r.name }}{% if r.period %}<div class="muted">{{ r.period }}</div>{% endif %}</td><td><span class="pill {{ r.status|replace('/', '') }}">{{ r.status }}</span></td>
-<td class="num">{{ "%.2f"|format(r.severity) if r.severity is not none else '' }}</td><td class="num">{{ r.pct_peer if r.pct_peer is not none else '' }}</td><td>{{ r.detail }}</td></tr>{% endfor %}
+<details class="card" {% if fam.flagged %}open{% endif %}><summary><strong>{{ fam.name }}</strong> - {{ fam.flagged }} flagged of {{ fam.ran }} that ran</summary>
+<div class="tablewrap"><table><thead><tr><th>Test</th><th>Result</th><th class="num">Severity</th><th class="num">Peer percentile</th><th>What was found</th></tr></thead><tbody>
+{% for r in fam.rows %}<tr><td>{{ r.name }}{% if r.period %}<div class="muted">{{ r.period }}</div>{% endif %}</td><td><span class="pill {{ r.status|replace('/', '') }}">{{ r.status_label }}</span></td>
+<td class="num">{{ "%.2f"|format(r.severity) if r.severity is not none else '' }}</td><td class="num">{{ r.pct_peer if r.pct_peer is not none else '' }}</td><td>{{ r.detail }}
+{% if r.reading and r.reading != r.detail %}<div class="reading">{{ r.reading }}</div>{% endif %}
+{% if r.what and r.first %}<details class="about"><summary>About this test</summary><dl class="kv">
+<dt>What it checks</dt><dd>{{ r.what }}</dd><dt>Why it matters</dt><dd>{{ r.why }}</dd><dt>How to interpret it</dt><dd>{{ r.how_to_read }}</dd></dl></details>{% endif %}</td></tr>{% endfor %}
 </tbody></table></div></details>
 {% endfor %}
 </section>
 
 <section id="text">
-<h2>Text and disclosure changes</h2>
-{% if not m.text_changes %}<p class="muted">No text-based signals produced evidence for this period.</p>{% endif %}
-{% for t in m.text_changes %}<div class="card"><h3>{{ t.id }} {{ t.name }}</h3><p>{{ t.rationale }}</p>{% for q in t.quotes %}<blockquote>{{ q.quote }} <a href="{{ q.doc_url }}" target="_blank" rel="noopener">source</a></blockquote>{% endfor %}</div>{% endfor %}
-</section>
-
-<section id="quality">
-<h2>Data quality</h2>
-<div class="card tablewrap"><table><thead><tr><th>Integrity check</th><th>Status</th><th>Detail</th></tr></thead><tbody>
-{% for r in m.integrity %}<tr><td>{{ r.id }} {{ r.name }}</td><td><span class="pill {{ r.status }}">{{ r.status }}</span></td><td>{{ r.detail }}</td></tr>{% endfor %}
-</tbody></table></div>
-{% if m.notes %}<div class="card"><h3>Run notes</h3><ul class="tight">{% for n in m.notes %}<li>{{ n }}</li>{% endfor %}</ul></div>{% endif %}
+<h2>Changes in the company's disclosures</h2>
+{% if not m.text_changes %}<p class="muted">The text review did not find disclosure changes worth highlighting for this period.</p>{% endif %}
+{% for t in m.text_changes %}<div class="card"><h3>{{ t.name }}</h3><p>{{ t.rationale }}</p>{% for q in t.quotes %}<blockquote>{{ q.quote }} <a href="{{ q.doc_url }}" target="_blank" rel="noopener">{{ q.source }}</a></blockquote>{% endfor %}</div>{% endfor %}
 </section>
 
 <section id="method">
-<h2>Methodology and limitations</h2>
+<h2>How this review works</h2>
 <div class="card">
 <dl class="kv">
-  <dt>Company resolution</dt><dd>{{ m.company.match_note }}</dd>
-  {% if m.profile %}<dt>Company profile</dt><dd>{{ m.profile.label }}: {{ m.profile.description }}{% for n in m.profile.notes %} {{ n }}{% endfor %}</dd>{% endif %}
-  <dt>Point in time</dt><dd>Only filings public on or before {{ m.as_of }} were used; the company's own numbers are as first reported.</dd>
-  <dt>Peer set</dt><dd>{{ m.peer_method }}. Industry cross-section: {{ m.industry.size }} registrants at the {{ m.industry.digits }}-digit SIC level (XBRL frames; frames carry latest values).</dd>
-  <dt>Knowledge graph</dt><dd>{% for k, v in m.kg.items() %}{{ k }}: {{ v }}{{ ', ' if not loop.last }}{% endfor %}</dd>
-  <dt>LLM</dt><dd>{% if m.llm %}{{ m.llm.calls }} calls, ${{ "%.2f"|format(m.llm.usd) }} ({{ m.llm.reasoning_model }} / {{ m.llm.extraction_model }}){% else %}Not used (deterministic mode){% endif %}</dd>
-  {% if m.agent %}<dt>Agent decisions</dt><dd><ul class="tight">{% for c in m.agent %}<li>{{ c.finding_id }}: {{ c.status }}{% for d in c.decisions %}; {{ d.interrupt }} → {{ d.choice }}{% if d.auto %} (auto){% endif %}{% endfor %}</li>{% endfor %}</ul></dd>{% endif %}
-  <dt>Explained-away checks</dt><dd>{% if m.explain_conditions %}{% for k, v in m.explain_conditions.items() %}{{ v }}{{ '; ' if not loop.last }}{% endfor %}{% else %}No acquisition, standard adoption or split detected in the focus year.{% endif %}</dd>
+  <dt>Company</dt><dd>{{ m.company.match_note }}</dd>
+  {% if m.profile %}<dt>Company type</dt><dd>{{ m.profile.label }}. {{ m.profile.description }}{% for n in m.profile.notes %} {{ n }}{% endfor %}</dd>{% endif %}
+  <dt>What was analysed</dt><dd>{{ m.analysis_type }}. The figures come from the company's filings with the US Securities and Exchange Commission (SEC).</dd>
+  <dt>Point in time</dt><dd>Only filings public on or before {{ m.as_of }} were used, and the company's figures are taken as first reported, before any later corrections.</dd>
+  <dt>Comparison group</dt><dd>{{ m.peer_method }}</dd>
+  <dt>Legitimate causes checked</dt><dd>{% if m.explain_conditions %}{% for k, v in m.explain_conditions.items() %}{{ v }}{{ '; ' if not loop.last }}{% endfor %}{% else %}No acquisition, change in accounting standards or stock split was found in the year reviewed, so no results were discounted for those reasons.{% endif %}</dd>
+  {% if m.notes %}<dt>Data notes</dt><dd><ul class="tight">{% for n in m.notes %}<li>{{ n }}</li>{% endfor %}</ul></dd>{% endif %}
 </dl>
-<details><summary>Peers</summary><div class="tablewrap"><table><thead><tr><th>CIK</th><th>Name</th><th class="num">Distance</th></tr></thead><tbody>{% for p in m.peers %}<tr><td>{{ p.cik }}</td><td>{{ p.name }}</td><td class="num">{{ p.distance }}</td></tr>{% endfor %}</tbody></table></div></details>
-<details><summary>Source documents</summary><ul class="tight">{% for d in m.documents %}<li><a href="{{ d.url }}" target="_blank" rel="noopener">{{ d.form }} {{ d.period }} ({{ d.accession }})</a></li>{% endfor %}</ul></details>
-<p class="muted">Limitations: the app finds reporting anomalies in public filings; it cannot verify cash, assets or transactions. Dimensional (segment) XBRL is not used. Skipped detectors are listed with reasons above.</p>
+{% if m.peers %}<details><summary>Comparison companies</summary><ul class="tight">{% for p in m.peers %}<li>{{ p.name }}</li>{% endfor %}</ul></details>{% endif %}
+<details><summary>Filings read</summary><ul class="tight">{% for d in m.documents %}<li><a href="{{ d.url }}" target="_blank" rel="noopener">{{ d.label }}</a></li>{% endfor %}</ul></details>
+<p class="muted">Limitations: this review looks for unusual patterns in public filings. It cannot verify cash, assets or transactions, and segment-level figures are not used. Tests that could not run are listed with the reason.</p>
 </div>
+</section>
+
+<section id="glossary">
+<h2>Glossary</h2>
+<div class="card"><dl class="glossary">{% for term, meaning in m.glossary %}<dt>{{ term }}</dt><dd>{{ meaning }}</dd>{% endfor %}</dl></div>
 <p class="disclaimer">{{ m.disclaimer }}</p>
 </section>
 </main>

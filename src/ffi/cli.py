@@ -128,7 +128,10 @@ def _summary(res) -> None:
     for kind, p in res.files.items():
         console.print(f"[green]{kind.upper()}[/green] {p.resolve()}")
     if ctx.llm:
-        console.print(f"LLM spend ${ctx.llm.spend.usd:.2f} over {ctx.llm.spend.calls} calls.")
+        if ctx.llm.backend == "claude-code":
+            console.print(f"LLM: {ctx.llm.spend.calls} calls on your Claude subscription (API-equivalent ${ctx.llm.spend.usd:.2f}, not billed per token).")
+        else:
+            console.print(f"LLM spend ${ctx.llm.spend.usd:.2f} over {ctx.llm.spend.calls} calls.")
 
 
 @app.command("batch")

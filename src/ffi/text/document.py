@@ -141,6 +141,7 @@ def build_doc(accession: str, form: str, period_end: str, url: str, raw_html: st
     is_20f = form.upper().startswith("20-F")
     item_re, names = (ITEM_RE_20F, ITEM_NAMES_20F) if is_20f else (ITEM_RE, ITEM_NAMES)
     hits: dict[str, int] = {}
+    titled: dict[str, int] = {}
     for i, (line, _is_row) in enumerate(lines):
         if len(line) > 260:
             continue
@@ -151,6 +152,10 @@ def build_doc(accession: str, form: str, period_end: str, url: str, raw_html: st
             if len(line) > 140 and title_words not in line.lower():
                 continue  # a long sentence that merely starts with "Item N" is a cross-reference, not a header
             hits[key] = i
+            if re.search(r"[A-Za-z]{4,}", m.group(2) or ""):
+                titled[key] = i
+    # a header carrying the Item's title beats bare running page headers ("Item 7" repeated on every page)
+    hits.update(titled)
     starts = sorted((idx, key) for key, idx in hits.items())
     sections: dict[str, tuple[int, int]] = {}
     for n, (idx, key) in enumerate(starts):
@@ -158,6 +163,10 @@ def build_doc(accession: str, form: str, period_end: str, url: str, raw_html: st
         sections[f"item{key}"] = (idx, end_idx)
     if is_20f:
         sections = _map_20f_sections(sections, len(lines))
+    elif _is_cross_reference_index(sections, len(lines)):
+        sections = _title_sections(lines, end=min(a for a, _ in sections.values()))
+    elif sections:
+        sections = _fill_by_title(sections, lines)
 
     def section_of(i: int) -> str:
         for name, (a, b) in sections.items():
@@ -178,6 +187,74 @@ def build_doc(accession: str, form: str, period_end: str, url: str, raw_html: st
         a, b = offsets[i]
         paragraphs.append(Paragraph(f"{accession}#{sec}#{i}#{a}-{b}", sec, note, a, b, line, is_row))
     return TextDoc(accession, form, period_end, url, text, paragraphs, sections)
+
+
+# 10-Ks in the "cross-reference index" format (e.g. McDonald's, GE) are organised by topic headings and list
+# Items 1-16 only in an index table mapping each Item to page numbers. Sections are then found by title.
+SECTION_TITLES = {
+    "item1": r"business(?: overview| summary)?",
+    "item1a": r"risk factors",
+    "item3": r"legal proceedings",
+    "item7": r"management.s discussion and analysis(?: of financial condition and results of operations)?",
+    "item7a": r"quantitative and qualitative disclosures? about market risk",
+    "item8": r"financial statements and supplementary data|consolidated statements? of (?:income|operations|earnings)"
+             r"|report of independent registered public accounting firm",
+    "item9a": r"controls and procedures|management.s report on internal control over financial reporting",
+}
+
+
+def _is_cross_reference_index(sections: dict[str, tuple[int, int]], n_lines: int) -> bool:
+    """Item 'sections' that are all one-line rows of an index table, not the document's structure."""
+    if len(sections) < 5 or n_lines < 300:
+        return False
+    spans = sorted(sections.values())
+    return sum(b - a for a, b in spans[:-1]) <= 0.05 * n_lines
+
+
+def _title_sections(lines: list[tuple[str, bool]], end: int) -> dict[str, tuple[int, int]]:
+    starts: dict[str, int] = {}
+    for i, (line, _) in enumerate(lines[:end]):
+        clean = line.replace("|", " ").strip()
+        if len(clean) > 130:
+            continue
+        for key, pat in SECTION_TITLES.items():
+            if key not in starts and re.fullmatch(rf"(?i)(?:{pat})\.?", clean):
+                starts[key] = i  # first body heading (table-of-contents rows end in a page number and don't match)
+    ordered = sorted((i, k) for k, i in starts.items())
+    return {k: (i, ordered[n + 1][0] if n + 1 < len(ordered) else end) for n, (i, k) in enumerate(ordered)}
+
+
+def _fill_by_title(sections: dict[str, tuple[int, int]], lines: list[tuple[str, bool]]) -> dict[str, tuple[int, int]]:
+    """Key Items that are only a pointer ("Item 7 ... see pages 50-120", as in annual-report style 10-Ks) are
+    located by their title heading instead; overlapping sections are trimmed to end where it starts."""
+    order = list(SECTION_TITLES)
+    found: dict[str, list[int]] | None = None
+    for key in ("item1a", "item7", "item8"):
+        a, b = sections.get(key, (0, 0))
+        if b - a >= 5:
+            continue
+        found = found if found is not None else _title_hits(lines)
+        for s in [i for i in found.get(key, []) if i >= b]:  # headings after the pointer (earlier ones are the TOC)
+            # the section runs to the first title of a later section (MD&A ends at market risk or the statements)
+            later = [i for k in order[order.index(key) + 1:] for i in found.get(k, []) if i > s]
+            e = min(later) if later else len(lines)
+            if e - s > 20:
+                sections = {k: ((ra, min(rb, s)) if ra < s < rb else (ra, rb)) for k, (ra, rb) in sections.items()}
+                sections[key] = (s, e)
+                break
+    return dict(sorted(sections.items(), key=lambda kv: kv[1][0]))
+
+
+def _title_hits(lines: list[tuple[str, bool]]) -> dict[str, list[int]]:
+    hits: dict[str, list[int]] = {}
+    for i, (line, _) in enumerate(lines):
+        clean = line.replace("|", " ").strip()
+        if len(clean) > 130:
+            continue
+        for key, pat in SECTION_TITLES.items():
+            if re.fullmatch(rf"(?i)(?:{pat})\.?", clean):
+                hits.setdefault(key, []).append(i)
+    return hits
 
 
 def _map_20f_sections(found: dict[str, tuple[int, int]], n_lines: int) -> dict[str, tuple[int, int]]:

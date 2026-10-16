@@ -26,7 +26,9 @@ The report contains:
 
 - Python **3.11 or 3.12**, run inside a **virtual environment**. Outside one, the app exits with code 2.
 - Internet access to `sec.gov`. After the first run, `--offline` works from the local cache.
-- Optional: an Anthropic API key. It enables the LLM text detectors and the investigation agent.
+- Optional, for the LLM text detectors and the investigation agent, either of:
+  - **a Claude subscription** (Pro or Max) with [Claude Code](https://claude.com/claude-code) installed and logged in; or
+  - an Anthropic API key.
 
 ## Setup
 
@@ -55,11 +57,29 @@ Edit `.env`:
 
 ```ini
 SEC_USER_AGENT="Your Name your.email@example.com"   # required: SEC asks every client to identify itself
-ANTHROPIC_API_KEY=sk-ant-...                        # optional: LLM detectors and the investigation agent
+ANTHROPIC_API_KEY=                                  # optional: leave empty to use your Claude subscription instead
+# FFI_LLM_BACKEND=auto                              # auto | claude-code | api
+# FFI_CLAUDE_CLI=C:\path\to\claude.exe              # only if the claude CLI isn't found automatically
 # FFI_CACHE_DIR=.cache
 # FFI_REASONING_MODEL=claude-opus-5-5
 # FFI_EXTRACTION_MODEL=claude-haiku-5-5
 ```
+
+### Choosing how the LLM runs
+
+| Backend | When it is used | How it works | Cost |
+|---|---|---|---|
+| `claude-code` | `auto` with no `ANTHROPIC_API_KEY`, or `FFI_LLM_BACKEND=claude-code` | Calls the Claude Code CLI headless (`claude -p`) with your Claude subscription login. Each call has no tools, MCP servers or skills; it only reads the prompt and returns schema-validated JSON. | Counts toward your subscription's usage limits. It is not billed per token. |
+| `api` | `auto` when `ANTHROPIC_API_KEY` is set, or `FFI_LLM_BACKEND=api` | Anthropic Messages API with structured outputs | Billed per token to your API account |
+
+The app finds the Claude CLI in this order:
+1. `FFI_CLAUDE_CLI`;
+2. `claude` on your PATH;
+3. the binary bundled with the Claude Code extension for VS Code or Cursor.
+
+Log in once by running `claude` in a terminal. The API key is removed from the CLI's environment, so subscription runs are never billed to an API account.
+
+With either backend, `--budget-usd` caps the run. For subscription runs the cap applies to the API-equivalent cost, which keeps long agent investigations bounded.
 
 To change tuning settings, create an optional `ffi.toml` in the project folder. You can set:
 - the peer count;
@@ -112,7 +132,7 @@ anomaly-report train --labels data/labels_4_02.csv                # fit and save
 | `auto` | Fixed policies answer the review points. Each answer is labelled *auto* in the report. |
 | `deterministic` | No LLM. Narratives come from templates. |
 
-Without `ANTHROPIC_API_KEY` the app runs in deterministic mode and says so in the report.
+With no API key and no logged-in Claude CLI, the app runs in deterministic mode and says so in the report.
 
 ### Which companies it covers
 
@@ -175,16 +195,36 @@ Each run writes `reports/<TICKER>_<FY>_<id>/`:
 
 ### Reading the report
 
-1. **Executive summary.** It shows the risk index and band (Low, Elevated, High or Severe), the top findings and key figures as first reported. The header shows the company profile, the annual-report form and the currency.
-2. **Risk dashboard.** Signal strength by accounting area, earnings vs operating cash flow, and forensic scores vs peers. Charts that don't apply to the profile are left out.
-3. **Findings.** For each finding: the narrative, impact and materiality, the signals, the evidence with EDGAR links, the independent audit rounds, the innocent explanations tested, and questions to ask.
-4. **All detector results.** Each detector is shown by family with its status:
-   - *flagged*, *normal* or *suppressed*;
-   - *skipped*, when the data is missing;
-   - *n/a*, when the detector doesn't apply to this company profile.
-5. **Disclosure changes, data quality, methodology.**
+The HTML and Markdown reports are written for clients, meaning readers with basic accounting and corporate-finance knowledge:
+- Tests appear under plain names, with no internal test codes, run IDs, SEC registrant numbers, XBRL concept names or file names.
+- Each abbreviation or technical term is spelled out and briefly explained the first time it appears.
+- A glossary at the end defines the key concepts.
 
-The risk index is a weighted combination of flagged signals and corroborated patterns. It is **not** a probability.
+`report.json` keeps the internal identifiers for other tools.
+
+1. **Summary.** It shows the risk index and band (Low, Elevated, High or Severe), the matters worth following up, and key figures as first reported. The header shows the company type and the currency.
+2. **Overview.** It shows warning-sign strength by accounting area, net income vs operating cash flow, scoring models vs peers, and the pressures on management. Charts that don't fit the company type are left out.
+3. **Findings.** Each finding gives:
+   - the explanation and its estimated effect on profit;
+   - whether it is material;
+   - what each underlying test found;
+   - the supporting evidence, linked to the filings;
+   - the independent re-check;
+   - innocent explanations to rule out;
+   - questions to ask.
+
+   Every test result in a finding says what the test checks, why it matters, how to interpret it, and what this particular result means. That covers severity against the flag threshold and where the company sits among its peers.
+4. **All tests performed.** These are grouped by type, and each result is marked:
+   - *Flagged*: unusual enough to count.
+   - *Normal*.
+   - *Explained*: unusual, but a legitimate cause was found.
+   - *Not run*: data was missing.
+   - *Not applicable*: the test doesn't fit this type of company.
+
+   "About this test" gives the same three explanations for every test.
+5. **Disclosure changes, how the review works, glossary.**
+
+The risk index is a weighted combination of flagged results and corroborated patterns. It is **not** a probability.
 
 ---
 

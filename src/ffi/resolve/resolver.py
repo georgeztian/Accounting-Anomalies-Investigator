@@ -41,6 +41,7 @@ class CompanyRef:
     match_note: str = ""
     warnings: list[str] = field(default_factory=list)
     annual_form: str = "10-K"  # the annual report form the company files: 10-K | 20-F | 40-F
+    display_name: str = ""  # name for the client report: the user's spelling when it matches, else the SEC name in title case
 
 
 @dataclass
@@ -133,7 +134,9 @@ def resolve(text: str, client: EdgarClient, choose=None) -> CompanyRef:
             note = f"chosen by user: {cands[idx]['title']}"
 
     try:
-        return _company_ref(client, cik, tickers, note, warnings)
+        ref = _company_ref(client, cik, tickers, note, warnings)
+        ref.display_name = display_name(ref.name, parsed.name)
+        return ref
     except ResolutionError as err:
         if "has not filed an annual report" not in str(err):
             raise
@@ -149,10 +152,28 @@ def resolve(text: str, client: EdgarClient, choose=None) -> CompanyRef:
                 except ResolutionError:
                     continue
                 ref.ticker = ref.ticker or parsed.ticker or ""
+                ref.display_name = display_name(ref.name, parsed.name)
                 ref.warnings.append(f"{parsed.ticker or query} now belongs to '{new_name}' (CIK {cik}), which has no 10-K history; "
                                     f"analysing the 10-K filer '{ref.name}' (CIK {alt_cik}).")
                 return ref
         raise
+
+
+KEEP_UPPER = {"LLC", "LP", "LLP", "PLC", "NV", "SA", "AG", "SE", "AB", "ASA", "USA", "US", "UK", "II", "III", "IV", "REIT", "ETF"}
+SUFFIX_DOT = {"INC": "Inc.", "CORP": "Corp.", "CO": "Co.", "LTD": "Ltd.", "HLDGS": "Holdings", "INTL": "International"}
+
+
+def display_name(sec_name: str, typed: str | None) -> str:
+    """The user's spelling when it matches the SEC name; otherwise the SEC's all-caps name in title case."""
+    if typed and name_score(typed, sec_name) >= 85:
+        return typed.strip()
+    if not sec_name.isupper():
+        return sec_name
+    words = []
+    for w in sec_name.replace("/", " ").split():
+        bare = w.rstrip(".,")
+        words.append(SUFFIX_DOT.get(bare, bare if bare in KEEP_UPPER else bare.capitalize()))
+    return " ".join(words)
 
 
 def company_tickers_frame(client: EdgarClient) -> pd.DataFrame:
