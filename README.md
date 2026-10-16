@@ -193,7 +193,7 @@ For financial and real-estate profiles, the earnings-management test also drops 
 
 ### Output
 
-Each run writes `reports/<TICKER>_<FY>_<id>/`:
+Each run writes `reports/<TICKER>_<FY>_<id>/`. There is only ever one final report per company and fiscal year: when a run finishes, earlier runs for the same company and year (including failed ones) are deleted.
 
 | File | Content |
 |---|---|

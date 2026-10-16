@@ -38,7 +38,10 @@ def f01(ctx: RunContext):
     rev = ctx.a("REVENUE")
     findings, checked = [], 0
     for r, loc in cust[:5]:
-        amt = r.amount_usd or (r.share_of_revenue_pct / 100 * rev if r.share_of_revenue_pct and finite(rev) else None)
+        # a percentage converts to dollars only when it is of the whole company's revenue: "13% of a subsidiary's
+        # revenues" times consolidated revenue would overstate the sales many times over
+        whole = r.share_basis == "whole company"
+        amt = r.amount_usd or (r.share_of_revenue_pct / 100 * rev if r.share_of_revenue_pct and whole and finite(rev) else None)
         cik = _resolve_counterparty(ctx, r.counterparty)
         if amt is None or cik is None:
             continue
@@ -50,7 +53,12 @@ def f01(ctx: RunContext):
         if a.values.empty:
             continue
         p = a.values.index[np.argmin(np.abs((a.values.index - ctx.focus).days))]
-        costs = sum(a.get(i, p) for i in ("COGS", "SGA", "RND", "CAPEX") if finite(a.get(i, p)))
+        # what the customer spends in a year: all operating costs (revenue less operating income) plus capital spending;
+        # summing cost lines misses businesses that report costs under other headings (e.g. restaurant expenses)
+        opex = a.get("REVENUE", p) - a.get("OPERATING_INCOME", p)
+        if not finite(opex) or opex <= 0:
+            opex = sum(a.get(i, p) for i in ("COGS", "SGA", "RND") if finite(a.get(i, p)))
+        costs = opex + (a.get("CAPEX", p) if finite(a.get("CAPEX", p)) else 0.0)
         checked += 1
         share = safe_div(amt, costs)
         ctx.notes.append(f"F.01 counterparty {r.counterparty} -> CIK {cik}")
@@ -62,7 +70,8 @@ def f01(ctx: RunContext):
     return [mk("F.01", ctx, raw_value=len(findings), severity=sev, unit="asymmetries", scheme=Scheme.BOGUS_REVENUE,
                direction="income_increasing",
                rationale=(f"{checked} customer(s) resolved to SEC filers; " + ("; ".join(
-                   f"sales of {fmt_money(amt)} to {r.counterparty} equal {fmt_pct(share)} of its total costs {fmt_money(costs)}"
+                   f"sales of {fmt_money(amt)} to {r.counterparty} equal {fmt_pct(share)} of everything that customer spends in a year "
+                   f"({fmt_money(costs)} of operating costs and capital spending)"
                    for r, _, _, amt, costs, share in findings) if findings else "disclosed sales are plausible relative to their cost bases") + "."),
                evidence=[ctx.ev_span(ctx.doc, loc[0], loc[1], f"Major customer: {r.counterparty}") for r, loc, *_ in findings[:2]])]
 

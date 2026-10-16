@@ -366,7 +366,28 @@ def run(opts: RunOptions, choose=None, progress: Callable[[str], None] | None = 
         log.warning("could not save the run for re-rendering: %s", e)
     if not opts.keep_artifacts:
         _remove_working_files(run_dir, kg, agent_cases)
+    _remove_superseded_reports(run_dir, company.cik)
     return out
+
+
+def _remove_superseded_reports(run_dir: Path, cik: int) -> None:
+    """Keep one final report per company and fiscal year: once this run's report is written, earlier runs for the same
+    company and year are deleted. Folders are matched on name (TICKER_FY2025_xxxxxx) and confirmed by the CIK recorded
+    in their manifest, so another company's reports are never touched."""
+    import shutil
+
+    prefix = run_dir.name.rsplit("_", 1)[0] + "_"
+    for old in run_dir.parent.glob(f"{prefix}*"):
+        if old == run_dir or not old.is_dir() or len(old.name) != len(run_dir.name):
+            continue
+        try:
+            same = json.loads((old / "manifest.json").read_text(encoding="utf-8")).get("company", {}).get("cik") == cik
+        except (OSError, ValueError):
+            # no manifest: a run that failed before finishing; remove it unless it somehow holds a report
+            same = not any((old / f"report.{ext}").exists() for ext in ("html", "md", "json"))
+        if same:
+            shutil.rmtree(old, ignore_errors=True)
+            log.info("removed superseded report %s", old.name)
 
 
 def _remove_working_files(run_dir: Path, kg, cases: list[Any]) -> None:

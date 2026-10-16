@@ -567,6 +567,9 @@ class Relationship(BaseModel):
     kind: Literal["major_customer", "major_supplier", "related_party", "guarantee", "factoring", "vie", "side_agreement"]
     amount_usd: float | None = None
     share_of_revenue_pct: float | None = None
+    share_basis: Literal["whole company", "segment or subsidiary", "unclear"] = Field(
+        default="unclear", description="Whose revenue the percentage is of: the whole reporting company, or one segment or "
+                                       "subsidiary (e.g. 'approximately 13% of McLane's revenues')")
     is_new_this_year: bool
     quote: str
 
@@ -586,7 +589,8 @@ def e09(ctx: RunContext):
         return [mk("E.09", ctx, raw_value=0, severity=0.0, rationale="No related-party, concentration, guarantee or VIE passages found.")]
     try:
         res = llm.structured(Relationships, SYSTEM, f"<passages>\n{_clip(chr(10).join(paras), 50000)}\n</passages>\n"
-                             "Extract named counterparties and arrangements. Use the counterparty name as written; if unnamed write 'unnamed'.",
+                             "Extract named counterparties and arrangements. Use the counterparty name as written; if unnamed write 'unnamed'. "
+                             "For a share of revenue, say whose revenue it is (share_basis): the whole company, or one segment or subsidiary.",
                              purpose="E.09 relationships")
     except LLMError as e:
         raise SkipDetector(f"LLM unavailable: {e}") from e
