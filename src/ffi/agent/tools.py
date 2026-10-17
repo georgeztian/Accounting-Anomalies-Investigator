@@ -15,6 +15,14 @@ from ffi.detectors.stats import fmt_money, fmt_num, fmt_pct, safe_div
 from ffi.text.search import search
 from ffi.xbrl.canonical import BY_ID
 
+# XBRL "IncreaseDecrease" concepts report the change in the balance, not its effect on cash
+SIGN_NOTES = {
+    "CHANGE_AR": "positive = receivables rose, which used cash",
+    "CHANGE_INVENTORY": "positive = inventory rose, which used cash",
+    "CHANGE_AP": "positive = payables rose, which added cash",
+    "CHANGE_DEFERRED_REV": "positive = deferred revenue rose, which added cash",
+}
+
 
 def _entry(lid: str, task: EvidenceTask, text: str, numbers: list[float], evidence: list[dict]) -> dict[str, Any]:
     return {"id": lid, "tool": task.tool, "purpose": task.purpose, "hypothesis": task.hypothesis_index,
@@ -37,6 +45,8 @@ def run_tool(ctx: RunContext, task: EvidenceTask, lid: str) -> dict[str, Any]:
                     ev.append(e.to_dict())
         fmt = fmt_money if BY_ID[item].unit == "USD" else (lambda x: fmt_num(x, 3))
         text = f"{BY_ID[item].label}: " + ", ".join(f"{lab} {fmt(v)}" for lab, v in vals) if vals else f"{BY_ID[item].label} not reported."
+        if vals and item in SIGN_NOTES:
+            text += f" (sign: {SIGN_NOTES[item]})"
         return _entry(lid, task, text, [v for _, v in vals], ev)
     if t == "ratio":
         n, d = (task.numerator or "").upper(), (task.denominator or "").upper()
@@ -57,7 +67,8 @@ def run_tool(ctx: RunContext, task: EvidenceTask, lid: str) -> dict[str, Any]:
         if len(peers) < 3:
             return _entry(lid, task, f"{name}: company {fmt_num(mine, 3)}; too few peers.", [mine], [])
         q1, med, q3 = np.quantile(peers, [0.25, 0.5, 0.75])
-        text = f"{name}: company {fmt_num(mine, 3)} vs peer median {fmt_num(med, 3)} (IQR {fmt_num(q1, 3)} to {fmt_num(q3, 3)}, n={len(peers)})."
+        text = (f"{name}, {ctx.focus_label}: company {fmt_num(mine, 3)} vs peer median {fmt_num(med, 3)} (IQR {fmt_num(q1, 3)} to "
+                f"{fmt_num(q3, 3)}, n={len(peers)} same-industry peers, each at its fiscal year aligned to {ctx.focus_label}; one year only).")
         return _entry(lid, task, text, [mine, med, q1, q3], [])
     if t in ("search_filing", "explaining_text"):
         doc = ctx.doc
@@ -100,6 +111,19 @@ def run_tool(ctx: RunContext, task: EvidenceTask, lid: str) -> dict[str, Any]:
     return _entry(lid, task, f"Unknown tool {t}.", [], [])
 
 
+def period_context(ctx: RunContext) -> list[str]:
+    """When each fiscal year ended and how long it was (52/53-week calendars), so neither the drafter nor the auditor
+    has to assume it."""
+    out = []
+    for k in range(4):
+        p, prev = ctx.period_at(k), ctx.period_at(k + 1)
+        if p is None:
+            break
+        weeks = f", {round((p - prev).days / 7)} weeks" if prev is not None else ""
+        out.append(f"{ctx.label(p)} ended {p.date().isoformat()}{weeks}")
+    return out
+
+
 def facts_table(ctx: RunContext, finding) -> list[dict[str, Any]]:
     """Every number the narrative may use, as formatted strings + raw values (the grounding gate's allow-list)."""
     rows: list[dict[str, Any]] = []
@@ -108,9 +132,23 @@ def facts_table(ctx: RunContext, finding) -> list[dict[str, Any]]:
         for v, what in ((s.raw_value, "result"), (s.expected, "reference value (what would be normal)")):
             if v is not None and np.isfinite(v):
                 rows.append({"source": f"{s.detector_id} {what}, {s.period}", "value": float(v), "unit": s.unit})
+        if s.raw_value is not None and s.expected is not None and np.isfinite(s.raw_value - s.expected):
+            rows.append({"source": f"{s.detector_id} result minus reference value, {s.period}", "value": float(s.raw_value - s.expected), "unit": s.unit})
         for e in s.evidence:
             if e.value is not None:
-                rows.append({"source": e.label, "value": float(e.value), "unit": e.unit or ""})
+                note = next((n for i, n in SIGN_NOTES.items() if e.label.startswith(BY_ID[i].label)), None)
+                rows.append({"source": e.label + (f" (sign: {note})" if note else ""), "value": float(e.value), "unit": e.unit or ""})
+    # year-on-year changes of the cited line items, so the narrative never has to do its own arithmetic
+    labels = {it.label: i for i, it in BY_ID.items()}
+    items = {labels[e.label.split(", ")[0]] for s in finding.signals for e in s.evidence if e.label.split(", ")[0] in labels}
+    for item in sorted(items):
+        for k in (0, 1, 2):
+            v1, v0 = ctx.a(item, k), ctx.a(item, k + 1)
+            if np.isfinite(v1) and np.isfinite(v0):
+                span = f"{ctx.label(ctx.period_at(k))} vs {ctx.label(ctx.period_at(k + 1))}"
+                rows.append({"source": f"{BY_ID[item].label} change, {span}", "value": float(v1 - v0), "unit": BY_ID[item].unit})
+                if v0:
+                    rows.append({"source": f"{BY_ID[item].label} % change, {span}", "value": float((v1 - v0) / abs(v0)), "unit": "ratio"})
     m = finding.materiality
     if m:
         for k in ("impact_low", "impact_mid", "impact_high", "net_income_effect", "pct_pretax", "pct_revenue", "pct_assets",

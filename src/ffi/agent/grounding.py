@@ -12,7 +12,9 @@ NUM_RE = re.compile(
     re.IGNORECASE,
 )
 YEAR_RE = re.compile(r"^(?:19|20)\d{2}$")
-DATE_RE = re.compile(r"\b(?:19|20)\d{2}-\d{2}-\d{2}\b|\b\d{1,2}/\d{1,2}/(?:19|20)\d{2}\b")
+MONTH = r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?"
+DATE_RE = re.compile(r"\b(?:19|20)\d{2}-\d{2}-\d{2}\b|\b\d{1,2}/\d{1,2}/(?:19|20)\d{2}\b"
+                     rf"|\b{MONTH}\s+\d{{1,2}}(?:st|nd|rd|th)?\b(?:,?\s+(?:19|20)\d{{2}})?|\b\d{{1,2}}\s+{MONTH}(?:\s+(?:19|20)\d{{2}})?\b")
 
 
 ID_RE = re.compile(r"\b[A-F](?:\.[A-Z]{2,4})?\.\d{2}\b|\[L\d+\.\d+\]|\bFY\d{4}(?:Q[1-4])?\b|\bCY\d{4}\b")

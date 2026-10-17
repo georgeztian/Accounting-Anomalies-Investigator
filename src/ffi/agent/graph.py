@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import operator
+import re
 from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -23,7 +24,7 @@ from ffi.agent.schemas import (
     FindingNarrative,
     Hypotheses,
 )
-from ffi.agent.tools import facts_table, run_tool
+from ffi.agent.tools import facts_table, period_context, run_tool
 from ffi.audit import llm_auditor
 from ffi.context import RunContext
 from ffi.detectors.d_stats import RATIOS
@@ -78,6 +79,8 @@ def finding_summary(ctx: RunContext, f) -> dict[str, Any]:
 def build_graph(ctx: RunContext, finding, llm: LLM):
     facts = facts_table(ctx, finding)
     allowed = [r["value"] for r in facts]
+    periods = period_context(ctx)
+    allowed += [float(w) for p in periods for w in re.findall(r"(\d+) weeks", p)]  # fiscal-year lengths
     docs = ctx.docs + ctx.releases
     items_hint = ", ".join(sorted(BY_ID))
     ratios_hint = ", ".join(RATIOS)
@@ -236,10 +239,16 @@ def build_graph(ctx: RunContext, finding, llm: LLM):
         facts_txt = "\n".join(f"- {r['source']}: {r['value']:.6g} {r['unit']}" for r in facts[:250])
         prompt = [p_finding(state), p_hypotheses(state), p_ledger(state),
                   f"<alternatives_tested>\n{json.dumps(state.get('alternatives', []), indent=1)}\n</alternatives_tested>\n"
-                  f"<facts_table>\n{facts_txt}\n</facts_table>",
+                  f"<facts_table>\n{facts_txt}\n</facts_table>\n<fiscal_years>\n{chr(10).join(periods)}\n</fiscal_years>",
                   "Write the finding for an analyst report. Rules: use only numbers that appear in the finding, the facts table "
                   "or the ledger (you may round them, e.g. $1.94B, 13.9%); cite ledger ids like [L0.2]; quote filing text only "
-                  "verbatim from the ledger; use neutral language (inconsistent with, warrants inquiry); no speculation beyond the evidence."
+                  "verbatim from the ledger; use neutral language (inconsistent with, warrants inquiry); no speculation beyond the evidence. "
+                  "Claim only what the evidence shows: a search that found nothing means 'not found in the text searched', never "
+                  "'the filing gives no explanation'; rate an alternative 'refuted' only when evidence contradicts it, 'supported' only "
+                  "when evidence establishes it, otherwise 'plausible but untested'; a peer comparison covers one year and the peer "
+                  "interquartile range, not 'all peers' or 'for years'; use no facts from outside the evidence (dates, events, rules); "
+                  "compare growth in percentages, not dollar amounts of different-sized items. Every number you write must appear in "
+                  "the facts table or the ledger: do not compute differences or ratios of your own."
                   + (f"\n<reviewer_feedback>\n{json.dumps(fb)}\n</reviewer_feedback>\nFix every point of feedback." if fb else "")]
         try:
             res, sp = _llm("draft", FindingNarrative, prompt)
@@ -287,7 +296,7 @@ def build_graph(ctx: RunContext, finding, llm: LLM):
             return res, {"node": "audit", "usd": round(llm.spend.usd - before, 5)}
 
         try:
-            verdicts, accusatory, sp = llm_auditor.review(llm, d, finding, state.get("ledger", []), node_call, facts=facts)
+            verdicts, accusatory, sp = llm_auditor.review(llm, d, finding, state.get("ledger", []), node_call, facts=facts, periods=periods)
         except BudgetExceeded as e:
             return over_budget("audit", e)
         except LLMRefusal:

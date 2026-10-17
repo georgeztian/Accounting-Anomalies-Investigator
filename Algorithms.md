@@ -1411,13 +1411,21 @@ intake -> hypothesize -> plan evidence -> [plan review] -> gather (parallel, per
    finding's score is halved. This step exists because the most valuable output of an investigation is often a
    documented innocent explanation.
 5. **Draft**: a summary and explanation using only numbers from the facts table, the test results or the ledger.
+   The facts table is computed by code so the writer never does arithmetic: each test's result, its reference value
+   and the gap between them; the cited line items with their year-on-year changes (in dollars and percent); the
+   company's key figures and ratios; the materiality figures. Cash-flow change lines carry their sign convention
+   ("positive = receivables rose, which used cash"), and the fiscal-year end dates and lengths (52 or 53 weeks) are
+   given. The writer is told to claim only what the evidence shows: a search that found nothing is "not found in the
+   text searched", an alternative is "refuted" or "supported" only when evidence says so (otherwise "plausible but
+   untested"), and a peer comparison covers one year.
 6. **Verify**: the grounding gate (section 13) and the neutral-language linter.
 7. **Audit**: an independent AI auditor sees only the conclusions and an evidence pack built by code, and rules on
    each claim (supported, overstated, needs context, unsupported). A claim that is unsupported or overstated sends the
    draft back with the auditor's corrections. A "needs context" note asks for a finer qualification of a claim the
    evidence does support; it is recorded with the audit and passed on if the draft goes back anyway, but does not block
    publication on its own (otherwise the loop chases ever-finer caveats until its rounds run out). The auditor's
-   evidence pack contains the same figures table the writer was allowed to use, so sourced statements can be checked.
+   evidence pack contains the same figures table and fiscal-year dates the writer was allowed to use, so sourced
+   statements can be checked.
 
 Each failed check is one round; after 3 rounds the case is *degraded* and the report says the investigation did not
 finish. Budgets cap each step's prompt size, output, time and cost (`agent/budget.py`); the whole run has a cost cap
@@ -1439,7 +1447,7 @@ quote. Checking every number against an allow-list, with a tolerance for roundin
 draft is sent back with the exact problems listed.
 
 **Numbers.** Every number in the text (with $, %, billion, million, thousand, B, M, K, bps, x or days) is extracted.
-Years, dates, single-digit counts, evidence and test IDs, fiscal labels and references to standards or document parts
+Years, dates (including written dates such as "September 28, 2024"), calendar lengths ("52-week year"), single-digit counts, evidence and test IDs, fiscal labels and references to standards or document parts
 ("ASC 842", "Topic 606", "Note 5", "Rule 10b5-1") are ignored. A number c is supported if, for some allowed value a and
 scale k of 1, 100 or 0.01 (percent vs fraction):
 

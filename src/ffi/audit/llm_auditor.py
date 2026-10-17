@@ -2,7 +2,7 @@
 
 Independence by construction: the auditor gets its own instructions and sees only (1) the conclusions as
 written and (2) a numbered evidence pack built by Python from verified sources: the finding's evidence, the detector
-outputs, the materiality figures, the facts table the drafter was allowed to use, and the evidence ledger. It never sees the drafter's
+outputs, the materiality figures, the facts table the drafter was allowed to use, the fiscal-year dates, and the evidence ledger. It never sees the drafter's
 hypotheses, plan, reasoning or earlier feedback. Each claim gets a verdict; a claim marked supported must
 cite evidence ids that exist in the pack, otherwise it is treated as unsupported.
 """
@@ -37,7 +37,8 @@ class AuditVerdicts(BaseModel):
     accusatory_language: list[str]
 
 
-def evidence_pack(finding, ledger: list[dict[str, Any]], facts: list[dict[str, Any]] | None = None) -> tuple[str, set[str]]:
+def evidence_pack(finding, ledger: list[dict[str, Any]], facts: list[dict[str, Any]] | None = None,
+                  periods: list[str] | None = None) -> tuple[str, set[str]]:
     lines, ids = [], set()
     for i, e in enumerate(finding.evidence[:40], 1):
         eid = f"E{i}"
@@ -60,6 +61,9 @@ def evidence_pack(finding, ledger: list[dict[str, Any]], facts: list[dict[str, A
         fid = f"F{i}"
         ids.add(fid)
         lines.append(f"[{fid}] figure: {r['source']} = {r['value']:.6g}{(' ' + r['unit']) if r.get('unit') else ''}")
+    if periods:
+        ids.add("P")
+        lines.append(f"[P] fiscal years: {'; '.join(periods)}")
     for e in ledger:
         ids.add(e["id"])
         lines.append(f"[{e['id']}] tool {e['tool']}: {e['text'][:600]}")
@@ -67,9 +71,9 @@ def evidence_pack(finding, ledger: list[dict[str, Any]], facts: list[dict[str, A
 
 
 def review(llm, draft: dict[str, Any], finding, ledger: list[dict[str, Any]], node_call,
-           facts: list[dict[str, Any]] | None = None) -> tuple[list[dict], list[str], Any]:
+           facts: list[dict[str, Any]] | None = None, periods: list[str] | None = None) -> tuple[list[dict], list[str], Any]:
     """Return (verdict dicts, accusatory phrases, spend record). `node_call(schema, system, prompt)` enforces budgets."""
-    pack, ids = evidence_pack(finding, ledger, facts)
+    pack, ids = evidence_pack(finding, ledger, facts, periods)
     conclusions = {"summary": draft.get("summary", ""), "explanation": draft.get("explanation", ""),
                    "alternatives": draft.get("alternatives", []), "questions": draft.get("questions", [])}
     prompt = (f"<conclusions>\n{json.dumps(conclusions, indent=1)}\n</conclusions>\n<evidence_pack>\n{pack}\n</evidence_pack>\n"
