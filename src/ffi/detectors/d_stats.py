@@ -145,9 +145,8 @@ def d02(ctx: RunContext):
 # ---------------------------------------------------------------------------- D.03
 def _ecod(X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """ECOD (Li et al. 2022): empirical-CDF tail probabilities, per-feature contributions."""
-    n, d = X.shape
     contrib = np.zeros_like(X)
-    for j in range(d):
+    for j in range(X.shape[1]):
         col = X[:, j]
         left = np.array([(col <= x).mean() for x in col])
         right = np.array([(col >= x).mean() for x in col])

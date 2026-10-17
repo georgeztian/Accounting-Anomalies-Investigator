@@ -14,6 +14,5 @@ dist/
 # Not needed to run the program
 tests/
 .github/
-BLUEPRINT.md
 data/*
 !data/.gitkeep

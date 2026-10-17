@@ -227,7 +227,7 @@ def load_releases(client: EdgarClient, cik: int, filings, focus: pd.Timestamp, a
     return [d for d in map_concurrent(load, cands, workers=4) if d is not None and not isinstance(d, Exception)]
 
 
-def pick_focus(store: FactStore, period: str | None, as_of: date) -> pd.Timestamp:
+def pick_focus(store: FactStore, period: str | None) -> pd.Timestamp:
     fyes = [p for p in store.fiscal_year_ends()]
     if not fyes:
         raise ValueError("no annual financial data (10-K, 20-F or 40-F XBRL) found for this company")
@@ -258,7 +258,7 @@ def run(opts: RunOptions, choose=None, progress: Callable[[str], None] | None = 
         store = FactStore(company.cik, cf.raw, as_of)
         CURRENCY.set(store.currency)  # money in narratives and the report is shown in the reporting currency
         profile = for_company(company.sic, company.annual_form, store.currency, store.taxonomy)
-        focus = pick_focus(store, opts.period, as_of)
+        focus = pick_focus(store, opts.period)  # the store already holds only filings public by as_of
         A, A_latest, Q = store.annual("first"), store.annual("latest"), store.quarterly("first")
         keep = [p for p in A.values.index if p <= focus][-(opts.years + 3):]
         A.values = A.values.loc[keep]

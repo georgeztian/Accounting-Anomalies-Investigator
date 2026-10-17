@@ -63,6 +63,7 @@ ANTHROPIC_API_KEY=                                  # optional: leave empty to u
 # FFI_CACHE_DIR=.cache
 # FFI_REASONING_MODEL=claude-opus-5-5
 # FFI_EXTRACTION_MODEL=claude-haiku-5-5
+# FFI_WRITING_MODEL=claude-sonnet-5-5                 # writes the plain-language explanations
 ```
 
 ### Choosing how the LLM runs
@@ -222,9 +223,10 @@ The HTML and Markdown reports are written for clients, meaning readers with basi
 `report.json` keeps the internal identifiers for other tools.
 
 1. **Summary.** It shows the risk index and band (Low, Elevated, High or Severe), the matters worth following up, and key figures as first reported. The header shows the company type and the currency.
-2. **Overview.** It shows warning-sign strength by accounting area, net income vs operating cash flow, scoring models vs peers, and the pressures on management. Charts that don't fit the company type are left out.
-3. **Findings.** Each finding gives:
-   - the explanation and its estimated effect on profit;
+2. **Overview.** It shows warning-sign strength by accounting area, net income vs operating cash flow, scoring models vs peers, and the pressures on management. A chart that doesn't fit the company type is replaced by a short note saying why.
+3. **Suspicious Accounting Anomalies.** Every anomaly has the same layout. It opens with three plain-language paragraphs:
+   *What we found*, *Why this is unusual* (the benchmark it departs from) and *What it could mean financially*. Then it gives:
+   - the AI investigation's conclusion and its estimated effect on profit;
    - whether it is material;
    - what each underlying test found;
    - the supporting evidence, linked to the filings;
@@ -249,6 +251,9 @@ The risk index is a weighted combination of flagged results and corroborated pat
 
 ## How it works
 
+Every formula, threshold, regression and model behind the tests, the scoring and the AI investigation is documented in
+[Algorithms.md](Algorithms.md).
+
 ```
 "Name (TICKER)" ─► resolve ─► company profile ─► fetch (EDGAR, cached) ─► normalize XBRL (point-in-time, reporting currency)
      ─► knowledge graph ─► detector DAG (A–F, profile-aware) ─► false-positive control ─► scheme patterns
@@ -270,6 +275,7 @@ The risk index is a weighted combination of flagged results and corroborated pat
 | Materiality | [materiality/impact.py](src/ffi/materiality/impact.py) | Estimates each finding's impact range and its effect on pre-tax income, net income and EPS. Compares it with auditor-style materiality thresholds and checks the SAB 99 qualitative factors. |
 | Agent | [agent/](src/ffi/agent/) | Investigates the top findings with a LangGraph state graph (described below) |
 | Audit | [audit/](src/ffi/audit/) | Independent audit of every reported finding, with a correction loop (described below) |
+| Explain | [report/explain.py](src/ffi/report/explain.py) | Writes the three plain-language paragraphs for each anomaly. Every number must come from the run's data; standard text is used when no AI is available. |
 | Report | [report/](src/ffi/report/) | Jinja2 templates with a fixed layout, inline SVG charts and a neutral-language linter. The run is saved so `anomaly-report render` can rebuild the report. |
 
 ### Detector families

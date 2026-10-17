@@ -158,7 +158,12 @@ def sloan_accruals(P: Panel, p: pd.Timestamp) -> float:
     avg_noa = (noa(0) + noa(1)) / 2
     if not np.isfinite(avg_noa) or avg_noa <= 0:
         avg_noa = v.avg("TOTAL_ASSETS")
-    return safe_div(v.g("NET_INCOME") - v.g("CFO") - v.g("CFI"), avg_noa)
+    # investing in the business only: buying marketable securities with surplus cash is part of investing cash flow
+    # but not an accrual (those securities are excluded from net operating assets above), and counting it made
+    # cash-rich companies look as if most of their profit were unbacked by cash
+    capex = v.g("CAPEX")
+    invest = -(capex + v.z("ACQUISITIONS")) if np.isfinite(capex) else v.g("CFI")
+    return safe_div(v.g("NET_INCOME") - v.g("CFO") - invest, avg_noa)
 
 
 def montier_c(P: Panel, p: pd.Timestamp) -> dict[str, float]:

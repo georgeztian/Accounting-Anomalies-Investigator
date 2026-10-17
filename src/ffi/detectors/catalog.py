@@ -82,7 +82,7 @@ CATALOG: dict[str, Explainer] = {
     "B.04": E("Accrual quality: how well working-capital accruals map into past, present and future operating cash flows.",
               "Accruals that do not turn into cash are lower quality and more likely to reverse.",
               "Higher residual volatility is worse. Volatile businesses naturally score worse, which is why the comparison is with peers."),
-    "B.05": E("Sloan accrual ratio: net income less operating and investing cash flows, relative to net operating assets.",
+    "B.05": E("Sloan accrual ratio: net income less operating cash flow and spending on the business (capital spending and acquisitions), relative to net operating assets.",
               "Companies with high accruals have less persistent earnings, and earnings management usually works through accruals.",
               "The top decile of the market (roughly above 10%) is the classic warning range. Heavy investment phases can raise it legitimately."),
     "B.06": E("Montier C-score: six yes/no tests (earnings-cash gap widening, receivable days up, inventory days up, other current assets up, depreciation rate down, assets growing over 10%).",
@@ -365,7 +365,7 @@ CATALOG: dict[str, Explainer] = {
                  "One-sided adjustments bias adjusted earnings upwards.",
                  "Derived from the reconciliation extracted by C.NG.03."),
     # ------------------------------------------------------------------ F. Knowledge graph
-    "F.01": E("Compares sales disclosed to a major customer with that customer's own cost base, when the customer is an SEC filer.",
+    "F.01": E("Compares sales disclosed to a major customer with everything that customer spends in a year (operating costs plus capital spending), when the customer is an SEC filer.",
               "Sales a customer could not plausibly have bought are a red flag for fictitious revenue.",
               "Needs named major customers that file with the SEC."),
     "F.02": E("Looks for cycles of sales, related-party, guarantee and side-agreement relationships.",
