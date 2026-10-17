@@ -19,8 +19,8 @@ class NodeBudget:
 
 
 DEFAULT_BUDGETS: dict[str, NodeBudget] = {
-    "hypothesize": NodeBudget(200_000, 4_000, 0, 120, 0.60),
-    "plan_evidence": NodeBudget(200_000, 4_000, 12, 120, 0.60),
+    "hypothesize": NodeBudget(200_000, 4_000, 0, 180, 0.60),  # several cases run at once; allow for queueing
+    "plan_evidence": NodeBudget(200_000, 4_000, 12, 180, 0.60),
     "gather": NodeBudget(0, 0, 40, 240, 0.00),
     "test_alternatives": NodeBudget(400_000, 6_000, 0, 180, 1.20),
     "quantify": NodeBudget(0, 0, 20, 30, 0.00),

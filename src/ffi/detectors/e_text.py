@@ -221,23 +221,21 @@ COMMENT_TOPICS = {
 
 @detector("E.10", "SEC comment letters", F, Area.GOVERNANCE)
 def e10(ctx: RunContext):
-    """CORRESP/UPLOAD filings in the last three years and their accounting topics."""
+    """CORRESP/UPLOAD filings in the three years to the fiscal year end (plus the year in which that annual report is
+    reviewed) and their accounting topics."""
+    from ffi.concurrency import map_concurrent
+    from ffi.edgar.endpoints import document_url
+
     lo = (ctx.focus - np.timedelta64(1095, "D")).date()
-    hi = ctx.as_of
+    hi = min(ctx.as_of, (ctx.focus + np.timedelta64(365, "D")).date())  # later letters are about later years' filings
     letters = [f for f in ctx.filings if f.form in ("CORRESP", "UPLOAD") and lo <= f.filing_date <= hi]
     topics: dict[str, int] = {}
     ev = []
-    from ffi.edgar.endpoints import document_url
-
-    for f in [x for x in letters if x.form == "CORRESP"][:6]:
-        if not f.primary_document.lower().endswith((".htm", ".html", ".txt")):
-            continue
-        if ctx.client is None:
-            break
-        try:
-            txt = ctx.client.get_text(document_url(ctx.company.cik, f))
-        except Exception:  # noqa: BLE001 - one unreadable letter shouldn't fail the detector
-            continue
+    read = [x for x in letters if x.form == "CORRESP" and x.primary_document.lower().endswith((".htm", ".html", ".txt"))][-6:]
+    texts = map_concurrent(lambda f: ctx.client.get_text(document_url(ctx.company.cik, f)), read, workers=4) if ctx.client else []
+    for f, txt in zip(read, texts, strict=False):
+        if not isinstance(txt, str):
+            continue  # one unreadable letter shouldn't fail the detector
         for name, pat in COMMENT_TOPICS.items():
             if re.search(pat, txt, re.I):
                 topics[name] = topics.get(name, 0) + 1
@@ -344,7 +342,8 @@ def cng01(ctx: RunContext):
         if not ng:
             continue
         g = GAAP_EPS_RE.search(rel.text)
-        gaap = float(g.group(1)) if g else ctx.Q.series("EPS_DILUTED").dropna().iloc[-1] if not ctx.Q.series("EPS_DILUTED").dropna().empty else float("nan")
+        q_eps = ctx.qhist("EPS_DILUTED").dropna()  # the latest quarter up to the focus year, never a later one
+        gaap = float(g.group(1)) if g else float(q_eps.iloc[-1]) if not q_eps.empty else float("nan")
         adj = float(ng.group(1))
         gap = safe_div(adj - gaap, abs(gaap))
         sev = float(np.clip((gap - 0.20) / 0.60, 0, 1)) if finite(gap) else 0.0
@@ -624,7 +623,7 @@ def e09(ctx: RunContext):
         loc = locate(cur, r.quote)
         if loc:
             kept.append((r, loc))
-    ctx.notes.append(f"E.09 extracted {len(kept)} verified relationships")
+    ctx.notes.append(f"E.09 extracted {len(kept)} verified relationship{'' if len(kept) == 1 else 's'}")
     ctx.relationships = kept  # consumed by the KG builder and Family F
     new_rp = [r for r, _ in kept if r.kind in ("related_party", "side_agreement", "vie", "guarantee") and r.is_new_this_year]
     sev = min(0.8, 0.25 * len(new_rp))
@@ -732,8 +731,8 @@ def cng03(ctx: RunContext):
     new_metrics = sorted(m for m, c in cores.items() if c and c not in known and c not in old_text)
     asym = [x.name for x in a.adjustments if x.category == "gain on sale" and x.increases_adjusted_income]
     sev = min(0.7, 0.2 * len(new_cats) + 0.1 * len(new_metrics) + 0.3 * len(asym))
-    ctx.notes.append(f"C.NG.04 asymmetry candidates: {asym}")
     return [mk("C.NG.03", ctx, raw_value=len(new_cats), severity=sev, unit="new categories", scheme=Scheme.MISLEADING_METRICS,
+               tags=[f"asymmetric:{x}" for x in asym],  # read by C.NG.04
                rationale=(f"New adjustment categories vs {old.period_end}: {', '.join(new_cats) or 'none'}; new measure names: {', '.join(new_metrics) or 'none'}"
                           + (f"; gains added to adjusted income: {', '.join(asym)}." if asym else ".")))]
 
@@ -743,8 +742,7 @@ def cng04(ctx: RunContext):
     """Losses excluded while gains are kept; derived from the C.NG.03 reconciliation extraction."""
     if not ctx.signals.get("C.NG.03"):
         raise SkipDetector("C.NG.03 did not run")
-    note = next((n for n in ctx.notes if n.startswith("C.NG.04 asymmetry candidates")), "")
-    has = "[]" not in note
+    has = any(t.startswith("asymmetric:") for s in ctx.signals["C.NG.03"] for t in s.tags)
     return [mk("C.NG.04", ctx, raw_value=1 if has else 0, severity=0.5 if has else 0.0, scheme=Scheme.MISLEADING_METRICS,
                rationale="Gains appear to be added to adjusted income while losses are excluded." if has else "No asymmetric adjustments identified.")]
 

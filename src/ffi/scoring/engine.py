@@ -138,6 +138,8 @@ class Finding:
     ledger: list[dict] = field(default_factory=list)  # agent evidence ledger (tool results)
     audit: Any = None  # AuditResult from the independent auditor
     client: dict | None = None  # plain-language explanation for the report (report/explain.py)
+    years: list[str] = field(default_factory=list)  # multi-year report: fiscal years in which it was flagged
+    timeline: list[dict] = field(default_factory=list)  # multi-year report: one row per year reviewed (scoring/span.py)
 
     @property
     def detectors(self) -> list[str]:
@@ -173,6 +175,18 @@ def template_narrative(f) -> str:
 
 
 UNVERIFIED_FACTOR = 0.5
+REPORTED = 12  # findings shown, audited and explained
+
+
+def audit_reported(findings: list[Finding], audit, limit: int = REPORTED) -> None:
+    """Run `audit(finding)` on every finding that will be reported. An unverified finding counts for half afterwards,
+    which can lift the next finding into the top `limit`; that one is audited too, so no reported finding goes unchecked."""
+    def weight(f: Finding) -> float:
+        return f.priority * (UNVERIFIED_FACTOR if f.audit is not None and f.audit.status == "unverified" else 1.0)
+
+    while todo := [f for f in sorted(findings, key=lambda x: -weight(x))[:limit] if f.audit is None]:
+        for f in todo:
+            audit(f)
 
 
 def apply_audit(sc: ScoreResult) -> None:
@@ -196,7 +210,9 @@ def apply_audit(sc: ScoreResult) -> None:
 
 
 def band_of(index: float) -> str:
-    return "Low" if index < 25 else "Elevated" if index < 50 else "High" if index < 75 else "Severe"
+    """Band of the index as the reports show it (a whole number), so '25 out of 100' is never labelled Low."""
+    shown = round(index)
+    return "Low" if shown < 25 else "Elevated" if shown < 50 else "High" if shown < 75 else "Severe"
 
 
 def _matches(s: Signal, token: str) -> bool:
@@ -306,12 +322,12 @@ def score(ctx: RunContext, results: list[DetectorResult]) -> ScoreResult:
         if f.kind == "pattern":
             contrib[f"pattern:{f.id}"] = PATTERN_WEIGHT * f.score
     total = sum(contrib.values())
-    index = 100 * (1 - math.exp(-total / INDEX_K))
+    index = round(100 * (1 - math.exp(-total / INDEX_K)), 1)
     area: dict[str, float] = {}
     fam: dict[str, float] = {}
     for s in signals:
         area[str(s.area)] = max(area.get(str(s.area), 0.0), s.severity if s.flagged else 0.0)
         fam[s.family] = max(fam.get(s.family, 0.0), s.severity if s.flagged else 0.0)
     prob = None  # only a trained meta-model yields a calibrated probability (see README)
-    return ScoreResult(round(index, 1), band_of(index), prob, findings, area, fam, suppressed, pressure, conds,
+    return ScoreResult(index, band_of(index), prob, findings, area, fam, suppressed, pressure, conds,
                        sorted(contrib.items(), key=lambda kv: -kv[1]))

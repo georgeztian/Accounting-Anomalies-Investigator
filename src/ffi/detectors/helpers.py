@@ -44,7 +44,13 @@ def default_evidence(detector_id: str, ctx: Any) -> list:
 
 def mk(detector_id: str, ctx: Any, *, period: str | None = None, **kw: Any) -> Signal:
     spec = REGISTRY[detector_id]
-    sev = float(np.clip(kw.pop("severity", 0.0) or 0.0, 0.0, 1.0))
+    sev = _f(kw.pop("severity", 0.0)) or 0.0  # a severity computed from missing inputs (NaN) means nothing unusual
+    sev = float(np.clip(sev, 0.0, 1.0))
+    for k in ("percentile_peer", "percentile_self", "p_value"):  # NaN when there was no reference group
+        if k in kw:
+            kw[k] = _f(kw[k])
+    if kw.get("unit") == "USD":  # monetary results are in the reporting currency
+        kw["unit"] = getattr(ctx, "currency", None) or "USD"
     flag_at = kw.pop("flag_at", (getattr(ctx, "tuning", None) or {}).get("scoring", {}).get("flag_severity", 0.5))
     flagged = kw.pop("flagged", None)
     if flagged is None:

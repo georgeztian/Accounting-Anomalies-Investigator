@@ -389,6 +389,17 @@ CATALOG: dict[str, Explainer] = {
 }
 
 
+def definition(detector_id: str) -> str:
+    """How a test computes its result and reference value (its docstring), for the investigation and the auditor,
+    so neither has to guess how a figure was built."""
+    from ffi.detectors.base import REGISTRY
+
+    spec = REGISTRY.get(detector_id)
+    doc = " ".join((spec.fn.__doc__ or "").split()) if spec else ""
+    ex = explain(detector_id)
+    return " ".join(x for x in (doc, ex.what if ex and ex.what not in doc else "") if x)
+
+
 def explain(detector_id: str) -> Explainer | None:
     return CATALOG.get(detector_id)
 

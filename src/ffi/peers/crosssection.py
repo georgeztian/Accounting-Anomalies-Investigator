@@ -10,6 +10,8 @@ as-first-reported values.
 
 from __future__ import annotations
 
+import re
+
 import pandas as pd
 
 from ffi.edgar import endpoints
@@ -66,28 +68,51 @@ def instant_frame(client: EdgarClient, item: str, year: int) -> pd.DataFrame:
 
 
 def build(client: EdgarClient, ciks: list[int] | None, years: list[int], max_age_days: int = 30) -> pd.DataFrame:
-    """Rows: (cik, year, fye, REVENUE, NET_INCOME, ..., TOTAL_ASSETS, AR, ...). All-filer builds are cached as Parquet."""
+    """Rows: (cik, year, fye, REVENUE, NET_INCOME, ..., TOTAL_ASSETS, AR, ...). All-filer builds are cached as Parquet,
+    one file per calendar year: runs for neighbouring fiscal years (a multi-year review, --period) share three of
+    their four years."""
     if ciks is None:
         import time
 
-        path = client.cache_dir.parent / "xsec" / f"xsec_v{XSEC_VERSION}_{'_'.join(map(str, sorted(years)))}.parquet"
-        if path.exists() and (client.offline or time.time() - path.stat().st_mtime < max_age_days * 86400):
-            return pd.read_parquet(path)
-        df = _build(client, None, years)
-        if not df.empty:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            df.to_parquet(path, index=False)
-        return df
+        folder = client.cache_dir.parent / "xsec"
+        paths = {y: folder / f"xsec_v{XSEC_VERSION}_{y}.parquet" for y in sorted(years)}
+        fresh = {y: p for y, p in paths.items() if p.exists() and (client.offline or time.time() - p.stat().st_mtime < max_age_days * 86400)}
+        missing = [y for y in paths if y not in fresh]
+        for url in [u for y in fresh for u in _frame_urls(y)]:  # raw frames kept by earlier versions (~15 MB a year)
+            client.evict(url)
+        built = _build(client, None, missing) if missing else pd.DataFrame()
+        current = re.compile(rf"xsec_v{XSEC_VERSION}_\d{{4}}\.parquet")
+        for old in folder.glob("xsec_*.parquet"):
+            if not current.fullmatch(old.name):
+                old.unlink(missing_ok=True)  # files of earlier versions (multi-year windows), which this one never reads
+        for y in missing:
+            part = built[built["year"] == y] if not built.empty else built
+            if not part.empty:
+                folder.mkdir(parents=True, exist_ok=True)
+                part.to_parquet(paths[y], index=False)
+                for url in _frame_urls(y):  # the year's raw frames (~15 MB) are only read to build this file
+                    client.evict(url)
+        frames = [pd.read_parquet(p) for p in fresh.values()] + ([built] if not built.empty else [])
+        frames = [f for f in frames if not f.empty]
+        return pd.concat(frames, ignore_index=True).sort_values("year", kind="stable", ignore_index=True) if frames else pd.DataFrame()
     return _build(client, ciks, years)
+
+
+def _frame_jobs(year: int) -> list[tuple[str, str]]:
+    """(concept, frame period) of every frame one calendar year's cross-section is built from."""
+    jobs = [(c, f"CY{year}") for item in DURATION_CONCEPTS for c in DURATION_CONCEPTS[item]]
+    return jobs + [(c, f"CY{year}Q{q}I") for item in INSTANT_CONCEPTS for c in INSTANT_CONCEPTS[item] for q in (1, 2, 3, 4)]
+
+
+def _frame_urls(year: int) -> list[str]:
+    return [endpoints.FRAMES_URL.format(taxonomy="us-gaap", concept=c, unit="USD", period=p) for c, p in _frame_jobs(year)]
 
 
 def _prefetch(client: EdgarClient, years: list[int]) -> None:
     """Download every frame the build needs concurrently (the build then reads them from the cache)."""
     from ffi.concurrency import map_concurrent
 
-    jobs = [(c, f"CY{y}") for y in years for item in DURATION_CONCEPTS for c in DURATION_CONCEPTS[item]]
-    jobs += [(c, f"CY{y}Q{q}I") for y in years for item in INSTANT_CONCEPTS for c in INSTANT_CONCEPTS[item] for q in (1, 2, 3, 4)]
-    map_concurrent(lambda j: endpoints.frame(client, j[0], j[1]), jobs, workers=8)
+    map_concurrent(lambda j: endpoints.frame(client, j[0], j[1]), [j for y in years for j in _frame_jobs(y)], workers=8)
 
 
 def _build(client: EdgarClient, ciks: list[int] | None, years: list[int]) -> pd.DataFrame:

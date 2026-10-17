@@ -324,7 +324,9 @@ def a14(ctx: RunContext):
         raise SkipDetector("no versioned annual facts")
     v = v[v["item"].isin(SIGNIFICANT_ITEMS) & (v["end"] <= ctx.focus + pd.Timedelta(days=8))]
     v = v[v["end"] >= ctx.focus - pd.Timedelta(days=3 * 366)]
-    labeled = {e.accession for e in ctx.events_of("NON_RELIANCE", "AMENDED_10K")}
+    v = v[v.groupby(["item", "end"])["val"].transform("nunique") > 1]  # only values that were re-reported differently
+    amended = {e.accession for e in ctx.events_of("AMENDED_10K", "NON_RELIANCE")}
+    non_reliance = [pd.Timestamp(e.date) for e in ctx.events_of("NON_RELIANCE")]
     ni_base = max(abs(ctx.a("NET_INCOME")), 1.0)
     ta_base = max(abs(ctx.a("TOTAL_ASSETS")), 1.0)
     out = []
@@ -341,7 +343,8 @@ def a14(ctx: RunContext):
         base = ni_base if item in ("NET_INCOME", "PRETAX_INCOME", "OPERATING_INCOME", "RETAINED_EARNINGS") else ta_base
         mat = abs(delta) / base
         sev = float(np.clip(0.3 + 4 * mat if income_item else 0.15 + 2 * mat, 0, 1))
-        is_labeled = last["accn"] in labeled
+        # labelled: re-reported in an amendment, or within a year after a non-reliance notice
+        is_labeled = last["accn"] in amended or any(0 <= (pd.Timestamp(last["filed"]) - d).days <= 366 for d in non_reliance)
         period_label = f"FY{pd.Timestamp(end).year}"
         tags = ["labeled_restatement" if is_labeled else "unlabeled_revision"]
         direction = "income_increasing" if (income_item and first["val"] > last["val"] and item != "COGS") else "neutral"
@@ -349,13 +352,13 @@ def a14(ctx: RunContext):
             EvidenceRef(node_id=f"fact:{first['concept']}|{first['accn']}|{end}", kind="fact",
                         label=f"{BY_ID[item].label} {period_label} as first reported", accession=first["accn"],
                         doc_url=ctx.doc_url(first["accn"]), concept=first["concept"], period=period_label,
-                        value=float(first["val"]), unit="USD", filed=str(pd.Timestamp(first["filed"]).date())),
+                        value=float(first["val"]), unit=ctx.currency, filed=str(pd.Timestamp(first["filed"]).date())),
             EvidenceRef(node_id=f"fact:{last['concept']}|{last['accn']}|{end}", kind="fact",
                         label=f"{BY_ID[item].label} {period_label} as re-reported", accession=last["accn"],
                         doc_url=ctx.doc_url(last["accn"]), concept=last["concept"], period=period_label,
-                        value=float(last["val"]), unit="USD", filed=str(pd.Timestamp(last["filed"]).date())),
+                        value=float(last["val"]), unit=ctx.currency, filed=str(pd.Timestamp(last["filed"]).date())),
         ]
-        out.append(mk("A.14", ctx, period=period_label, raw_value=delta, expected=0.0, severity=sev, unit="USD",
+        out.append(mk("A.14", ctx, period=period_label, raw_value=delta, expected=0.0, severity=sev, unit=ctx.currency,
                       scheme=Scheme.REPORTING_INTEGRITY, direction=direction, tags=tags,
                       impact=ImpactEstimate(abs(delta), abs(delta), abs(delta), "disclosed_amount",
                                             f"{BY_ID[item].label}: re-reported {fmt_money(last['val'])} vs first {fmt_money(first['val'])}") if income_item else None,

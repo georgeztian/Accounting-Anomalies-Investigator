@@ -27,6 +27,7 @@ from ffi.agent.schemas import (
 from ffi.agent.tools import facts_table, period_context, run_tool
 from ffi.audit import llm_auditor
 from ffi.context import RunContext
+from ffi.detectors.catalog import definition
 from ffi.detectors.d_stats import RATIOS
 from ffi.detectors.stats import fmt_money, fmt_pct
 from ffi.llm import LLM, BudgetExceeded, LLMRefusal
@@ -67,12 +68,16 @@ def finding_summary(ctx: RunContext, f) -> dict[str, Any]:
     m = f.materiality
     return {
         "id": f.id, "title": f.title, "score": round(f.score, 3), "severity_max": max(s.severity for s in f.signals),
-        "signals": [{"id": s.detector_id, "name": s.name, "severity": round(s.severity, 2), "rationale": s.rationale} for s in f.signals[:10]],
+        "signals": [{"id": s.detector_id, "name": s.name, "period": s.period, "severity": round(s.severity, 2), "rationale": s.rationale}
+                    for s in f.signals[:16]],
         "impact": (f"{fmt_money(m.impact_low)} to {fmt_money(m.impact_high)} (mid {fmt_money(m.impact_mid)}), "
                    f"{fmt_pct(m.pct_pretax)} of pre-tax income" if m else "not quantified"),
         "materiality_multiple": m.multiple if m else 0.0,
+        "test_definitions": {d: definition(d) for d in f.detectors},
         "questions": f.questions, "alternatives": f.alternatives,
-        "company": f"{ctx.company.name} ({ctx.company.ticker})", "period": ctx.focus_label,
+        "company": ctx.company.name + (f" ({ctx.company.ticker})" if ctx.company.ticker else ""), "period": ctx.focus_label,
+        # multi-year report: the years it was flagged in and its strength in every year reviewed
+        **({"years_flagged": f.years, "timeline": f.timeline} if getattr(f, "years", None) else {}),
     }
 
 
@@ -273,6 +278,7 @@ def build_graph(ctx: RunContext, finding, llm: LLM):
         # numbers the draft may legitimately repeat: tool outputs, the detectors' own results, and amounts in quoted filing text
         ledger_nums = [n for e in state.get("ledger", []) for n in e.get("numbers", []) + grounding.numbers_in(e.get("text", ""))]
         signal_nums = [n for s in state["finding"].get("signals", []) for n in grounding.numbers_in(s.get("rationale", ""))]
+        signal_nums += [n for d in state["finding"].get("test_definitions", {}).values() for n in grounding.numbers_in(d)]
         own = [state["finding"].get("title", "")] + [x for s in state["finding"].get("signals", []) for x in (s.get("name", ""), s.get("rationale", ""))]
         rep = grounding.check(text, allowed + ledger_nums + signal_nums, docs, known_text=own)
         _, lint_hits = lint(text)

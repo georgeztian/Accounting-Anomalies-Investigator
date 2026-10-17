@@ -27,6 +27,9 @@ CURRENCY_ANCHORS = ("REVENUE", "NET_INCOME", "TOTAL_ASSETS", "EQUITY")
 
 
 FOREIGN_INTERIM_FORMS = ("6-K", "6-K/A")
+# item attributes as lookup tables: Series.map(dict) is many times faster than a Python lambda per row
+KIND = {i: it.kind for i, it in BY_ID.items()}
+STATEMENT = {i: it.statement for i, it in BY_ID.items()}
 
 
 def _anchor_rows(raw: pd.DataFrame) -> pd.Series:
@@ -95,12 +98,12 @@ class CompanyFacts:
     sha256: str  # of the SEC companyfacts file as downloaded
 
 
-def load_companyfacts(client, cik: int) -> CompanyFacts:
+def load_companyfacts(client, cik: int, max_age_s: float | None = None) -> CompanyFacts:
     """A company's flattened companyfacts, cached as parquet; the raw download is not kept.
 
     The SEC file is 10-50 MB of JSON per company (the target and ~15 peers each run). Only the flattened table is
-    stored, with the raw file's hash and the fetch time; it is refreshed after a day like the raw file was, and a
-    stale copy is used when the SEC cannot be reached or the run is offline."""
+    stored, with the raw file's hash and the fetch time; it is refreshed once it is older than `max_age_s` (default a
+    day), and a stale copy is used when the SEC cannot be reached or the run is offline."""
     import hashlib
     import json
     import time
@@ -120,7 +123,7 @@ def load_companyfacts(client, cik: int) -> CompanyFacts:
         except (OSError, ValueError, KeyError):
             return None
 
-    fresh = path.exists() and (client.offline or time.time() - path.stat().st_mtime < endpoints.DAY)
+    fresh = path.exists() and (client.offline or time.time() - path.stat().st_mtime < (max_age_s or endpoints.DAY))
     if fresh and (hit := cached()) is not None:
         return hit
     try:
@@ -152,11 +155,11 @@ def map_canonical(df: pd.DataFrame, currency: str = "USD") -> pd.DataFrame:
     keys = list(zip(df["taxonomy"], df["concept"], strict=True))
     item_lists = [CONCEPT_TO_ITEMS.get(k, []) for k in keys]
     df = df.assign(_m=item_lists).explode("_m").dropna(subset=["_m"])
-    df["item"] = df["_m"].map(lambda t: t[0])
-    df["rank"] = df["_m"].map(lambda t: t[1]).astype(int)
+    df["item"] = [t[0] for t in df["_m"]]
+    df["rank"] = np.fromiter((t[1] for t in df["_m"]), dtype=int, count=len(df))
     df = df.drop(columns="_m")
-    units = df["item"].map(lambda i: BY_ID[i].unit.replace("USD", currency))
-    kinds = df["item"].map(lambda i: BY_ID[i].kind)
+    units = df["item"].map({i: it.unit.replace("USD", currency) for i, it in BY_ID.items()})
+    kinds = df["item"].map(KIND)
     ok_unit = df["unit"] == units
     ok_kind = np.where(kinds == "D", df["days"].notna(), df["days"].isna())
     return df[ok_unit & ok_kind].reset_index(drop=True)
@@ -221,8 +224,16 @@ class FactStore:
         self.df = mapped.reset_index(drop=True)
         self.as_of = as_of
         self._fye: list[pd.Timestamp] | None = None
+        self._memo: dict[tuple[str, str], object] = {}  # built panels and version tables (callers must not mutate them)
         counts = self.df["taxonomy"].value_counts() if not self.df.empty else pd.Series(dtype=int)
         self.taxonomy = "ifrs-full" if counts.get("ifrs-full", 0) > counts.get("us-gaap", 0) else "us-gaap"
+
+    def __getstate__(self) -> dict:
+        return {k: v for k, v in self.__dict__.items() if not k.startswith("_memo")}  # caches are rebuilt on demand
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
+        self._memo = {}
 
     @classmethod
     def from_companyfacts(cls, cik: int, cf: dict, as_of: date | None = None) -> FactStore:
@@ -303,10 +314,15 @@ class FactStore:
         return _fix_share_scale(Panel(freq, values, labels, prov))
 
     def annual(self, version: str = "first") -> Panel:
+        if ("annual", version) not in self._memo:  # also needed by quarterly() and the multi-year review's every year
+            self._memo[("annual", version)] = self._annual(version)
+        return self._memo[("annual", version)]  # type: ignore[return-value]
+
+    def _annual(self, version: str) -> Panel:
         fyes = self.fiscal_year_ends()
         d = self.df
-        kinds = d["item"].map(lambda i: BY_ID[i].kind)
-        stmt = d["item"].map(lambda i: BY_ID[i].statement)
+        kinds = d["item"].map(KIND)
+        stmt = d["item"].map(STATEMENT)
         is_ann = d["form"].isin(self.annual_forms)
         dur = d[(kinds == "D") & (stmt != "DEI") & d["days"].between(*ANNUAL_DAYS) & (is_ann | d["form"].str.startswith("8-K"))]
         inst = d[(kinds == "I") & (stmt != "DEI")].assign(_pref=(~is_ann).astype(int))
@@ -330,8 +346,8 @@ class FactStore:
         qends = self.quarter_ends()
         fyes = self.fiscal_year_ends()
         d = self.df
-        kinds = d["item"].map(lambda i: BY_ID[i].kind)
-        stmt = d["item"].map(lambda i: BY_ID[i].statement)
+        kinds = d["item"].map(KIND)
+        stmt = d["item"].map(STATEMENT)
         dur = d[(kinds == "D") & d["days"].between(*QUARTER_DAYS)]
         inst = d[(kinds == "I") & (stmt != "DEI")]
         chosen = pd.concat([self._choose(self._assign(dur, qends), version), self._choose(self._assign(inst, qends), version)])
@@ -365,11 +381,22 @@ class FactStore:
     # ------------------------------------------------------------------ versions
     def versions(self, freq: str = "A") -> pd.DataFrame:
         """All distinct reported values per (item, period) with the filing that reported each one."""
+        if ("versions", freq) not in self._memo:  # read by the knowledge graph and the restatement test
+            self._memo[("versions", freq)] = self._versions(freq)
+        return self._memo[("versions", freq)]  # type: ignore[return-value]
+
+    def values_by_filing(self) -> dict[tuple[str, str], np.ndarray]:
+        """Every reported value by (accession, concept), for re-reading cited facts (the independent audit)."""
+        if ("values", "accn_concept") not in self._memo:
+            self._memo[("values", "accn_concept")] = {k: g.to_numpy(float) for k, g in self.df.groupby(["accn", "concept"])["val"]}
+        return self._memo[("values", "accn_concept")]  # type: ignore[return-value]
+
+    def _versions(self, freq: str) -> pd.DataFrame:
         d = self.df
         if d.empty:
             return d
         rng = ANNUAL_DAYS if freq == "A" else QUARTER_DAYS
-        is_d = d["item"].map(lambda i: BY_ID[i].kind) == "D"
+        is_d = d["item"].map(KIND) == "D"
         sel = d[(~is_d) | d["days"].between(*rng)].copy()
         if freq == "A":
             sel = sel[sel["form"].isin(self.annual_forms)]

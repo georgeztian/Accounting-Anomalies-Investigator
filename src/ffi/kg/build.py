@@ -114,17 +114,21 @@ def build(ctx) -> dict[str, int]:
             edges.append({"src": nid, "dst": f"lineitem:{item}", "type": "INSTANCE_OF", "recorded_at": _ts(rec.filed)})
     v = ctx.store.versions("A")
     if not v.empty:
-        for (item, end), g in v.groupby(["item", "end"]):
-            g = g.drop_duplicates("val")
-            for a, b in zip(g.iloc[:-1].itertuples(), g.iloc[1:].itertuples(), strict=True):
-                na = f"version:{item}|{pd.Timestamp(end).date()}|{a.accn}"
-                nb = f"version:{item}|{pd.Timestamp(end).date()}|{b.accn}"
-                for n, r in ((na, a), (nb, b)):
-                    nodes.append({"id": n, "type": "Fact", "label": f"{BY_ID[item].label} FY{pd.Timestamp(end).year} ({r.form} {pd.Timestamp(r.filed).date()})",
-                                  "recorded_at": _ts(r.filed), "props": {"item": item, "value": float(r.val), "accession": r.accn}})
-                edges.append({"src": nb, "dst": na, "type": "RESTATES", "recorded_at": _ts(b.filed), "source_accession": b.accn,
-                              "props": {"delta": float(b.val - a.val)}})
-                used_items.add(item)
+        # each distinct value of an (item, year) restates the one before it; pairs built column-wise (a per-group loop
+        # over itertuples took seconds per year for large filers)
+        v = v.drop_duplicates(["item", "end", "val"])[["item", "end", "val", "accn", "form", "filed"]]
+        prev = v.groupby(["item", "end"], sort=False).shift(1)
+        pairs = v.assign(p_val=prev["val"], p_accn=prev["accn"], p_form=prev["form"], p_filed=prev["filed"])
+        pairs = pairs[pairs["p_accn"].notna()]
+        for item, end, val, accn, form, filed, p_val, p_accn, p_form, p_filed in pairs.itertuples(index=False, name=None):
+            day, label = pd.Timestamp(end).date(), f"{BY_ID[item].label} FY{pd.Timestamp(end).year}"
+            na, nb = f"version:{item}|{day}|{p_accn}", f"version:{item}|{day}|{accn}"
+            for n, (a_val, a_accn, a_form, a_filed) in ((na, (p_val, p_accn, p_form, p_filed)), (nb, (val, accn, form, filed))):
+                nodes.append({"id": n, "type": "Fact", "label": f"{label} ({a_form} {pd.Timestamp(a_filed).date()})",
+                              "recorded_at": _ts(a_filed), "props": {"item": item, "value": float(a_val), "accession": a_accn}})
+            edges.append({"src": nb, "dst": na, "type": "RESTATES", "recorded_at": _ts(filed), "source_accession": accn,
+                          "props": {"delta": float(val - p_val)}})
+            used_items.add(item)
     for item in used_items:
         it = BY_ID[item]
         nodes.append({"id": f"lineitem:{item}", "type": "LineItem", "label": it.label, "props": {"statement": it.statement, "kind": it.kind}})

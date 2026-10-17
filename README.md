@@ -110,14 +110,15 @@ recursion_limit = 40
 
 ## Usage
 
-**One run produces one report, for one fiscal year.** Two options are easy to confuse:
+**A run produces one report.** By default it covers one fiscal year; `--span` makes it cover several. Three options are easy to confuse:
 
 | Option | What it controls | Default |
 |---|---|---|
-| `--period FY2022` | **Which fiscal year the report covers.** Run once per year to get reports for several years. | the latest annual report |
-| `--years 10` | **How much history feeds the tests** for that one year (trends, the company's own baselines, multi-year ratios). It does not produce a report per year. | 10 |
+| `--period FY2022` | **Which fiscal year the report covers** (with `--span`, the last year of the span). | the latest annual report |
+| `--span 10` | **How many fiscal years one report covers.** Each year is analysed on its own, then the findings are merged into anomalies tracked across the years (see *Multi-year review* below). | one year |
+| `--years 10` | **How much history feeds the tests** for each year analysed (trends, the company's own baselines, multi-year ratios). It never adds years to the report. | 10 |
 
-For reports on each of the last five years, run each year separately:
+For a separate report on each of the last five years instead, run each year on its own:
 
 ```powershell
 foreach ($y in 2021..2025) { anomaly-report AAPL --period FY$y }
@@ -126,22 +127,24 @@ foreach ($y in 2021..2025) { anomaly-report AAPL --period FY$y }
 ```powershell
 anomaly-report "Apple Inc. (AAPL)"                 # preferred input form: "Company name (TICKER)"
 anomaly-report AAPL                                # a ticker works
-anomaly-report "Microsoft Corporation"             # a name works (asks you to choose if ambiguous)
+anomaly-report "Apple Inc."             # a name works (asks you to choose if ambiguous)
 
-anomaly-report SMCI --mode deterministic           # no LLM at all
-anomaly-report SMCI --period FY2024                # the fiscal year the report covers (default: the latest)
+anomaly-report AAPL --mode deterministic           # no LLM at all
+anomaly-report AAPL --period FY2024                # the fiscal year the report covers (default: the latest)
 anomaly-report AAPL --as-of 2020-06-30             # point in time: only filings public on that date
 anomaly-report AAPL --years 7                      # years of history the tests use (default 10); still one report
+anomaly-report AAPL --span 10                      # one report covering the last 10 fiscal years
+anomaly-report AAPL --span 5 --period FY2022       # one report covering FY2018 to FY2022
 anomaly-report AAPL --peers MSFT,GOOGL,DELL        # override automatic peer selection
-anomaly-report SMCI --format html,md,json,pdf      # pdf needs the [pdf] extra
-anomaly-report SMCI --mode auto --budget-usd 3     # unattended agent with a $3 LLM cap
-anomaly-report SMCI --pause-on review_publish      # stop at the publish review and save state
-anomaly-report SMCI --resume SMCI_FY2026_ab12cd    # continue a paused or interrupted run
-anomaly-report SMCI --offline                      # use cached data only
-anomaly-report SMCI --keep-artifacts               # keep the run's graph database and agent checkpoints
+anomaly-report AAPL --format html,md,json,pdf      # pdf needs the [pdf] extra
+anomaly-report AAPL --mode auto --budget-usd 3     # unattended agent with a $3 LLM cap
+anomaly-report AAPL --pause-on review_publish      # stop at the publish review and save state
+anomaly-report AAPL --resume AAPL_FY2026_ab12cd    # continue a paused or interrupted run
+anomaly-report AAPL --offline                      # use cached data only
+anomaly-report AAPL --keep-artifacts               # keep the run's graph database and agent checkpoints
 
 anomaly-report render                              # rebuild the latest report with the current templates (no re-run)
-anomaly-report render META_FY2025_33b3ff           # rebuild one saved run's report
+anomaly-report render AAPL_FY2025_33b3ff           # rebuild one saved run's report
 
 anomaly-report batch companies.txt --workers 3     # many companies (one per line), one ranked summary
 anomaly-report detectors                           # list the detector catalogue
@@ -156,6 +159,25 @@ anomaly-report labels --start 2016 --end 2022                     # starter labe
 anomaly-report train --labels data/labels_4_02.csv --backtest     # walk-forward evaluation
 anomaly-report train --labels data/labels_4_02.csv                # fit and save the model
 ```
+
+### Multi-year review
+
+`--span N` reviews the last N fiscal years in one report:
+
+1. The company's filings and figures load once, and each annual report, earnings release and peer company is read
+   once for all the years that use it. Each year is then analysed exactly like a single-year run, with its
+   own comparison group, its own annual-report text and earnings releases, and the history available up to that year. Each year's figures are
+   taken **as first reported**, which is what investors saw at the time.
+2. The findings are **merged across years**. The same scheme pattern in several years becomes one anomaly; a single test
+   flagged in one year joins that pattern when the pattern appears in another year. Each anomaly records the years it was
+   flagged in and its strength in every year, and recurrence raises its score.
+3. The AI investigates the **top 5 merged anomalies** (`--max-cases`), each in the context of the most recent year it was
+   flagged in, with every year's results and the earlier years' annual reports in its evidence.
+4. The independent re-check, the plain-language explanations and the report follow, as in a single-year run.
+
+The first run downloads every year's annual reports and takes several minutes; later runs use the cache. The default AI
+cost cap doubles (`--budget-usd`, $12) because every year's filings are read. The earliest years have less history, so
+some of their tests cannot run; the report lists them.
 
 ### Modes
 
@@ -207,7 +229,7 @@ For financial and real-estate profiles, the earnings-management test also drops 
 
 ### Output
 
-Each run writes `reports/<TICKER>_<FY>_<id>/`. There is only ever one final report per company and fiscal year: when a run finishes, earlier runs for the same company and year (including failed ones) are deleted.
+Each run writes `reports/<TICKER>_<FY>_<id>/`, or `reports/<TICKER>_<FY first>-<FY last>_<id>/` for a multi-year review. There is only ever one final report per company and period: when a run finishes, earlier runs for the same company and the same year (or the same span of years), including failed ones, are deleted.
 
 | File | Content |
 |---|---|
@@ -217,7 +239,7 @@ Each run writes `reports/<TICKER>_<FY>_<id>/`. There is only ever one final repo
 | `report.pdf` | With `--format pdf` |
 | `manifest.json` | What's needed to reproduce the run. It records versions, options, the company profile, detector statuses, peers, the hash of the source data, source documents, LLM spend and timings. |
 | `run.pkl.gz` | Everything the report is built from, so `anomaly-report render` can rebuild it without downloads, tests or AI calls. Open only files this tool wrote. |
-| `kg.duckdb`, `checkpoints.sqlite` | Working files: the run's knowledge graph and agent checkpoints. Removed after a successful run unless you pass `--keep-artifacts`. Checkpoints are kept when an investigation paused or failed, so `--resume` can continue it. |
+| `kg.duckdb`, `checkpoints.sqlite` | Working files: the run's knowledge graph (one per year in a multi-year review) and agent checkpoints. Removed after a successful run unless you pass `--keep-artifacts`. Checkpoints are kept when an investigation paused or failed, so `--resume` can continue it. |
 
 `batch` also writes `batch_<time>.csv` and `.md` to the output folder. They rank the companies by risk index and list:
 - finding counts (verified and unverified);
@@ -260,6 +282,12 @@ The HTML and Markdown reports are written for clients, meaning readers with basi
 
 The risk index is a weighted combination of flagged results and corroborated patterns. It is **not** a probability.
 
+**A multi-year report** has the same sections, with year-by-year views added:
+- **Summary:** the risk index for the period and for each year, and the key figures for every year as first reported.
+- **Overview:** warning-sign strength by accounting area *and year*. A dark column is a bad year; a dark row is a recurring problem.
+- **Each anomaly:** the years it was flagged in, a strip and table of its strength by year, and a chart over the whole period. The estimated effect, investigation and re-check use the most recent year it was flagged in.
+- **All tests performed:** every year's results. The HTML report lists every test for each year; the Markdown report lists each year's flagged and explained results.
+
 ---
 
 ## How it works
@@ -278,10 +306,10 @@ Every formula, threshold, regression and model behind the tests, the scoring and
 |---|---|---|
 | Resolve | [resolve/resolver.py](src/ffi/resolve/resolver.py) | Parses `Name (TICKER)`, looks up the ticker in SEC's list, and checks the name against the SEC title and former names. If they don't match it asks you to choose. It requires at least one 10-K, 20-F or 40-F and counts annual reports across the full filing history, because large banks' recent filings are mostly prospectus supplements. |
 | Profile | [profiles.py](src/ffi/profiles.py) | Chooses the detector profile from the SIC code, then adjusts it for 20-F/40-F filing, IFRS and a non-USD currency. |
-| Fetch | [edgar/](src/ffi/edgar/) | Sends your User-Agent with every request. One shared rate limiter (≤ 8 requests/s) keeps all threads and batch workers within SEC's limit. Errors are retried with backoff, and responses are kept in a disk cache. Each company's XBRL data is stored only in processed form (refreshed daily), and filing text, releases and events download in the background while the industry data is built. |
+| Fetch | [edgar/](src/ffi/edgar/) | Sends your User-Agent with every request. One shared rate limiter (≤ 8 requests/s) keeps all threads and batch workers within SEC's limit. Errors are retried with backoff, and responses are kept in a disk cache. Each company's XBRL data is stored only in processed form (refreshed daily for the company, weekly for its peers), and filing text, releases and events download in the background while the industry data is built. |
 | Normalize | [xbrl/](src/ffi/xbrl/) | Maps us-gaap, ifrs-full and dei concepts to canonical line items, in priority order. Keeps every reported value with its filing date, and builds annual and quarterly panels both *as first reported* and *latest*. It detects the reporting currency and never mixes currencies. It accepts annual statements filed on 6-K, as many 40-F filers do. |
 | Text | [text/](src/ffi/text/) | Splits annual reports into Item sections and notes. 20-F items are mapped onto the 10-K sections. When MD&A and the statements are filed as exhibits, it reads those too: Exhibit 13 for some banks and insurers, and the 40-F exhibits. Each paragraph gets a stable ID, so any quote can be checked verbatim. |
-| Peers | [peers/](src/ffi/peers/) | Starts from active filers with the same 4-digit SIC code and widens to 3 and then 2 digits until there are enough. It picks the 15 nearest on size, margins and growth. The industry cross-section is built from XBRL frames and cached. |
+| Peers | [peers/](src/ffi/peers/) | Starts from active filers with the same 4-digit SIC code and widens to 3 and then 2 digits until there are enough. It picks the 15 nearest on size, margins and growth. The industry cross-section is built from XBRL frames and cached per calendar year, as a processed table only. |
 | Knowledge graph | [kg/](src/ffi/kg/) | DuckDB storage with NetworkX traversal. It holds companies, filings, facts and their restated versions, line items, sections, quotes, events, the auditor and signals. Every read is filtered by the `--as-of` date. |
 | Detect | [pipeline/detect.py](src/ffi/pipeline/detect.py) | Runs the detectors in dependency order. Detectors that don't apply to the profile are marked *n/a*, and a missing input gives a *skipped* status with a reason. A bug in one detector is reported, not fatal. Tests run in parallel; the AI tests get their own pool and start first. |
 | Score | [scoring/engine.py](src/ffi/scoring/engine.py) | Applies the explained-away discounts, controls false discoveries (Benjamini–Hochberg) and matches scheme-pattern templates. A pattern needs corroboration from at least 2 detector families. Then it computes the risk index and ranks the findings. |
@@ -357,7 +385,7 @@ intake → hypothesize → plan_evidence → [review_plan] → gather (parallel 
   - `--resume <run_id>` continues from the last checkpoint without repeating LLM calls.
 - **Budgets.** Each step has limits on input size, output tokens, tool calls, time and dollars. `--budget-usd` caps the whole run (default $6).
 - **Retries.** Transient API errors are retried 3 times with backoff. Budget and refusal errors are not retried. When retries run out, the case is downgraded rather than failing the run.
-- **Parallelism.** Unattended runs investigate up to 3 findings in parallel, and LLM detectors run on 4 threads. Interactive runs go one finding at a time.
+- **Parallelism.** Unattended runs investigate up to 3 findings in parallel. The statistical tests run on 4 threads, and each LLM detector gets a thread of its own. Interactive runs go one finding at a time.
 - **Agent tools** are read-only Python functions:
   - `get_fact`, `ratio`, `peer_stats`, `search_filing`;
   - `explaining_text`, `get_events`, `diff_risk_factors`.
@@ -387,12 +415,12 @@ src/ffi/
   kg/           DuckDB + NetworkX store, graph builder
   detectors/    base, helpers, stats, scores, textnum, xsec_models, catalog (plain-language explanations),
                 a_integrity, b_scores, c_accounts, d_stats, e_text, f_graph
-  pipeline/     detect (DAG runner), run (orchestration)
-  scoring/      false-positive control, scheme templates, risk index
+  pipeline/     detect (DAG runner), run (orchestration), span (multi-year review)
+  scoring/      false-positive control, scheme templates, risk index, span (merging findings across years)
   materiality/  impact and materiality
   agent/        schemas, tools, budget, grounding, graph, runner, ui
   audit/        deterministic auditor + correction loop, independent LLM auditor
-  report/       model, plain (client wording), charts, linter, render, snapshot (saved runs), templates/
+  report/       model, span_model, plain (client wording), explain, charts, linter, render, snapshot (saved runs), templates/
   training/     labels (8-K 4.02), train / backtest
   models/       trained model for the supervised detector
 ```

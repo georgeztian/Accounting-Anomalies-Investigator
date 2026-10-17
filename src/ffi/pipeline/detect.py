@@ -1,8 +1,8 @@
 """Run all registered detectors in dependency order.
 
-With the LLM enabled, independent detectors run concurrently (LLM calls are I/O-bound); a detector starts
-as soon as everything it depends on has finished. Deterministic runs stay sequential (CPU-bound, and
-already ~2 s).
+Independent detectors run concurrently; a detector starts as soon as everything it depends on has finished.
+The statistical tests share a pool of 4 threads; with the LLM enabled, each AI-backed test gets a thread of its
+own (their calls mostly wait on the model) and starts first. `workers=1` runs everything sequentially.
 """
 
 from __future__ import annotations

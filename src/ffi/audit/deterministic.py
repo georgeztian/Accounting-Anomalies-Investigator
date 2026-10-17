@@ -72,14 +72,7 @@ class AuditResult:
 
 # ------------------------------------------------------------------------------------- helpers
 def _facts_index(ctx) -> dict[tuple[str, str], np.ndarray]:
-    cache = getattr(ctx, "_audit_fact_index", None)
-    if cache is None:
-        d = ctx.store.df
-        cache = {}
-        for (accn, concept), g in d.groupby(["accn", "concept"]):
-            cache[(accn, concept)] = g["val"].to_numpy(float)
-        ctx._audit_fact_index = cache
-    return cache
+    return ctx.store.values_by_filing()  # built once per company and shared by every year of a multi-year review
 
 
 def _concept_name(ev: EvidenceRef) -> str | None:
@@ -105,6 +98,10 @@ def _allowed_numbers(ctx, finding, ledger: list[dict] | None = None) -> list[flo
             vals += [abs(c) for c in grounding._candidates(m)] + grounding._candidates(m)
     for e in ledger or []:
         vals += e.get("numbers", []) + grounding.numbers_in(e.get("text", ""))  # incl. amounts in quoted filing text
+    from ffi.detectors.catalog import definition
+
+    for d in finding.detectors:  # thresholds in the tests' own definitions ("rising > 10%")
+        vals += grounding.numbers_in(definition(d))
     return [float(v) for v in vals if v is not None and np.isfinite(v)]
 
 

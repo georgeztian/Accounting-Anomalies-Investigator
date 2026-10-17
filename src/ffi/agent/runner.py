@@ -49,7 +49,8 @@ def _apply(f, result: dict, case: dict) -> None:
     elif status == "explained":
         f.alternatives = [f"{a['alternative']}: {a['reasoning']}" for a in result.get("alternatives", []) if a.get("supported")] + f.alternatives
         f.narrative_source = "agent: closed as explained"
-        f.score *= 0.5
+        f.score *= 0.5  # counts for half: in the risk ranking as well as in its strength
+        f.priority *= 0.5
     elif status == "dropped":
         f.narrative_source = "agent narrative dropped by reviewer"
 
@@ -85,20 +86,26 @@ def _run_case(ctx, f, saver, run_id: str, ui: TerminalUI) -> dict[str, Any]:
 def investigate(ctx, score, run_dir: Path, run_id: str, opts, ui: TerminalUI | None = None) -> list[dict[str, Any]]:
     """Investigate the top findings. Unattended runs investigate cases in parallel; interactive runs one at a time
     (so prompts never interleave) and stop at the first pause."""
-    ui = ui or TerminalUI(mode="auto")
     targets = [f for f in score.findings if f.kind == "pattern"][: opts.max_cases] or score.findings[: opts.max_cases]
+    cases = investigate_cases([(ctx, f) for f in targets], run_dir, run_id, ui)
+    score.findings.sort(key=lambda x: -x.priority)
+    return cases
+
+
+def investigate_cases(pairs: list[tuple[Any, Any]], run_dir: Path, run_id: str, ui: TerminalUI | None = None) -> list[dict[str, Any]]:
+    """Investigate (context, finding) pairs; in a multi-year review each anomaly is read in the context of its own year."""
+    ui = ui or TerminalUI(mode="auto")
     cases: list[dict[str, Any]] = []
     with SqliteSaver.from_conn_string(str(run_dir / "checkpoints.sqlite")) as saver:
         interactive = ui.mode == "interactive" and stdin_interactive()
-        if interactive or len(targets) <= 1:
-            for f in targets:
+        if interactive or len(pairs) <= 1:
+            for ctx, f in pairs:
                 case = _run_case(ctx, f, saver, run_id, ui)
                 cases.append(case)
                 if case["status"] == "paused":
                     break
         else:
-            jobs = [(contextvars.copy_context(), f) for f in targets]  # keep per-run settings (currency) in worker threads
-            with ThreadPoolExecutor(max_workers=min(3, len(targets))) as pool:
-                cases = list(pool.map(lambda job: job[0].run(_run_case, ctx, job[1], saver, run_id, ui), jobs))
-    score.findings.sort(key=lambda x: -x.priority)
+            jobs = [(contextvars.copy_context(), ctx, f) for ctx, f in pairs]  # keep per-run settings (currency) in worker threads
+            with ThreadPoolExecutor(max_workers=min(3, len(pairs))) as pool:
+                cases = list(pool.map(lambda job: job[0].run(_run_case, job[1], job[2], saver, run_id, ui), jobs))
     return cases

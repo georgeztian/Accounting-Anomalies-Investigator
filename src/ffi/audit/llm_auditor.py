@@ -14,6 +14,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from ffi.detectors.catalog import definition
+from ffi.detectors.stats import CURRENCY
+
 AUDITOR_SYSTEM = (
     "You are an independent audit reviewer. You did not write the conclusions you are reviewing and you have no "
     "stake in them. Split the conclusions into individual factual claims and test each one strictly against the "
@@ -46,14 +49,18 @@ def evidence_pack(finding, ledger: list[dict[str, Any]], facts: list[dict[str, A
         val = f" value={e.value:.6g}{(' ' + e.unit) if e.unit else ''}" if e.value is not None else ""
         quote = f' quote="{e.quote[:300]}"' if e.quote else ""
         lines.append(f"[{eid}] {e.kind}: {e.label}{val}{quote} source={e.accession or e.kind}")
-    for s in finding.signals[:10]:
-        sid = f"S:{s.detector_id}"
+    multi = len({s.period for s in finding.signals}) > 1  # a multi-year anomaly holds the same test for several years
+    for s in finding.signals[:20]:
+        sid = f"S:{s.detector_id}" + (f"@{s.period}" if multi else "")
         ids.add(sid)
-        lines.append(f"[{sid}] detector output: {s.rationale}")
+        lines.append(f"[{sid}] detector output ({s.period}, severity {s.severity:.2f}): {s.rationale}")
+    for d in finding.detectors:
+        ids.add(f"D:{d}")
+        lines.append(f"[D:{d}] test definition: {definition(d)}")
     if finding.materiality:
         m = finding.materiality
         ids.add("M")
-        lines.append(f"[M] materiality: impact low={m.impact_low:.6g} mid={m.impact_mid:.6g} high={m.impact_high:.6g} USD; "
+        lines.append(f"[M] materiality: impact low={m.impact_low:.6g} mid={m.impact_mid:.6g} high={m.impact_high:.6g} {CURRENCY.get()}; "
                      f"pct_pretax={m.pct_pretax}; multiple_of_threshold={m.multiple:.3g}; sab99={m.sab99}")
     # the same figures the drafter may cite (the company's key figures and ratios), so true, sourced statements are
     # not marked unsupported merely because the auditor could not see their source

@@ -593,10 +593,17 @@ def _dep(v: V, b: int = 0) -> float:
 
 @detector("C.EXP.03", "Useful-life extension", F, Area.DEPRECIATION)
 def cexp03(ctx: RunContext):
-    """Implied average life = gross PP&E / depreciation rising > 10%; impact = depreciation at prior life - reported."""
+    """Implied average life = gross PP&E / depreciation rising > 10% above its median over the prior three years;
+    impact = depreciation at the prior life - reported. Every year uses the same depreciation measure, so a year that
+    tags depreciation on its own is never compared with years that only report D&A."""
     v = V(ctx.A, ctx.focus)
-    life = safe_div(v.g("PPE_GROSS"), _dep(v))
-    lives = [safe_div(v.g("PPE_GROSS", k), _dep(v, k)) for k in range(1, 4)]
+    years = [k for k in range(4) if finite(v.g("PPE_GROSS", k))]
+    if all(finite(v.g("DEPRECIATION", k)) for k in years):
+        dep, basis = (lambda k: v.g("DEPRECIATION", k)), "depreciation"
+    else:
+        dep, basis = (lambda k: v.g("DA", k) - v.z("AMORTIZATION_INTANGIBLES", k)), "depreciation and amortization less amortization of intangibles"
+    life = safe_div(v.g("PPE_GROSS"), dep(0))
+    lives = [safe_div(v.g("PPE_GROSS", k), dep(k)) for k in range(1, 4)]
     lives = [x for x in lives if finite(x) and x > 0]
     need(life, reason="gross PP&E or depreciation not reported")
     if not lives:
@@ -604,14 +611,14 @@ def cexp03(ctx: RunContext):
     prior = float(np.median(lives))
     chg = safe_div(life - prior, prior)
     sev = float(np.clip((chg - 0.10) / 0.30, 0, 1))
-    dep_at_old = safe_div(v.g("PPE_GROSS"), prior)
-    imp = dep_at_old - _dep(v)
+    imp = safe_div(v.g("PPE_GROSS"), prior) - dep(0)
     return [mk("C.EXP.03", ctx, raw_value=life, expected=prior, severity=sev, unit="years",
                scheme=Scheme.SHIFT_EXPENSES_LATER, direction="income_increasing",
                impact=ImpactEstimate(imp * 0.5, imp, imp * 1.2, "policy_counterfactual",
-                                     "gross PP&E / prior implied life - reported depreciation") if imp > 0 and chg > 0.05 else None,
-               rationale=f"Implied average useful life {life:.1f} years vs {prior:.1f} previously ({fmt_pct(chg)}). Mix shifts toward long-lived assets are a legitimate cause.",
-               evidence=ctx.evs(["PPE_GROSS", "DEPRECIATION", "DA"], ks=(0, 1)))]
+                                     f"gross PP&E / prior implied life - reported {basis}") if imp > 0 and chg > 0.05 else None,
+               rationale=(f"Implied average useful life (gross PP&E / {basis}) {life:.1f} years vs {prior:.1f}, the median of the "
+                          f"prior {len(lives)} years ({fmt_pct(chg)}). Mix shifts toward long-lived assets are a legitimate cause."),
+               evidence=ctx.evs(["PPE_GROSS", "DEPRECIATION", "DA", "AMORTIZATION_INTANGIBLES"], ks=(0, 1, 2, 3)))]
 
 
 @detector("C.EXP.04", "Depreciation rate drop", F, Area.DEPRECIATION, needs_peers=True)
@@ -665,8 +672,8 @@ def cexp07(ctx: RunContext):
         if c > 0:
             yrs += 1
             total += c
-    pt = abs(ctx.a("PRETAX_INCOME"))
-    sev = 0.6 * float(np.clip((yrs - 2) / 2, 0, 1)) * float(np.clip(safe_div(total / 5, pt) / 0.05, 0.3, 1))
+    size = safe_div(total / 5, abs(ctx.a("PRETAX_INCOME")))  # average charge vs pre-tax income; floor when not reported
+    sev = 0.6 * float(np.clip((yrs - 2) / 2, 0, 1)) * (float(np.clip(size / 0.05, 0.3, 1)) if finite(size) else 0.3)
     return [mk("C.EXP.07", ctx, raw_value=yrs, severity=sev, unit="years of 5", scheme=Scheme.MISLEADING_METRICS,
                rationale=f"Restructuring or impairment charges in {yrs} of the last 5 years, totalling {fmt_money(total)}.",
                evidence=ctx.evs(["RESTRUCTURING", "ASSET_IMPAIRMENT"], ks=(0, 1)))]

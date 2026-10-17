@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import dataclasses
 import json
 import logging
 import re
@@ -74,24 +75,29 @@ class RunOutput:
 
 
 class Step:
-    def __init__(self, timings: dict[str, float], progress: Callable[[str], None] | None) -> None:
-        self.timings, self.progress = timings, progress
+    """Times each pipeline stage. A stage that runs several times (once per year in a multi-year run) adds up."""
+
+    def __init__(self, timings: dict[str, float], progress: Callable[[str], None] | None, prefix: str = "") -> None:
+        self.timings, self.progress, self.prefix = timings, progress, prefix
 
     def __call__(self, name: str):
-        timings, progress = self.timings, self.progress
+        timings, progress, prefix = self.timings, self.progress, self.prefix
 
         class _Ctx:
             def __enter__(self_inner):
                 self_inner.t = time.perf_counter()
                 if progress:
-                    progress(name)
+                    progress(prefix + name)
                 return self_inner
 
             def __exit__(self_inner, *exc):
-                timings[name] = round(time.perf_counter() - self_inner.t, 2)
+                timings[name] = round(timings.get(name, 0.0) + time.perf_counter() - self_inner.t, 2)
                 return False
 
         return _Ctx()
+
+
+OFFICER_TEXTS = 8  # Item 5.02 filings read to tell which officer changed (the latest in the officer-turnover window)
 
 
 def load_events(client: EdgarClient, cik: int, filings, as_of: date, focus: pd.Timestamp) -> list[Event]:
@@ -99,9 +105,12 @@ def load_events(client: EdgarClient, cik: int, filings, as_of: date, focus: pd.T
 
     lo = (focus - pd.Timedelta(days=4 * 366)).date()
     out: list[Event] = []
-    fetched = 0
-    officer = [f for f in filings if f.form == "8-K" and "5.02" in (f.items or "").split(",") and lo <= f.filing_date <= as_of][-8:]
-    map_concurrent(lambda f: client.get_text(endpoints.document_url(cik, f)), officer, workers=4)  # warm the cache in parallel
+    # the filings C.GOV.03 counts (two years to the focus year end, plus the filing season after it)
+    win_lo, win_hi = (focus - pd.Timedelta(days=730)).date(), min(as_of, (focus + pd.Timedelta(days=120)).date())
+    officer = [f for f in filings if f.form == "8-K" and "5.02" in (f.items or "").split(",") and win_lo <= f.filing_date <= win_hi]
+    texts = dict(zip((f.accession for f in officer[-OFFICER_TEXTS:]),
+                     map_concurrent(lambda f: client.get_text(endpoints.document_url(cik, f)), officer[-OFFICER_TEXTS:], workers=4),
+                     strict=True))
     for f in filings:
         if not (lo <= f.filing_date <= as_of):
             continue
@@ -114,13 +123,8 @@ def load_events(client: EdgarClient, cik: int, filings, as_of: date, focus: pd.T
             for item, etype in EVENT_ITEMS.items():
                 if item in (f.items or "").split(","):
                     desc = f"8-K Item {item}"
-                    if item == "5.02" and fetched < 8:
-                        try:
-                            txt = client.get_text(url)
-                            fetched += 1
-                            desc += _officer_change_kind(txt)
-                        except EdgarError:
-                            pass
+                    if item == "5.02" and isinstance(texts.get(f.accession), str):  # a failed download stays undescribed
+                        desc += _officer_change_kind(texts[f.accession])
                     out.append(Event(f"{f.accession}:{item}", etype, f.filing_date, f.accession, desc, url))
     return out
 
@@ -148,7 +152,10 @@ def _officer_change_kind(raw_html: str) -> str:
     return (" - " + ", ".join(sorted(roles))) if roles else " - no senior finance/CEO departure or appointment language"
 
 
-def load_docs(client: EdgarClient, cik: int, filings, store_periods: list[pd.Timestamp], focus: pd.Timestamp, as_of: date, n: int = 3) -> list[TextDoc]:
+def load_docs(client: EdgarClient, cik: int, filings, store_periods: list[pd.Timestamp], focus: pd.Timestamp, as_of: date, n: int = 3,
+              cache: dict[str, TextDoc] | None = None) -> list[TextDoc]:
+    """The annual reports of the focus year and the n - 1 before it. `cache` (accession -> parsed document) lets the years of
+    a multi-year review share each parsed report instead of parsing it up to n times."""
     from ffi.concurrency import map_concurrent
 
     tenks = [f for f in filings if f.form in ANNUAL_TEXT_FORMS and f.filing_date <= as_of and f.report_date]
@@ -160,6 +167,8 @@ def load_docs(client: EdgarClient, cik: int, filings, store_periods: list[pd.Tim
             picks.append(f)
 
     def load(f):
+        if cache is not None and f.accession in cache:
+            return cache[f.accession]
         url = endpoints.document_url(cik, f)
         raw = client.get_text(url)
         if f.form == "40-F":  # the AIF, MD&A and audited statements are exhibits to the 40-F cover document
@@ -178,6 +187,8 @@ def load_docs(client: EdgarClient, cik: int, filings, store_periods: list[pd.Tim
             log.warning("annual report text %s unavailable: %s", f.accession, d)
         else:
             docs.append(d)
+            if cache is not None:
+                cache[f.accession] = d
     return docs
 
 
@@ -210,19 +221,30 @@ def _exhibits(client: EdgarClient, cik: int, f, wanted: list[tuple[str, str, str
     return out
 
 
-def load_releases(client: EdgarClient, cik: int, filings, focus: pd.Timestamp, as_of: date, n: int = 6) -> list[TextDoc]:
-    lo = (focus - pd.Timedelta(days=430)).date()
+RELEASE_DAYS_AFTER = 120  # the focus year's results release comes out within this many days of its year end
+
+
+def load_releases(client: EdgarClient, cik: int, filings, focus: pd.Timestamp, as_of: date, n: int = 6,
+                  cache: dict[str, TextDoc] | None = None) -> list[TextDoc]:
+    """The last n earnings releases (8-K Item 2.02, Ex. 99) up to the focus year's results: releases about later fiscal
+    years are never read, so a past year (--period, or the early years of a multi-year review) sees its own releases."""
     from ffi.concurrency import map_concurrent
 
-    cands = [f for f in filings if f.form == "8-K" and "2.02" in (f.items or "") and lo <= f.filing_date <= as_of][-n:]
+    lo, hi = (focus - pd.Timedelta(days=430)).date(), min(as_of, (focus + pd.Timedelta(days=RELEASE_DAYS_AFTER)).date())
+    cands = [f for f in filings if f.form == "8-K" and "2.02" in (f.items or "").split(",") and lo <= f.filing_date <= hi][-n:]
 
     def load(f):
+        if cache is not None and f.accession in cache:
+            return cache[f.accession]
         rows = endpoints.filing_index(client, cik, f)
         ex = next((r for r in rows if r["type"].upper().startswith("EX-99")), None)
         if not ex or not ex["document"]:
             return None
         url = endpoints.document_url(cik, f, ex["document"])
-        return build_doc(f.accession, "EX-99", str(f.report_date or f.filing_date), url, client.get_text(url))
+        doc = build_doc(f.accession, "EX-99", str(f.report_date or f.filing_date), url, client.get_text(url))
+        if cache is not None:
+            cache[f.accession] = doc
+        return doc
 
     return [d for d in map_concurrent(load, cands, workers=4) if d is not None and not isinstance(d, Exception)]
 
@@ -240,40 +262,78 @@ def pick_focus(store: FactStore, period: str | None) -> pd.Timestamp:
     return fyes[-1]
 
 
-def run(opts: RunOptions, choose=None, progress: Callable[[str], None] | None = None,
-        agent_ui: Any = None) -> RunOutput:
+@dataclass
+class Prepared:
+    """What every analysed year shares: the company, its filings and facts, and the AI client."""
+    client: EdgarClient
+    company: CompanyRef
+    filings: list
+    cf: Any
+    store: FactStore
+    profile: Any
+    tuning: dict[str, Any]
+    as_of: date
+    llm: Any
+    notes: list[str]
+    panels: tuple[Any, Any, Any]  # annual as first reported, annual latest, quarterly (built once, sliced per year)
+    # shared by the years of a multi-year review: parsed filings by accession, peers' annual panels by CIK
+    doc_cache: dict[str, TextDoc] = field(default_factory=dict)
+    release_cache: dict[str, TextDoc] = field(default_factory=dict)
+    peer_cache: dict[int, Any] = field(default_factory=dict)
+
+
+@dataclass
+class YearAnalysis:
+    """One fiscal year analysed: detectors run and scored, before any investigation."""
+    ctx: RunContext
+    results: list[DetectorResult]
+    score: ScoreResult
+    kg_counts: dict[str, Any]
+
+
+def prepare(opts: RunOptions, choose=None, step: Step | None = None) -> Prepared:
     settings = get_settings()
-    tuning = get_tuning()
-    timings: dict[str, float] = {}
-    step = Step(timings, progress)
+    step = step or Step({}, None)
     as_of = opts.as_of or date.today()
     client = EdgarClient(offline=opts.offline)
-
     with step("Resolving company"):
         company: CompanyRef = resolve(opts.company, client, choose=choose)
     with step("Loading filings and events"):
         filings = endpoints.filings_table(client, company.cik)
     with step("Normalizing XBRL facts"):
         cf = load_companyfacts(client, company.cik)
-        store = FactStore(company.cik, cf.raw, as_of)
+        store = FactStore(company.cik, cf.raw, as_of)  # holds only filings public by as_of
         CURRENCY.set(store.currency)  # money in narratives and the report is shown in the reporting currency
         profile = for_company(company.sic, company.annual_form, store.currency, store.taxonomy)
-        focus = pick_focus(store, opts.period)  # the store already holds only filings public by as_of
-        A, A_latest, Q = store.annual("first"), store.annual("latest"), store.quarterly("first")
-        keep = [p for p in A.values.index if p <= focus][-(opts.years + 3):]
-        A.values = A.values.loc[keep]
-        A_latest.values = A_latest.values.loc[[p for p in A_latest.values.index if p in keep]]
-        # Filing text, earnings releases and events do not depend on the industry data, so they download in the
-        # background while the cross-section and peers are built (all traffic shares one SEC rate limiter).
-        background = ThreadPoolExecutor(max_workers=3, thread_name_prefix="ffi-prefetch")
-        bg = lambda fn, *a: background.submit(contextvars.copy_context().run, fn, *a)  # noqa: E731
-        events_fut = bg(load_events, client, company.cik, filings, as_of, focus)
-        docs_fut = bg(load_docs, client, company.cik, filings, list(A.values.index), focus, as_of)
-        releases_fut = bg(load_releases, client, company.cik, filings, focus, as_of)
+        panels = (store.annual("first"), store.annual("latest"), store.quarterly("first"))
+    llm = None
+    notes: list[str] = []
+    if opts.mode != "deterministic":
+        if settings.has_llm:
+            from ffi.llm import LLM
 
-    run_id = opts.run_id or f"{company.ticker or company.cik}_{store.fiscal_label(focus)}_{uuid.uuid4().hex[:6]}"
-    run_dir = Path(opts.out_dir) / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
+            llm = LLM(budget_usd=opts.budget_usd, offline=opts.offline)
+        else:
+            notes.append("No LLM available (no ANTHROPIC_API_KEY and no logged-in Claude Code CLI): ran in deterministic mode "
+                         "(LLM detectors and the investigation agent skipped).")
+    return Prepared(client, company, filings, cf, store, profile, get_tuning(), as_of, llm, notes, panels)
+
+
+def analyse_year(prep: Prepared, opts: RunOptions, focus: pd.Timestamp, run_dir: Path, step: Step,
+                 kg_file: str = "kg.duckdb") -> YearAnalysis:
+    """Peers, filing text, knowledge graph, detectors and scoring for one fiscal year."""
+    client, company, filings, store, as_of, tuning = prep.client, prep.company, prep.filings, prep.store, prep.as_of, prep.tuning
+    A0, AL0, Q = prep.panels
+    keep = [p for p in A0.values.index if p <= focus][-(opts.years + 3):]
+    A = dataclasses.replace(A0, values=A0.values.loc[keep])
+    A_latest = dataclasses.replace(AL0, values=AL0.values.loc[[p for p in AL0.values.index if p in keep]])
+    # Filing text, earnings releases and events do not depend on the industry data, so they download in the
+    # background while the cross-section and peers are built (all traffic shares one SEC rate limiter).
+    background = ThreadPoolExecutor(max_workers=3, thread_name_prefix="ffi-prefetch")
+    bg = lambda fn, *a: background.submit(contextvars.copy_context().run, fn, *a)  # noqa: E731
+    events_fut = bg(load_events, client, company.cik, filings, as_of, focus)
+    docs_fut = bg(load_docs, client, company.cik, filings, list(A.values.index), focus, as_of, 3, prep.doc_cache)
+    releases_fut = bg(load_releases, client, company.cik, filings, focus, as_of, 6, prep.release_cache)
 
     peers: PeerSet | None = None
     xsec = pd.DataFrame()
@@ -298,7 +358,7 @@ def run(opts: RunOptions, choose=None, progress: Callable[[str], None] | None = 
                 own["REV_PRIOR"] = A.get("REVENUE", prior) if prior is not None else float("nan")
                 peers = select_peers(client, company.cik, sorted(industry), digits,
                                      xsec[xsec["cik"].isin(industry)], focus, tuning["peers"]["count"], as_of, override,
-                                     target_row=own, size_comparable=store.currency == "USD")
+                                     target_row=own, size_comparable=store.currency == "USD", cache=prep.peer_cache)
         except EdgarError as e:
             log.warning("peer data unavailable: %s", e)
 
@@ -309,25 +369,17 @@ def run(opts: RunOptions, choose=None, progress: Callable[[str], None] | None = 
             background.shutdown(wait=False, cancel_futures=True)
         auditor = find_auditor(docs[-1]) if docs else None
 
-    llm = None
-    notes: list[str] = []
-    if opts.mode != "deterministic":
-        if settings.has_llm:
-            from ffi.llm import LLM
-
-            llm = LLM(budget_usd=opts.budget_usd, offline=opts.offline)
-        else:
-            notes.append("No LLM available (no ANTHROPIC_API_KEY and no logged-in Claude Code CLI): ran in deterministic mode "
-                         "(LLM detectors and the investigation agent skipped).")
-
+    notes = list(prep.notes)
     for (item, p), factor in sorted(A.rescaled.items(), key=lambda kv: kv[0][1]):
-        notes.append(f"XBRL data quality: {item.replace('_', ' ').lower()} for {A.label(p)} is tagged in "
-                     f"{'millions' if factor == 1e6 else 'thousands'}; rescaled using net income / EPS.")
-    kg = DuckNXGraphStore(run_dir / "kg.duckdb", as_of=as_of)
+        if p in keep:
+            notes.append(f"XBRL data quality: {item.replace('_', ' ').lower()} for {A.label(p)} is tagged in "
+                         f"{'millions' if factor == 1e6 else 'thousands'}; rescaled using net income / EPS.")
+    kg = DuckNXGraphStore(run_dir / kg_file, as_of=as_of)
+    llm = prep.llm
     ctx = RunContext(company=company, store=store, A=A, A_latest=A_latest, Q=Q, filings=filings, focus=focus, as_of=as_of,
                      kg=kg, peers=peers, xsec=xsec, industry_ciks=industry, industry_digits=digits, docs=docs, releases=releases,
                      events=events, auditor=auditor, llm=llm, mode=opts.mode if llm else "deterministic", tuning=tuning,
-                     notes=notes, client=client, profile=profile, currency=store.currency, annual_form=company.annual_form)
+                     notes=notes, client=client, profile=prep.profile, currency=store.currency, annual_form=company.annual_form)
 
     with step("Building knowledge graph"):
         kg_counts = kg_build.build(ctx)
@@ -338,9 +390,26 @@ def run(opts: RunOptions, choose=None, progress: Callable[[str], None] | None = 
     with step("Scoring and materiality"):
         sc = score(ctx, results)
         kg_build.add_signals(ctx, [s for r in results for s in r.signals])
+    return YearAnalysis(ctx, results, sc, kg_counts)
+
+
+def run(opts: RunOptions, choose=None, progress: Callable[[str], None] | None = None,
+        agent_ui: Any = None) -> RunOutput:
+    timings: dict[str, float] = {}
+    step = Step(timings, progress)
+    prep = prepare(opts, choose, step)
+    company, store = prep.company, prep.store
+    focus = pick_focus(store, opts.period)
+
+    run_id = opts.run_id or f"{company.ticker or company.cik}_{store.fiscal_label(focus)}_{uuid.uuid4().hex[:6]}"
+    run_dir = Path(opts.out_dir) / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    year = analyse_year(prep, opts, focus, run_dir, step)
+    ctx, results, sc = year.ctx, year.results, year.score
 
     agent_cases: list[Any] = []
-    if llm is not None and sc.findings:
+    if ctx.llm is not None and sc.findings:
         with step("Investigating top findings (agent)"):
             from ffi.agent.runner import investigate
 
@@ -353,19 +422,19 @@ def run(opts: RunOptions, choose=None, progress: Callable[[str], None] | None = 
 
         explain_findings(ctx, sc)
 
-    manifest = build_manifest(ctx, results, sc, run_id, opts, timings, kg_counts, cf)
+    manifest = build_manifest(ctx, results, sc, run_id, opts, timings, year.kg_counts, prep.cf)
     out = RunOutput(ctx, results, sc, run_dir, manifest, timings, agent_cases)
     with step("Rendering report"):
-        from ffi.report.render import render
+        from ffi.report.render import render, to_json
 
         out.files = render(out, opts.formats)
-    (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
+    (run_dir / "manifest.json").write_text(to_json(manifest), encoding="utf-8")
     try:
         snapshot.save(out)  # lets `anomaly-report render` rebuild the report without re-running
     except Exception as e:  # noqa: BLE001 - the report is already written; only re-rendering is lost
         log.warning("could not save the run for re-rendering: %s", e)
     if not opts.keep_artifacts:
-        _remove_working_files(run_dir, kg, agent_cases)
+        _remove_working_files(run_dir, ctx.kg, agent_cases)
     _remove_superseded_reports(run_dir, company.cik)
     return out
 
@@ -405,15 +474,17 @@ def _remove_working_files(run_dir: Path, kg, cases: list[Any]) -> None:
             log.debug("could not remove %s: %s", f, e)
 
 
-def audit_findings(ctx: RunContext, sc: ScoreResult, limit: int = 12) -> None:
+def audit_findings(ctx: RunContext, sc: ScoreResult) -> None:
     """Independent audit with a correction loop (max 3 rounds) for every reported finding."""
     from ffi.audit.deterministic import run_audit
-    from ffi.scoring.engine import apply_audit, template_narrative
+    from ffi.scoring.engine import apply_audit, audit_reported, template_narrative
 
-    for f in sc.findings[:limit]:
+    def one(f) -> None:
         if not f.narrative:
             f.narrative = template_narrative(f)
         f.audit = run_audit(ctx, f, template_narrative, ledger=f.ledger)
+
+    audit_reported(sc.findings, one)
     apply_audit(sc)
 
 

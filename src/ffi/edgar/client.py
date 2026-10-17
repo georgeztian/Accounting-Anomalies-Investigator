@@ -130,6 +130,10 @@ class EdgarClient:
         tmp.replace(path)
         return data
 
+    def evict(self, url: str) -> None:
+        """Drop a cached response the caller has stored in processed form."""
+        self._path(url).unlink(missing_ok=True)
+
     def get_json(self, url: str, max_age_s: float | None = None) -> Any:
         return json.loads(self.get_bytes(url, max_age_s))
 

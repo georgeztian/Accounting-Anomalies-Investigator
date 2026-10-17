@@ -62,6 +62,7 @@ class RunContext:
     profile: Profile | None = None  # company type: which detectors and peer ratios apply
     currency: str = "USD"  # reporting currency of all monetary amounts
     annual_form: str = "10-K"  # 10-K | 20-F | 40-F
+    history: int = 4  # fiscal years of figures the investigation tools return (all years reviewed in a multi-year run)
 
     # ------------------------------------------------------------------ periods
     @property

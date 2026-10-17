@@ -49,8 +49,9 @@ STI short-term investments; TA / TL total assets / total liabilities.
 13. [The grounding gate](#13-the-grounding-gate)
 14. [The independent audit](#14-the-independent-audit)
 15. [Plain-language explanations](#15-plain-language-explanations)
-16. [Known approximations](#16-known-approximations)
-17. [References](#references)
+16. [Multi-year review](#16-multi-year-review)
+17. [Known approximations](#17-known-approximations)
+18. [References](#references)
 
 ---
 
@@ -211,7 +212,9 @@ Annual reports are converted from HTML to text, split into Items (Items 1, 1A, 7
 mapped onto their 10-K equivalents; Exhibit 13 and 40-F exhibits are appended when the financial statements are filed
 as exhibits) and into paragraphs with fixed character positions. Every quote used anywhere must be found verbatim at
 its position, after normalizing whitespace, dashes and quote marks. Earnings releases are the EX-99 exhibits of 8-K
-Item 2.02 filings. This makes every piece of text evidence traceable to the filing.
+Item 2.02 filings: the six latest filed between 430 days before the fiscal year end and 120 days after it, so a past
+year is tested against its own releases rather than later ones. This makes every piece of text evidence traceable to
+the filing.
 
 ### 2.6 Company profiles (`profiles.py`)
 
@@ -455,9 +458,12 @@ Needs segment-level (dimensional) XBRL, which the SEC's companyfacts data does n
 ### A.14 Silent restatement
 
 - **Computes**: for each significant item and each of the last three years, the first and the last reported value.
-  If the change is at least 0.5% of the first value: `severity = 0.3 + 4 × |change| / NI` for income items, or
-  `0.15 + 2 × |change| / TA` for balance-sheet items, capped at 1. The result is labelled when the later filing is an
-  amendment or follows a non-reliance notice.
+  If the change is at least 0.5% of the first value: `severity = 0.3 + 4 × |change| / base` for income items
+  (revenue, cost of sales, pre-tax, operating and net income, retained earnings, equity), or
+  `0.15 + 2 × |change| / TA` for balance-sheet items, capped at 1. The base is NI for net, pre-tax and operating income
+  and retained earnings, and TA for the others (a revenue revision measured against NI would look ten times larger
+  than it is). The result is labelled when the later filing is an amendment or comes within a year after a
+  non-reliance notice.
 - **Why it works**: a prior year re-reported differently changes the history investors relied on. Without a formal
   restatement it may go unnoticed. Income items weigh more because they directly change reported performance.
 - **Innocent causes**: discontinued operations, segment recasts, new standards adopted retrospectively.
@@ -826,7 +832,9 @@ and prepaid items are where expenses can be parked.
 **C.EXP.03 Useful-life extension.** Implied useful life `gross PP&E / depreciation` against its prior three-year
 median; `severity = clip((change - 0.10) / 0.30)`. *Why*: longer assumed lives cut depreciation and raise profit
 without any change in the business. *Impact*: `gross PP&E / prior life - reported depreciation`, the depreciation at
-the old life less what was reported.
+the old life less what was reported. All four years use the same depreciation measure: depreciation where it is reported for every
+year, otherwise D&A less amortization of intangibles, so a year that tags depreciation on its own is never compared
+with years that only report D&A.
 
 **C.EXP.04 Depreciation rate drop.** Depreciation / average gross PP&E (assess, lower is worse). *Why*: the same
 effect seen as a rate. *Innocent causes*: large construction in progress, not yet depreciated.
@@ -840,7 +848,8 @@ z from 2). *Why*: cutting discretionary spending to hit a target lifts this year
 growth (real earnings management).
 
 **C.EXP.07 Recurring "non-recurring" charges.** Restructuring or impairment charges in 3 or more of the last 5 years;
-`severity = 0.6 × clip((years - 2) / 2) × clip(average charge / PT / 0.05, 0.3, 1)`. *Why*: charges labelled one-time
+`severity = 0.6 × clip((years - 2) / 2) × clip(average charge / PT / 0.05, 0.3, 1)`, with the last factor 0.3 when
+pre-tax income is not reported. *Why*: charges labelled one-time
 that recur every year are operating costs; excluding them flatters adjusted earnings.
 
 **C.EXP.08 Pension assumptions.** Discount rate and expected return on assets against peer medians;
@@ -966,10 +975,10 @@ from the numbers.
 |---|---|---|---|
 | C.GOV.01 | Auditor change (8-K Item 4.01) within two years | 0.55 | Auditor changes, especially after disagreements, often precede restatements |
 | C.GOV.02 | Non-reliance notices (8-K Item 4.02) and annual-report amendments within three years; same-day amendments count once | `min(1, 0.8 × notices + 0.35 × financial amendments + 0.1 × other amendments)` | A non-reliance notice is the strongest public sign of a past error; amendments that re-file financial statements weigh more than exhibit-only ones |
-| C.GOV.03 | Officer changes (8-K Item 5.02) in two years | `min(1, 0.05 × all + 0.35 × CFO/CAO + 0.2 × CEO)` | Turnover in finance leadership often accompanies accounting problems |
+| C.GOV.03 | Officer changes (8-K Item 5.02) in the two years to the fiscal year end (plus the 120 days after it); the latest 8 are read to tell CFO/CAO and CEO changes apart | `0.8 × min(1, 0.05 × all + 0.35 × CFO/CAO + 0.2 × CEO)` | Turnover in finance leadership often accompanies accounting problems |
 | C.GOV.04 | Late-filing notices (NT 10-K, NT 10-Q, NT 20-F) | `min(1, 0.45 × notices)` | A missed deadline often signals unresolved accounting or audit issues |
 | C.GOV.05 | Material weakness or ineffective controls in Item 9A | 0.85 (0.25 for weaker wording) | A control weakness means misstatements could go undetected |
-| C.GOV.06 | Going-concern doubt | fixed | Severe distress is the strongest pressure to manage results |
+| C.GOV.06 | Going-concern doubt | 0.8 | Severe distress is the strongest pressure to manage results |
 
 ### 6.10 Adjusted (non-GAAP) measures
 
@@ -1166,7 +1175,7 @@ lot, so similarity reflects substance rather than boilerplate.
 | E.06 | Boilerplate and rewrites | Year-over-year cosine similarity of MD&A, notes and risk factors: 0.4 if MD&A similarity is under 0.6; 0.35 if over 0.97 while revenue moved more than 20% | A sudden rewrite can frame a change management wants to present; unchanged text despite a changed business is stale disclosure |
 | E.07 | Hedging near key accounts | Density of hedge words in paragraphs about revenue, receivables, reserves, inventory and impairment; `severity = 0.4 × clip((change - 0.25) / 0.75)` | Vague language around the accounts that drive earnings can signal uncertainty about the numbers |
 | E.08 | Critical audit matters | Count and topics in the auditor's report; `min(0.4, 0.15 × new matters)` | They show where the auditor found the most judgment |
-| E.10 | SEC comment letters | Correspondence filings in three years; `0.5 × clip((letter threads - 1) / 4) + 0.15` if revenue recognition is a topic | Repeated SEC questions on revenue or non-GAAP measures can precede accounting changes |
+| E.10 | SEC comment letters | Correspondence filings in the three years to the fiscal year end and the year after it (when its annual report is reviewed), the latest 6 company responses read for topics; `0.5 × clip((letter threads - 1) / 4) + 0.15` if revenue recognition is a topic | Repeated SEC questions on revenue or non-GAAP measures can precede accounting changes |
 | E.13 | Missing companion disclosures | A checklist, e.g. receivables over 10% of assets but no allowance reported; `min(0.6, 0.2 × gaps)` | Material balances without their standard disclosures are hard to assess |
 
 E.11 (earnings-call evasiveness) needs licensed transcripts and is skipped.
@@ -1345,7 +1354,8 @@ risk index = 100 × (1 - exp(-T / 2.5))
 statistical and text signals least because they have the most. The exponential curve keeps the index below 100 and
 gives each additional warning sign less weight than the one before, so many weak signals cannot add up to the same
 alarm as a few strong ones. One strong, fully corroborated pattern (T about 0.8) gives about 27. Bands: Low below 25,
-Elevated below 50, High below 75, Severe 75 and above. The index is a screening score, not a probability of fraud.
+Elevated below 50, High below 75, Severe 75 and above, applied to the index rounded to a whole number as the report
+shows it (so "25" is never labelled Low). The index is a screening score, not a probability of fraud.
 
 After the independent audit (section 14), an unverified finding's priority and pattern contribution are halved, a
 pattern the audit downgraded to a single source keeps 60% of its contribution, and the index is recomputed.
@@ -1383,7 +1393,8 @@ still be material if it changes a trend or meets a target.
 
 ## 12. The AI investigation
 
-**What it is.** For the top findings (default 3, corroborated patterns first), a state machine built with LangGraph
+**What it is.** For the top findings (default 3: the highest-ranked corroborated patterns, or the highest-ranked
+findings when no pattern formed), a state machine built with LangGraph
 (`agent/graph.py`) runs a structured investigation. The reasoning model (by default Claude Opus 5.5) forms hypotheses,
 plans what evidence would confirm or refute them, weighs innocent explanations and writes the conclusion.
 
@@ -1408,14 +1419,15 @@ intake -> hypothesize -> plan evidence -> [plan review] -> gather (parallel, per
 3. **Gather**: the tools run, grouped by hypothesis, in parallel; each result enters an evidence ledger with an ID.
 4. **Test innocent explanations**: each is judged strictly from the ledger. A "supported" verdict without a ledger
    citation is overruled. If any explanation is supported and strong, the case closes as *explained* and the
-   finding's score is halved. This step exists because the most valuable output of an investigation is often a
+   finding's score and its ranking weight are halved. This step exists because the most valuable output of an investigation is often a
    documented innocent explanation.
 5. **Draft**: a summary and explanation using only numbers from the facts table, the test results or the ledger.
    The facts table is computed by code so the writer never does arithmetic: each test's result, its reference value
    and the gap between them; the cited line items with their year-on-year changes (in dollars and percent); the
    company's key figures and ratios; the materiality figures. Cash-flow change lines carry their sign convention
    ("positive = receivables rose, which used cash"), and the fiscal-year end dates and lengths (52 or 53 weeks) are
-   given. The writer is told to claim only what the evidence shows: a search that found nothing is "not found in the
+   given, as is each test's definition (how its result and reference value are computed), so neither the writer
+   nor the auditor has to guess how a figure was built. The writer is told to claim only what the evidence shows: a search that found nothing is "not found in the
    text searched", an alternative is "refuted" or "supported" only when evidence says so (otherwise "plausible but
    untested"), and a peer comparison covers one year.
 6. **Verify**: the grounding gate (section 13) and the neutral-language linter.
@@ -1476,7 +1488,8 @@ questions, not proof of wrongdoing, and the report's language must say so.
 ## 14. The independent audit
 
 **What it is.** A deterministic audit, with a correction loop of at most 3 rounds, of every reported finding (up to
-12), whether or not an AI investigation ran (`audit/deterministic.py`):
+12), whether or not an AI investigation ran (`audit/deterministic.py`). An unverified finding drops in the ranking,
+which can bring the next finding into the 12 reported; that finding is audited too.
 
 | Check | Passes when |
 |---|---|
@@ -1511,7 +1524,70 @@ first.
 
 ---
 
-## 16. Known approximations
+## 16. Multi-year review
+
+Implemented in `pipeline/span.py` and `scoring/span.py`; run with `--span N`.
+
+**What it is.** One report for the last N fiscal years. Each year is analysed exactly as in a single-year run (its own
+peer group, its own annual-report text, the history available up to that year, figures as first reported), and the
+findings of all years are then merged into anomalies tracked across the period.
+
+**Why it works.** A single year's warning sign is often noise or a one-off event; the same sign returning year after
+year is much harder to explain innocently, and a sign that appears only after a change (a new CFO, an acquisition) is
+informative by its timing. Using figures as first reported keeps each year's test on what investors saw at the time:
+a later restatement would otherwise erase the very anomaly it corrected.
+
+**Merging.** Findings group by a key:
+
+```
+key = the pattern id, for a scheme pattern
+key = a pattern the test is required for, when that pattern is reported in any year of the period
+key = the test id, otherwise
+```
+
+so a test that stood alone in one year (not yet corroborated) joins the pattern it later became part of. Within a
+merged anomaly every year's test results and evidence are kept (newest first); the most recent year it was flagged in
+*represents* it: its impact, materiality, questions and context are used, and its investigation and re-check run there.
+
+**Scores.** With `peak` the strongest yearly score, `k` the years flagged and `N` the years reviewed (a year counts in
+`k` when it adds a result of its own: a result about an earlier year that a later year's tests see again, such as the
+same revised comparative in A.14, is one event):
+
+```
+score    = peak + (1 - peak) x 0.5 x (k - 1) / (N - 1)
+priority = score x (0.5 + 0.5 x min(largest materiality multiple, 3) / 3) x recency
+recency  = 1 if flagged in one of the last 3 years reviewed, else 0.85
+```
+
+A sign flagged once keeps its single-year score; one flagged every year closes half the distance to 1. Recency gives
+weight to what is still happening without dropping older episodes. An anomaly the independent re-check cannot confirm
+counts for half, and one the investigation explains has its score halved, as in a single-year run.
+
+**Period risk index.**
+
+```
+period index = mean(yearly index) + 0.5 x (max(yearly index) - mean(yearly index))
+```
+
+It sits halfway between the average year and the worst year, so one bad year is neither averaged away nor allowed to
+define the whole period. The yearly indices are the screening scores of each year before any investigation.
+
+**Investigation.** The AI investigates the top 5 merged anomalies (`--max-cases`). Each case runs in the representative
+year's context with three additions: the finding lists every flagged year's results with their years and a strength
+timeline; the tools return figures for every year up to the representative year; and the annual reports and earnings
+releases of the earlier years are included, so quotes from those years can be found and checked. The facts table and the auditor's evidence pack both carry the lead test's result and severity in every
+year reviewed, flagged or not, and every year's test results with their year and severity, so statements about the
+anomaly's history can be checked. The grounding gate,
+the independent auditor and the plain-language writer work unchanged; the writer is asked to say in which years the
+anomaly appeared and whether it persists.
+
+**Limits.** The earliest years have less history, so tests that need several prior years cannot run in them. Peer groups
+are re-selected each year and thin out in early years. A change in what a company discloses (rather than in its
+accounts) can recur across years too; the investigation is the step that separates the two.
+
+---
+
+## 17. Known approximations
 
 - **Peer baselines are approximately point in time.** SEC frames carry peers' latest values, so a peer's later
   restatement can leak into a baseline. The company under review always uses its own first-reported values.

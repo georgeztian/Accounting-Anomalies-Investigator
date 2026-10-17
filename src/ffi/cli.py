@@ -21,8 +21,20 @@ from rich.table import Table
 from ffi._env_guard import require_virtualenv
 
 console = Console()
+SPAN_CASES = 5  # merged anomalies the AI investigates in a multi-year review
+FORMATS = ("html", "md", "json", "pdf")
 SUBCOMMANDS = {"detectors", "train", "labels", "cache-info", "batch", "render"}
 app = typer.Typer(add_completion=False, no_args_is_help=True, help="Accounting-anomaly analysis reports for SEC registrants.")
+
+
+def _formats(value: str) -> tuple[str, ...]:
+    """The --format list, checked: a misspelt format would otherwise silently produce no file."""
+    fmts = tuple(dict.fromkeys(f.strip().lower() for f in value.split(",") if f.strip()))
+    bad = [f for f in fmts if f not in FORMATS]
+    if bad or not fmts:
+        raise typer.BadParameter(f"unknown format {', '.join(bad) or '(none)'}; use a comma list of {', '.join(FORMATS)}",
+                                 param_hint="--format")
+    return fmts
 
 
 def _choose(cands: list[dict]) -> int | None:
@@ -45,6 +57,7 @@ def run_cmd(
     company: Annotated[str, typer.Argument(help='Company as "Name (TICKER)", a ticker, or a name')],
     years: Annotated[int, typer.Option(help="Fiscal years of history the tests use (the report still covers one year; see --period)")] = 10,
     period: Annotated[str | None, typer.Option(help="Fiscal year the report covers, e.g. FY2024 (default: the latest annual report)")] = None,
+    span: Annotated[int | None, typer.Option(help="Review the last N fiscal years in one report (ending at --period if given)")] = None,
     as_of: Annotated[str | None, typer.Option("--as-of", help="Point-in-time date YYYY-MM-DD")] = None,
     peers: Annotated[str | None, typer.Option(help="Comma-separated peer tickers (overrides automatic selection)")] = None,
     format: Annotated[str, typer.Option("--format", help="Comma list of html,md,json,pdf")] = "html,md,json",
@@ -65,8 +78,14 @@ def run_cmd(
     from ffi.resolve.resolver import ResolutionError
 
     agent_cfg = get_tuning()["agent"]
-    budget_usd = budget_usd if budget_usd is not None else float(agent_cfg.get("run_budget_usd", 6.0))
-    max_cases = max_cases if max_cases is not None else int(agent_cfg.get("max_cases", 3))
+    if span is not None and span < 2:
+        raise typer.BadParameter("--span must be at least 2 (one year is a normal run)")
+    if years < 1:
+        raise typer.BadParameter("--years must be at least 1")
+    formats = _formats(format)
+    # a multi-year review reads every year's filings with the AI and investigates its top 5 merged anomalies
+    budget_usd = budget_usd if budget_usd is not None else float(agent_cfg.get("run_budget_usd", 6.0)) * (2 if span else 1)
+    max_cases = max_cases if max_cases is not None else (SPAN_CASES if span else int(agent_cfg.get("max_cases", 3)))
     logging.basicConfig(level=logging.INFO if verbose else logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
     if mode not in ("interactive", "auto", "deterministic"):
         raise typer.BadParameter("mode must be interactive, auto or deterministic")
@@ -78,7 +97,7 @@ def run_cmd(
     opts = RunOptions(
         company=company, years=years, period=period, as_of=date.fromisoformat(as_of) if as_of else None,
         peers=[p for p in peers.split(",") if p.strip()] if peers else None,
-        formats=tuple(f.strip().lower() for f in format.split(",")), out_dir=out, mode=mode, budget_usd=budget_usd,
+        formats=formats, out_dir=out, mode=mode, budget_usd=budget_usd,
         run_id=resume, offline=offline, max_cases=max_cases,
         pause_on=tuple(p.strip() for p in pause_on.split(",")) if pause_on else (), keep_artifacts=keep_artifacts,
     )
@@ -88,7 +107,13 @@ def run_cmd(
     try:
         with console.status("Starting...") as status:
             ui.status = status
-            res = run(opts, choose=_choose, progress=lambda s: status.update(f"[bold]{s}[/bold]"), agent_ui=ui)
+            show = lambda s: status.update(f"[bold]{s}[/bold]")  # noqa: E731
+            if span:
+                from ffi.pipeline.span import run_span
+
+                res = run_span(opts, span, choose=_choose, progress=show, agent_ui=ui)
+            else:
+                res = run(opts, choose=_choose, progress=show, agent_ui=ui)
     except ResolutionError as e:
         console.print(f"[red]Could not resolve the company:[/red] {e}")
         for c in e.candidates:
@@ -100,7 +125,40 @@ def run_cmd(
     except ValueError as e:
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(6) from e
-    _summary(res)
+    if span:
+        _span_summary(res)
+    else:
+        _summary(res)
+
+
+def _span_summary(res) -> None:
+    from ffi.detectors.stats import fmt_money, fmt_pct
+    from ffi.scoring.span import years_text
+
+    sp, ctx = res.span, res.ctx
+    console.rule(f"[bold]{ctx.company.name} ({ctx.company.ticker}) {sp.periods[0]}-{sp.periods[-1]}")
+    console.print(f"Risk index for the period [bold]{sp.risk_index:.0f}[/bold] / 100 ({sp.band})   ·   resolution: {ctx.company.match_note}")
+    console.print("By year: " + ", ".join(f"{y['period']} {y['risk_index']:.0f}" for y in sp.yearly))
+    t = Table(show_header=True, header_style="bold")
+    for col, just in (("#", "left"), ("Anomaly", "left"), ("Years flagged", "left"), ("Strength", "right"), ("Impact (latest)", "right"), ("% pre-tax", "right")):
+        t.add_column(col, justify=just)  # type: ignore[arg-type]
+    for i, f in enumerate(sp.findings[:8], 1):
+        m = f.materiality
+        t.add_row(str(i), f.title, years_text(f, sp.periods).split(" (")[0].replace("Flagged in ", ""), f"{f.score:.2f}",
+                  fmt_money(m.impact_mid) if m else "-", fmt_pct(m.pct_pretax) if m and m.pct_pretax is not None else "-")
+    if sp.findings:
+        console.print(t)
+    else:
+        console.print("No anomalies met the reporting threshold in any year.")
+    console.print("Timings: " + ", ".join(f"{k} {v}s" for k, v in res.timings.items()))
+    for kind, p in res.files.items():
+        console.print(f"[green]{kind.upper()}[/green] {p.resolve()}")
+    llm = ctx.llm
+    if llm:
+        if llm.backend == "claude-code":
+            console.print(f"LLM: {llm.spend.calls} calls on your Claude subscription (API-equivalent ${llm.spend.usd:.2f}, not billed per token).")
+        else:
+            console.print(f"LLM spend ${llm.spend.usd:.2f} over {llm.spend.calls} calls.")
 
 
 def _summary(res) -> None:
@@ -158,13 +216,14 @@ def batch_cmd(
 
     if mode not in ("auto", "deterministic"):
         raise typer.BadParameter("batch mode must be auto or deterministic")
+    formats = _formats(format)
     lines = [ln.strip() for ln in companies.read_text(encoding="utf-8").splitlines() if ln.strip() and not ln.strip().startswith("#")]
     console.print(f"Analysing {len(lines)} companies with {workers} worker(s)...")
 
     def one(name: str) -> dict:
         t0 = _time.perf_counter()
         try:
-            res = run(RunOptions(company=name, mode=mode, formats=tuple(format.split(",")), out_dir=out, budget_usd=budget_usd))
+            res = run(RunOptions(company=name, mode=mode, formats=formats, out_dir=out, budget_usd=budget_usd))
             sc = res.score
             top = sc.findings[0] if sc.findings else None
             row = {"input": name, "ticker": res.ctx.company.ticker, "company": res.ctx.company.name, "period": res.ctx.focus_label,
@@ -238,7 +297,7 @@ def render_cmd(
     from ffi.detectors.stats import CURRENCY
 
     CURRENCY.set(res.ctx.currency)
-    for kind, p in render(res, tuple(f.strip().lower() for f in format.split(","))).items():
+    for kind, p in render(res, _formats(format)).items():
         console.print(f"[green]{kind.upper()}[/green] {p.resolve()}")
 
 

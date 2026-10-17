@@ -40,6 +40,10 @@ INSTRUCTIONS = """Write three short paragraphs about this finding for the client
 3. what_it_could_mean: the possible financial consequences if the anomaly reflects a real problem, such as effects on future profit, cash, debt, or on how investors read the results, and what would make it harmless.
 Rules: use only numbers that appear in the material above (you may round them, e.g. $103.8B or 204%); do not calculate new numbers; no quotation marks, lists, headings, test codes or file names; 2-4 sentences per paragraph; neutral, conditional language (could, may, warrants questions)."""
 
+MULTI_YEAR = ("\nThis anomaly is tracked across several fiscal years (years_flagged, strength_by_year). In what_we_found, "
+              "say in which years it appeared and whether it is still present; in why_unusual, say whether it recurs or was a "
+              "one-off, since a pattern that repeats is harder to explain away.")
+
 # Standard text when the AI is not available: what an anomaly in each area could mean financially.
 AREA_CONSEQUENCES: dict[str, str] = {
     Area.INTEGRITY: "If the figures do not add up as they should, some amounts may be misstated or classified inconsistently, so profit, assets or equity could differ from what is reported.",
@@ -93,6 +97,9 @@ def _material(ctx, f) -> str:
         "estimated_effect_on_profit": (f"{fmt_money(m.impact_low)} to {fmt_money(m.impact_high)}" if m else "not quantified"),
         "investigation_conclusion": f.narrative if f.narrative_source in ("agent", "agent-degraded") else "",
         "innocent_explanations_considered": f.alternatives[:6],
+        **({"years_flagged": f.years,
+            "strength_by_year": [{"fiscal_year": t["period"], "flagged": t["flagged"], "strength_0_to_1": t["score"]} for t in f.timeline]}
+           if getattr(f, "years", None) else {}),
     }
     return json.dumps(material, indent=1, default=str)
 
@@ -110,7 +117,7 @@ def _write_one(ctx, f) -> dict[str, str]:
     known = [f.title] + [x for s in f.signals for x in (s.name, s.rationale)]
     feedback: list[str] = []
     for _attempt in range(2):
-        prompt = [f"<material>\n{material}\n</material>", INSTRUCTIONS
+        prompt = [f"<material>\n{material}\n</material>", INSTRUCTIONS + (MULTI_YEAR if getattr(f, "years", None) else "")
                   + (f"\n<reviewer_feedback>\n{json.dumps(feedback)}\n</reviewer_feedback>\nFix every point." if feedback else "")]
         try:
             res = ctx.llm.structured(ClientExplanation, SYSTEM, prompt, purpose="report.explain", model=get_settings().writing_model,

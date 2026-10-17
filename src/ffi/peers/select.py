@@ -14,6 +14,7 @@ from ffi.peers.crosssection import calendar_year_of
 from ffi.xbrl.facts import FactStore, Panel, load_companyfacts
 
 log = logging.getLogger(__name__)
+PEER_FACTS_MAX_AGE = 7 * 86_400  # peers' facts are baselines: a week-old copy saves 15 downloads of 10-50 MB per run
 
 
 @dataclass
@@ -71,10 +72,12 @@ def select_peers(
     names: dict[int, str] | None = None,
     target_row: dict[str, float] | None = None,
     size_comparable: bool = True,
+    cache: dict[int, tuple[str, Panel | None]] | None = None,
 ) -> PeerSet:
     """`target_row` supplies the company's own metrics when it is missing from the frames cross-section (IFRS or
     non-USD filers, or revenue tagged with a concept the frames do not sample). Without `size_comparable`
-    (amounts in another currency) peers are matched on margins and growth only."""
+    (amounts in another currency) peers are matched on margins and growth only. `cache` (CIK -> name and annual
+    panel) lets the years of a multi-year review load each peer once: the panel does not depend on the year."""
     names = names or {}
     if override:
         chosen = [(c, 0.0) for c in override if c != target_cik]
@@ -113,12 +116,18 @@ def select_peers(
     def load(item: tuple[int, float]) -> Peer:
         cik, dist = item
         p = Peer(cik=int(cik), name=names.get(int(cik), str(cik)), distance=float(dist))
+        if cache is not None and p.cik in cache:
+            p.name, p.annual = cache[p.cik]
+            return p
         try:
-            facts = load_companyfacts(client, p.cik)
+            facts = load_companyfacts(client, p.cik, max_age_s=PEER_FACTS_MAX_AGE)
             p.name = facts.name or p.name
             p.annual = FactStore(p.cik, facts.raw, as_of).annual("first")
         except (EdgarError, KeyError, ValueError) as exc:
             log.warning("peer %s skipped: %s", cik, exc)
+            return p  # not cached: a later year retries it
+        if cache is not None:
+            cache[p.cik] = (p.name, p.annual)
         return p
 
     peers = [p for p in map_concurrent(load, chosen, workers=6) if isinstance(p, Peer)]

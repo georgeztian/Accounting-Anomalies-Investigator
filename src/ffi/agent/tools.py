@@ -36,7 +36,7 @@ def run_tool(ctx: RunContext, task: EvidenceTask, lid: str) -> dict[str, Any]:
         if item not in BY_ID:
             return _entry(lid, task, f"Unknown line item '{task.item}'.", [], [])
         vals, ev = [], []
-        for k in range(4):
+        for k in range(ctx.history):
             v = ctx.a(item, k)
             if np.isfinite(v):
                 vals.append((ctx.label(ctx.period_at(k)), v))
@@ -52,7 +52,7 @@ def run_tool(ctx: RunContext, task: EvidenceTask, lid: str) -> dict[str, Any]:
         n, d = (task.numerator or "").upper(), (task.denominator or "").upper()
         if n not in BY_ID or d not in BY_ID:
             return _entry(lid, task, "Unknown numerator/denominator.", [], [])
-        vals = [(ctx.label(ctx.period_at(k)), safe_div(ctx.a(n, k), ctx.a(d, k))) for k in range(4)]
+        vals = [(ctx.label(ctx.period_at(k)), safe_div(ctx.a(n, k), ctx.a(d, k))) for k in range(ctx.history)]
         vals = [(lab, v) for lab, v in vals if np.isfinite(v)]
         text = f"{BY_ID[n].label} / {BY_ID[d].label}: " + ", ".join(f"{lab} {fmt_pct(v)}" for lab, v in vals)
         ev = [e.to_dict() for e in ctx.evs([n, d], ks=(0, 1))]
@@ -115,7 +115,7 @@ def period_context(ctx: RunContext) -> list[str]:
     """When each fiscal year ended and how long it was (52/53-week calendars), so neither the drafter nor the auditor
     has to assume it."""
     out = []
-    for k in range(4):
+    for k in range(ctx.history):
         p, prev = ctx.period_at(k), ctx.period_at(k + 1)
         if p is None:
             break
@@ -138,15 +138,25 @@ def facts_table(ctx: RunContext, finding) -> list[dict[str, Any]]:
             if e.value is not None:
                 note = next((n for i, n in SIGN_NOTES.items() if e.label.startswith(BY_ID[i].label)), None)
                 rows.append({"source": e.label + (f" (sign: {note})" if note else ""), "value": float(e.value), "unit": e.unit or ""})
+    # multi-year anomaly: the lead test's result and severity in every year reviewed, flagged or not
+    for t in getattr(finding, "timeline", None) or []:
+        state = "flagged" if t["flagged"] else "not flagged"
+        if t["lead_value"] is not None and np.isfinite(t["lead_value"]):
+            rows.append({"source": f"{t['lead_test']} result, {t['period']} ({state})", "value": float(t["lead_value"]), "unit": t["lead_unit"]})
+        if t["lead_severity"] is not None:
+            rows.append({"source": f"{t['lead_test']} severity, {t['period']} ({state})", "value": float(t["lead_severity"]), "unit": "0-1"})
     # year-on-year changes of the cited line items, so the narrative never has to do its own arithmetic
+    # evidence labels read "<line item>, <period>[ (derived ...)]"; line-item labels can hold commas ("PP&E, net")
     labels = {it.label: i for i, it in BY_ID.items()}
-    items = {labels[e.label.split(", ")[0]] for s in finding.signals for e in s.evidence if e.label.split(", ")[0] in labels}
+    cited = {e.label.rsplit(", ", 1)[0] for s in finding.signals for e in s.evidence if e.kind == "fact"}
+    items = {labels[c] for c in cited if c in labels}
     for item in sorted(items):
-        for k in (0, 1, 2):
+        for k in range(max(3, ctx.history - 1)):
             v1, v0 = ctx.a(item, k), ctx.a(item, k + 1)
             if np.isfinite(v1) and np.isfinite(v0):
                 span = f"{ctx.label(ctx.period_at(k))} vs {ctx.label(ctx.period_at(k + 1))}"
-                rows.append({"source": f"{BY_ID[item].label} change, {span}", "value": float(v1 - v0), "unit": BY_ID[item].unit})
+                rows.append({"source": f"{BY_ID[item].label} change, {span}", "value": float(v1 - v0),
+                             "unit": BY_ID[item].unit.replace("USD", ctx.currency)})
                 if v0:
                     rows.append({"source": f"{BY_ID[item].label} % change, {span}", "value": float((v1 - v0) / abs(v0)), "unit": "ratio"})
     m = finding.materiality
@@ -160,7 +170,7 @@ def facts_table(ctx: RunContext, finding) -> list[dict[str, Any]]:
         for k in (0, 1):
             v = ctx.a(item, k)
             if np.isfinite(v):
-                rows.append({"source": f"{item} {ctx.label(ctx.period_at(k))}", "value": float(v), "unit": "USD"})
+                rows.append({"source": f"{item} {ctx.label(ctx.period_at(k))}", "value": float(v), "unit": ctx.currency})
     rv = ratio_vector(ctx.A, ctx.focus)
     for key, v in rv.items():
         if np.isfinite(v):

@@ -1,0 +1,145 @@
+{#- Multi-year review. Fixed layout: every section and every anomaly block always appears, in this order; empty blocks say so. -#}
+# {{ m.company.name }}{% if m.company.ticker %} ({{ m.company.ticker }}){% endif %} — accounting review, {{ m.period }}
+
+{{ m.years }} fiscal years, ended {{ m.first_end }} to {{ m.last_end }} · based on filings available on {{ m.as_of }} · prepared {{ m.generated }} · industry: {{ m.company.sic_description or 'not stated' }} · auditor: {{ m.company.auditor or 'not identified' }}
+
+Company type: **{{ m.profile.label }}** · amounts in {{ m.currency }} · {{ m.profile.excluded }} tests do not apply to this type of company
+
+**Caveats:** {% if m.company.warnings %}{{ m.company.warnings|join(' ') }}{% else %}{{ m.none_text }}{% endif %}
+
+> {{ m.disclaimer }}
+
+## Summary
+
+**Risk index for the period: {{ "%.0f"|format(m.risk.index) }} out of 100 ({{ m.risk.band }}).** Each year is scored on its own; the period index is the average of the yearly indices, raised halfway towards the worst year, so a single bad year is neither hidden nor allowed to define the period. It is a screening score, not the probability that anything is wrong (Low below 25, Elevated below 50, High below 75, Severe 75 and above).
+
+**Matters worth following up ({{ m.findings|length }}), most important first:**
+
+{% for s in m.top_sentences %}{{ loop.index }}. {{ s }}
+{% else %}- None. No test found a warning sign strong enough to report in any year; every result is listed under *All tests performed*.
+{% endfor %}
+**AI investigation:** {% if m.investigated %}the top {{ m.investigated }} anomalies were investigated across all the years they appeared in.{% else %}not run.{% endif %}
+
+**Independent re-check:** {% if m.findings %}every anomaly was re-checked against the original filings: {{ m.audit_summary.verified }} confirmed, {{ m.audit_summary.corrected }} confirmed after corrections, {{ m.audit_summary.unverified }} could not be fully confirmed and count for half.{% else %}not needed, because there are no anomalies.{% endif %}
+
+**The question that would most change this conclusion:** {{ m.key_question }}
+
+### Risk index by year
+
+| Fiscal year | Year ended | Risk index | Band | Tests flagged | Strongest finding |
+|---|---|---:|---|---:|---|
+{% for y in m.yearly %}| {{ m.periods[loop.index0] }} | {{ y.period_end }} | {{ "%.0f"|format(y.risk_index) }} | {{ y.band }} | {{ y.flagged }} | {{ y.top }} |
+{% endfor %}
+### Key figures (as first reported each year)
+
+| Figure |{% for p in m.periods %} {{ p }} |{% endfor %}
+|---|{% for p in m.periods %}---:|{% endfor %}
+{% for k in m.key_numbers %}| {{ k.label }} |{% for v in k["values"] %} {{ v }} |{% endfor %}
+{% endfor %}
+## Overview
+
+### Warning-sign strength by accounting area and year
+
+The strongest test result in each area and year, from 0 (nothing unusual) to 1 (strongest).
+
+| Accounting area |{% for p in m.periods %} {{ p }} |{% endfor %}
+|---|{% for p in m.periods %}---:|{% endfor %}
+{% for a in m.areas %}| {{ a.area }} |{% for c in a["values"] %} {{ "%.2f"|format(c.v) }} |{% endfor %}
+{% endfor %}
+### Pressures on management
+
+These are not warning signs in themselves, but pressure (financial strain, leadership changes) makes earnings management more likely.
+
+{% for p in m.pressure %}- **{{ p.name }} ({{ p.period }}):** {{ p.rationale }}
+{% else %}- {{ m.none_text }}
+{% endfor %}
+## Suspicious Accounting Anomalies
+{% for f in m.findings %}
+### {{ f.rank }}. {{ f.title }}
+
+*{{ f.years_text }} · Strength of evidence: {{ f.strength }} ({{ "%.2f"|format(f.score) }} of 1) · based on: {{ f.tests|join('; ') }} · {{ f.audit_label }}*
+
+| Fiscal year |{% for t in f.timeline %} {{ t.period|replace('FY', '') }} |{% endfor %}
+|---|{% for t in f.timeline %}:---:|{% endfor %}
+| Flagged |{% for t in f.timeline %} {{ 'yes' if t.flagged else '-' }} |{% endfor %}
+| Lead test severity |{% for t in f.timeline %} {{ "%.2f"|format(t.severity) if t.severity is not none else 'n/a' }} |{% endfor %}
+
+**What we found:** {{ f.what_found }}
+
+**Why this is unusual:** {{ f.why_unusual }}
+
+**What it could mean financially:** {{ f.what_it_means }}
+
+**Investigation ({{ f.investigation_status }}):** {{ f.investigation }}
+
+- **Estimated effect on profit (latest year flagged):** {{ f.impact_text }}{% if f.impact_basis %} (how it was estimated: {{ f.impact_basis }}){% endif %}
+- **Is it material?** {{ f.materiality_text }}
+- **Other reasons it could matter:** {{ f.sab99_text }}
+
+**What the tests found** (newest first; {{ f.signals|length }} of {{ f.signals_total }} results)
+{% for s in f.signals %}
+- **{{ s.name }}** (severity {{ "%.2f"|format(s.severity) }}, {{ s.period or 'latest period' }}): {{ s.rationale }}
+  - *What this result means:* {{ s.reading }}
+  - *What the test checks:* {{ s.what or m.none_text }}
+{% endfor %}
+**Supporting evidence: reported figures** ({{ f.figures|length }} of {{ f.figures_total }})
+
+| Figure | Source | Value |
+|---|---|---:|
+{% for e in f.figures %}| {{ e.label }} ({{ e.kind_label|lower }}) | {% if e.doc_url %}[{{ e.source }}]({{ e.doc_url }}){% else %}{{ e.source }}{% endif %} | {{ e.value_fmt or '' }} |
+{% else %}| {{ m.none_text }} | | |
+{% endfor %}
+**Supporting evidence: quotes from the filings** ({{ f.quotes|length }} of {{ f.quotes_total }})
+
+{% for e in f.quotes %}> “{{ e.quote|replace('\n',' ') }}” — {{ e.label }}, {% if e.doc_url %}[{{ e.source }}]({{ e.doc_url }}){% else %}{{ e.source }}{% endif %}
+
+{% else %}- {{ m.none_text }}
+
+{% endfor %}
+**Innocent explanations to rule out**
+
+{% for a in f.alternatives %}- {{ a }}
+{% endfor %}
+**Questions to ask management or the auditors**
+
+{% for q in f.questions %}- {{ q }}
+{% endfor %}{% else %}
+No accounting anomaly met the reporting threshold in any year.
+{% endfor %}
+## All tests performed
+
+Severity runs from 0 (nothing unusual) to 1 (strongest); a result is flagged at {{ "%.1f"|format(m.flag_at) }}. "Explained" means the result was unusual but a known legitimate cause was found. This version lists the flagged and explained results of each year; the HTML report and report.json list every test.
+{% for y in m.tests %}
+### {{ y.period|replace('FY', 'Fiscal ') }} ({{ y.flagged }} flagged; {{ y.statuses.ok }} tests ran, {{ y.statuses.skipped }} could not run, {{ y.statuses['n/a'] }} do not apply, {{ y.statuses.error }} failed)
+
+| Test | Result | Severity | What was found |
+|---|---|---:|---|
+{% for r in y.notable %}| {{ r.name }}{% if r.period %} ({{ r.period }}){% endif %} | {{ r.status_label }} | {{ "%.2f"|format(r.severity) if r.severity is not none else '' }} | {{ r.detail|replace('|','/') }} |
+{% else %}| No test was flagged or explained in this year. | | | |
+{% endfor %}{% endfor %}
+## Changes in the company's disclosures
+{% for t in m.text_changes %}
+**{{ t.name }} ({{ t.period }}).** {{ t.rationale }}
+{% for q in t.quotes %}
+> {{ q.quote|replace('\n',' ') }} ([{{ q.source }}]({{ q.doc_url }}))
+{% endfor %}{% else %}
+The text review did not flag disclosure changes in any year.
+{% endfor %}
+## How this review works
+
+- **Company:** {{ m.company.match_note }}
+- **Company type:** {{ m.profile.label }}. {{ m.profile.description }}{% for n in m.profile.notes %} {{ n }}{% endfor %}
+- **What was analysed:** {{ m.analysis_type }}. The figures come from the company's filings with the US Securities and Exchange Commission (SEC).
+- **Years:** each of the {{ m.years }} fiscal years was analysed on its own, with its own comparison group and the history available up to that year; findings were then matched across years. Each anomaly's estimated effect, investigation and re-check use the most recent year in which it was flagged.
+- **Point in time:** only filings public on or before {{ m.as_of }} were used, and each year's figures are taken as first reported, before any later corrections.
+- **Comparison group (latest year):** {{ m.peer_method }} Companies: {% if m.peers %}{{ m.peers|map(attribute='name')|join(', ') }}{% else %}none{% endif %}.
+- **Legitimate causes checked:** {% if m.explain_conditions %}{{ m.explain_conditions|join('; ') }}{% else %}no acquisition, change in accounting standards or stock split was found in any year reviewed.{% endif %}
+- **Data notes:**
+{% for n in m.notes %}  - {{ n }}
+{% endfor %}- **Filings read:** {% for d in m.documents %}[{{ d.label }}]({{ d.url }}){{ '; ' if not loop.last }}{% else %}none{% endfor %}
+- **Limitations:** this review looks for unusual patterns in public filings. It cannot verify cash, assets or transactions, and segment-level figures are not used. The earliest years have less history to compare against, so some tests could not run in them.
+
+## Glossary
+
+{% for term, meaning in m.glossary %}- **{{ term }}:** {{ meaning }}
+{% endfor %}

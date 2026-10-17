@@ -30,13 +30,12 @@ DISCLAIMER = ("This report flags departures from expectation in public filings f
               "legal or audit advice. Anomalies often have legitimate explanations.")
 
 
-def _ratio_chart(out, detector_id: str) -> str:
+def _ratio_chart(ctx, detector_id: str, years: int = 6) -> str:
     if detector_id not in DETECTOR_RATIO:
         return ""
     key, kind = DETECTOR_RATIO[detector_id]
     name, fn = RATIOS[key]
-    ctx = out.ctx
-    periods = ctx.periods[-6:]
+    periods = ctx.periods[-years:]
     mine, med, q1, q3 = [], [], [], []
     for p in periods:
         mine.append(float(fn(V(ctx.A, p))))
@@ -182,53 +181,72 @@ def _resolution(ctx) -> str:
             + (f"; industry: {c.sic_description}" if c.sic_description else "") + ".")
 
 
-def build_model(out) -> dict[str, Any]:
-    ctx, sc = out.ctx, out.score
-    flag_at = float(ctx.tuning.get("scoring", {}).get("flag_severity", 0.5)) if ctx.tuning else 0.5
-    findings = []
-    for i, f in enumerate(sc.findings[:12]):
-        summary, inv_status, inv_text = _investigation(f)
-        plain_text = for_report(f)  # what we found / why unusual / what it could mean
-        summary, _ = lint(summary)
-        inv_text, _ = lint(inv_text)
-        evidence = [_ev_dict(e, ctx) for e in _dedupe(f.evidence)]
-        m = f.materiality
-        groups = {"fact": [], "span": [], "derived": [], "event": []}
-        for e in f.evidence:
-            groups.setdefault(e.kind, []).append(P.plain(e.label, expand=False))
-        findings.append({
-            "rank": i + 1, "title": P.title(f.title), "score": round(f.score, 2), "strength": _strength(f.score),
-            "tests": [P.name(d) for d in f.detectors],
-            "signals": [{"name": P.name(s.detector_id), "severity": round(s.severity, 2),
-                         "rationale": P.plain(s.rationale), "period": P.plain(s.period, expand=False),
-                         "reading": P.plain(interpret("ok", s.severity, flag_at, s.flagged, s.percentile_peer, s.suppressed_by)),
-                         **_about(s.detector_id)} for s in f.signals],
-            "summary": P.plain(summary), "investigation_status": inv_status, "investigation": P.plain(inv_text),
-            **{k: P.plain(plain_text[src], terms=plain_text["source"] != "ai")
-               for k, src in (("what_found", "what"), ("why_unusual", "why"), ("what_it_means", "means"))},
-            "impact_basis": P.plain(f.impact.basis) if f.impact else "",
-            "impact_text": (f"{fmt_money(m.impact_low)} to {fmt_money(m.impact_high)} (central estimate {fmt_money(m.impact_mid)})"
-                            if m else "Not quantified: this test measures a pattern, not an amount of profit."),
-            "materiality_text": (
-                f"{fmt_pct(m.pct_pretax)} of pre-tax income and {fmt_pct(m.pct_revenue, 2)} of revenue; "
-                f"{m.multiple:.1f} times the materiality threshold an auditor would typically use (based on {BENCHMARKS.get(m.benchmark, m.benchmark)})"
-                + (f"; effect on earnings per share {money_prefix()}{m.eps_effect:.2f}" if m.eps_effect is not None else "")
-                + (f"; about {fmt_pct(m.pct_market_value)} of market value" if m.pct_market_value is not None else "")
-                if m else "Not assessed, because no effect on profit was estimated."),
-            "sab99_text": ("; ".join(P.plain(x) for x in m.sab99) + " (qualitative factors from SEC guidance on materiality)"
-                           if m and m.sab99 else NONE_TEXT),
-            **_evidence_blocks(evidence),
-            "alternatives": [P.plain(x) for x in f.alternatives] or [NONE_TEXT],
-            "questions": [P.plain(x) for x in f.questions] or [NONE_TEXT],
-            "audit": _audit(f.audit),
-            "audit_label": f.audit.label if f.audit else "Not independently re-checked",
-            "chart": _ratio_chart(out, f.signals[0].detector_id),
-            "graph": charts.evidence_graph(P.title(f.title), [(k, v) for k, v in groups.items() if v]),
-        })
+def peer_text(ctx) -> str:
+    """How the comparison group was chosen, or why there is none (no industry code, too few filers with data)."""
+    if ctx.peers and ctx.peers.loaded:
+        return P.plain(f"The {ctx.peers.method}.")
+    return "No comparable peer group could be formed."
+
+
+INTERNAL_NOTES = ("C.NG.04 asymmetry candidates",)  # hand-offs between tests saved by runs of earlier versions
+
+
+def run_notes(ctx) -> list[str]:
+    return [P.plain(n) for n in ctx.notes if not n.startswith(INTERNAL_NOTES)]
+
+
+def flag_level(ctx) -> float:
+    return float(ctx.tuning.get("scoring", {}).get("flag_severity", 0.5)) if ctx.tuning else 0.5
+
+
+def finding_block(f, ctx, rank: int, flag_at: float, chart_years: int = 6) -> dict[str, Any]:
+    """One finding's fixed set of blocks, as the templates show it."""
+    summary, inv_status, inv_text = _investigation(f)
+    plain_text = for_report(f)  # what we found / why unusual / what it could mean
+    summary, _ = lint(summary)
+    inv_text, _ = lint(inv_text)
+    evidence = [_ev_dict(e, ctx) for e in _dedupe(f.evidence)]
+    m = f.materiality
+    groups: dict[str, list[str]] = {"fact": [], "span": [], "derived": [], "event": []}
+    for e in f.evidence:
+        groups.setdefault(e.kind, []).append(P.plain(e.label, expand=False))
+    return {
+        "rank": rank, "title": P.title(f.title), "score": round(f.score, 2), "strength": _strength(f.score),
+        "tests": [P.name(d) for d in f.detectors],
+        "signals": [{"name": P.name(s.detector_id), "severity": round(s.severity, 2),
+                     "rationale": P.plain(s.rationale), "period": P.plain(s.period, expand=False),
+                     "reading": P.plain(interpret("ok", s.severity, flag_at, s.flagged, s.percentile_peer, s.suppressed_by)),
+                     **_about(s.detector_id)} for s in f.signals],
+        "summary": P.plain(summary), "investigation_status": inv_status, "investigation": P.plain(inv_text),
+        **{k: P.plain(plain_text[src], terms=plain_text["source"] != "ai")
+           for k, src in (("what_found", "what"), ("why_unusual", "why"), ("what_it_means", "means"))},
+        "impact_basis": P.plain(f.impact.basis) if f.impact else "",
+        "impact_text": (f"{fmt_money(m.impact_low)} to {fmt_money(m.impact_high)} (central estimate {fmt_money(m.impact_mid)})"
+                        if m else "Not quantified: this test measures a pattern, not an amount of profit."),
+        "materiality_text": (
+            f"{fmt_pct(m.pct_pretax)} of pre-tax income and {fmt_pct(m.pct_revenue, 2)} of revenue; "
+            f"{m.multiple:.1f} times the materiality threshold an auditor would typically use (based on {BENCHMARKS.get(m.benchmark, m.benchmark)})"
+            + (f"; effect on earnings per share {money_prefix()}{m.eps_effect:.2f}" if m.eps_effect is not None else "")
+            + (f"; about {fmt_pct(m.pct_market_value)} of market value" if m.pct_market_value is not None else "")
+            if m else "Not assessed, because no effect on profit was estimated."),
+        "sab99_text": ("; ".join(P.plain(x) for x in m.sab99) + " (qualitative factors from SEC guidance on materiality)"
+                       if m and m.sab99 else NONE_TEXT),
+        **_evidence_blocks(evidence),
+        "alternatives": [P.plain(x) for x in f.alternatives] or [NONE_TEXT],
+        "questions": [P.plain(x) for x in f.questions] or [NONE_TEXT],
+        "audit": _audit(f.audit),
+        "audit_label": f.audit.label if f.audit else "Not independently re-checked",
+        "chart": _ratio_chart(ctx, f.signals[0].detector_id, chart_years),
+        "graph": charts.evidence_graph(P.title(f.title), [(k, v) for k, v in groups.items() if v]),
+    }
+
+
+def test_families(results, flag_at: float) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Every test's result, grouped by family, and the count of tests by status."""
     families = []
     for fam, _name in FAMILY_NAMES.items():
         rows = []
-        for r in out.results:
+        for r in results:
             if r.family != fam:
                 continue
             if r.signals:
@@ -255,8 +273,16 @@ def build_model(out) -> dict[str, Any]:
                          "flagged": sum(1 for x in rows if x["status"] == "flagged"),
                          "ran": sum(1 for x in rows if x["status"] in ("flagged", "normal", "suppressed"))})
     statuses = {"ok": 0, "skipped": 0, "n/a": 0, "error": 0}
-    for r in out.results:
+    for r in results:
         statuses[r.status] = statuses.get(r.status, 0) + 1
+    return families, statuses
+
+
+def build_model(out) -> dict[str, Any]:
+    ctx, sc = out.ctx, out.score
+    flag_at = flag_level(ctx)
+    findings = [finding_block(f, ctx, i + 1, flag_at) for i, f in enumerate(sc.findings[:12])]
+    families, statuses = test_families(out.results, flag_at)
     text_changes = []
     for did in ("E.01", "E.02", "E.03", "E.04", "C.REV.07", "C.REV.11", "C.AR.04", "E.09"):
         for r in out.results:
@@ -274,7 +300,7 @@ def build_model(out) -> dict[str, Any]:
                    for lab, item in (("Revenue", "REVENUE"), ("Net income", "NET_INCOME"), ("Cash from operations", "CFO"),
                                      ("Total assets", "TOTAL_ASSETS"), ("Shareholders' equity", "EQUITY"))]
     llm = out.manifest.get("llm")
-    peers_txt = P.plain(f"The {ctx.peers.method}.") if ctx.peers else "No comparable peer group could be formed."
+    peers_txt = peer_text(ctx)
     return {
         "company": {"name": ctx.company.display_name or ctx.company.name, "ticker": ctx.company.ticker,
                     "sic_description": " ".join((ctx.company.sic_description or "").split()),
@@ -307,13 +333,13 @@ def build_model(out) -> dict[str, Any]:
         "pressure": [{"id": s.detector_id, "name": P.name(s.detector_id), "rationale": P.plain(s.rationale)} for s in sc.pressure],
         "explain_conditions": {k: P.plain(v) for k, v in sc.explain_conditions.items()},
         "charts": {"earnings_cash": _earnings_cash_chart(out), "scores": _scores_chart(out)},
-        "peers": [{"name": p.name} for p in (ctx.peers.peers if ctx.peers else [])],
+        "peers": [{"name": p.name} for p in (ctx.peers.loaded if ctx.peers else [])],
         "peer_method": peers_txt,
         "documents": [{"url": d.url,
                        "label": (f"Earnings release, {d.period_end}" if d.form == "EX-99" else
                                  f"{P.source_label(d.form, None, 'span')} for the fiscal year ended {d.period_end}")}
                       for d in ctx.docs + ctx.releases],
-        "notes": [P.plain(n) for n in ctx.notes] or [NONE_TEXT],
+        "notes": run_notes(ctx) or [NONE_TEXT],
         "none_text": NONE_TEXT,
         "glossary": P.GLOSSARY,
         "disclaimer": DISCLAIMER,
