@@ -46,7 +46,7 @@ EVENT_ITEMS = {"4.01": "AUDITOR_CHANGE", "4.02": "NON_RELIANCE", "5.02": "OFFICE
 @dataclass
 class RunOptions:
     company: str
-    years: int = 5
+    years: int = 10
     period: str | None = None
     as_of: date | None = None
     peers: list[str] | None = None

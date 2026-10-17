@@ -43,8 +43,8 @@ def _choose(cands: list[dict]) -> int | None:
 @app.command("run")
 def run_cmd(
     company: Annotated[str, typer.Argument(help='Company as "Name (TICKER)", a ticker, or a name')],
-    years: Annotated[int, typer.Option(help="Fiscal years of history analysed")] = 5,
-    period: Annotated[str | None, typer.Option(help="Focus fiscal year, e.g. FY2024 (default: the latest annual report)")] = None,
+    years: Annotated[int, typer.Option(help="Fiscal years of history the tests use (the report still covers one year; see --period)")] = 10,
+    period: Annotated[str | None, typer.Option(help="Fiscal year the report covers, e.g. FY2024 (default: the latest annual report)")] = None,
     as_of: Annotated[str | None, typer.Option("--as-of", help="Point-in-time date YYYY-MM-DD")] = None,
     peers: Annotated[str | None, typer.Option(help="Comma-separated peer tickers (overrides automatic selection)")] = None,
     format: Annotated[str, typer.Option("--format", help="Comma list of html,md,json,pdf")] = "html,md,json",

@@ -1186,7 +1186,7 @@ evidence.
 | E.04 | Full-year, company-wide claims in MD&A (metric, direction, stated %) | Duplicate claims are merged; each claim is checked against the reported figures. A contradiction is a wrong direction, or a stated size off by more than `2% + 10% × |actual|`; `severity = min(1, 0.45 × contradictions)`. Management's description should match the results |
 | E.09 | Customers, suppliers, related parties, guarantees, factoring and variable-interest entities, with amounts or revenue shares and whose revenue a share refers to (the whole company or one segment or subsidiary) | Verified relationships become graph edges (section 9). New related-party, guarantee, VIE or side-agreement edges score `min(0.8, 0.25 × new)` |
 | C.BS.03 | Numeric covenant thresholds | Compared with actual leverage and coverage |
-| C.NG.03 | Non-GAAP reconciliation lines in the latest release and one a year earlier | New categories, renamed measures and asymmetric treatment are counted |
+| C.NG.03 | Non-GAAP reconciliation lines in the latest release and one a year earlier | New categories, renamed measures and asymmetric treatment are counted; a measure counts as renamed only if its core name (without qualifiers such as TTM, Y/Y growth or excluding F/X) appears nowhere in the earlier release |
 
 AI answers are cached by a hash of the model, prompt, schema and settings, so a re-run with the same inputs gives the
 same answer at no cost.
@@ -1413,8 +1413,11 @@ intake -> hypothesize -> plan evidence -> [plan review] -> gather (parallel, per
 5. **Draft**: a summary and explanation using only numbers from the facts table, the test results or the ledger.
 6. **Verify**: the grounding gate (section 13) and the neutral-language linter.
 7. **Audit**: an independent AI auditor sees only the conclusions and an evidence pack built by code, and rules on
-   each claim (supported, overstated, needs context, unsupported). Any claim that is not supported sends the draft
-   back with the auditor's corrections.
+   each claim (supported, overstated, needs context, unsupported). A claim that is unsupported or overstated sends the
+   draft back with the auditor's corrections. A "needs context" note asks for a finer qualification of a claim the
+   evidence does support; it is recorded with the audit and passed on if the draft goes back anyway, but does not block
+   publication on its own (otherwise the loop chases ever-finer caveats until its rounds run out). The auditor's
+   evidence pack contains the same figures table the writer was allowed to use, so sourced statements can be checked.
 
 Each failed check is one round; after 3 rounds the case is *degraded* and the report says the investigation did not
 finish. Budgets cap each step's prompt size, output, time and cost (`agent/budget.py`); the whole run has a cost cap

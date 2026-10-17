@@ -20,11 +20,14 @@ ID_RE = re.compile(r"\b[A-F](?:\.[A-Z]{2,4})?\.\d{2}\b|\[L\d+\.\d+\]|\bFY\d{4}(?
 REF_RE = re.compile(r"\b(?:ASC|ASU|Topic|IFRS|IAS|SFAS|FAS|SAB|Rule|Section|Item|Items|Note|Notes|Exhibit|Form|Regulation|"
                     r"Level|Tier|Class|Series|Phase)\s+[0-9][0-9A-Za-z\-–.()]*", re.IGNORECASE)
 LEDGER_RE = re.compile(r"\s*\[L\d+(?:\.\d+)?\]")
+# calendar descriptions: "52/53-week fiscal year", "53-week year", "13-week quarter"
+CALENDAR_RE = re.compile(r"\b\d{1,2}(?:\s*/\s*\d{1,2})?[- ]weeks?\b", re.IGNORECASE)
 
 
 def strip_dates(text: str) -> str:
-    """Dates, detector ids (A.14, C.REV.01), ledger ids, fiscal labels and standard references are not financial figures."""
-    return REF_RE.sub(" ", ID_RE.sub(" ", DATE_RE.sub(" ", text)))
+    """Dates, detector ids (A.14, C.REV.01), ledger ids, fiscal labels, calendar descriptions and standard references are
+    not financial figures."""
+    return REF_RE.sub(" ", CALENDAR_RE.sub(" ", ID_RE.sub(" ", DATE_RE.sub(" ", text))))
 
 
 def numbers_in(text: str) -> list[float]:
@@ -87,6 +90,9 @@ def _norm(s: str) -> str:
 def check(text: str, allowed: list[float], docs: list, rel_tol: float = 0.015, known_text: list[str] | None = None) -> GroundingReport:
     """`known_text`: other verified sources a draft may quote, such as the detectors' own result sentences and labels."""
     rep = GroundingReport(ok=True)
+    # sizes are compared without sign: prose carries direction in words ("3.5 points slower" for a -3.5 point gap,
+    # "$0-$174.5M" for a range), so a figure is supported when its magnitude matches a source value
+    allowed_abs = [abs(a) for a in allowed]
     quotes_src = text
     text = strip_dates(text)
     for m in NUM_RE.finditer(text):
@@ -101,10 +107,9 @@ def check(text: str, allowed: list[float], docs: list, rel_tol: float = 0.015, k
             continue  # fiscal labels and ledger ids
         rep.numbers_checked += 1
         cands = _candidates(m)
-        cands += [abs(c) for c in cands if c < 0]  # "$0-$174.5M" is a range, not a negative amount
         found = False
-        for c in cands:
-            for a in allowed:
+        for c in (abs(x) for x in cands):
+            for a in allowed_abs:
                 for scale in (1, 100, 0.01):
                     v = a * scale
                     tol = max(abs(v) * rel_tol, 0.006 if abs(v) < 10 else 0.5)

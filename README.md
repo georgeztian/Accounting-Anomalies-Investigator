@@ -110,15 +110,28 @@ recursion_limit = 40
 
 ## Usage
 
+**One run produces one report, for one fiscal year.** Two options are easy to confuse:
+
+| Option | What it controls | Default |
+|---|---|---|
+| `--period FY2022` | **Which fiscal year the report covers.** Run once per year to get reports for several years. | the latest annual report |
+| `--years 10` | **How much history feeds the tests** for that one year (trends, the company's own baselines, multi-year ratios). It does not produce a report per year. | 10 |
+
+For reports on each of the last five years, run each year separately:
+
+```powershell
+foreach ($y in 2021..2025) { anomaly-report AAPL --period FY$y }
+```
+
 ```powershell
 anomaly-report "Apple Inc. (AAPL)"                 # preferred input form: "Company name (TICKER)"
 anomaly-report AAPL                                # a ticker works
 anomaly-report "Microsoft Corporation"             # a name works (asks you to choose if ambiguous)
 
 anomaly-report SMCI --mode deterministic           # no LLM at all
-anomaly-report SMCI --period FY2024                # a specific fiscal year (default: the latest)
+anomaly-report SMCI --period FY2024                # the fiscal year the report covers (default: the latest)
 anomaly-report AAPL --as-of 2020-06-30             # point in time: only filings public on that date
-anomaly-report AAPL --years 7                      # fiscal years of history analysed (default 5)
+anomaly-report AAPL --years 7                      # years of history the tests use (default 10); still one report
 anomaly-report AAPL --peers MSFT,GOOGL,DELL        # override automatic peer selection
 anomaly-report SMCI --format html,md,json,pdf      # pdf needs the [pdf] extra
 anomaly-report SMCI --mode auto --budget-usd 3     # unattended agent with a $3 LLM cap

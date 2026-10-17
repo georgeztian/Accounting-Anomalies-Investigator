@@ -1,7 +1,8 @@
 """Independent LLM auditor for agent conclusions.
 
 Independence by construction: the auditor gets its own instructions and sees only (1) the conclusions as
-written and (2) a numbered evidence pack built by Python from verified sources. It never sees the drafter's
+written and (2) a numbered evidence pack built by Python from verified sources: the finding's evidence, the detector
+outputs, the materiality figures, the facts table the drafter was allowed to use, and the evidence ledger. It never sees the drafter's
 hypotheses, plan, reasoning or earlier feedback. Each claim gets a verdict; a claim marked supported must
 cite evidence ids that exist in the pack, otherwise it is treated as unsupported.
 """
@@ -36,7 +37,7 @@ class AuditVerdicts(BaseModel):
     accusatory_language: list[str]
 
 
-def evidence_pack(finding, ledger: list[dict[str, Any]]) -> tuple[str, set[str]]:
+def evidence_pack(finding, ledger: list[dict[str, Any]], facts: list[dict[str, Any]] | None = None) -> tuple[str, set[str]]:
     lines, ids = [], set()
     for i, e in enumerate(finding.evidence[:40], 1):
         eid = f"E{i}"
@@ -53,15 +54,22 @@ def evidence_pack(finding, ledger: list[dict[str, Any]]) -> tuple[str, set[str]]
         ids.add("M")
         lines.append(f"[M] materiality: impact low={m.impact_low:.6g} mid={m.impact_mid:.6g} high={m.impact_high:.6g} USD; "
                      f"pct_pretax={m.pct_pretax}; multiple_of_threshold={m.multiple:.3g}; sab99={m.sab99}")
+    # the same figures the drafter may cite (the company's key figures and ratios), so true, sourced statements are
+    # not marked unsupported merely because the auditor could not see their source
+    for i, r in enumerate((facts or [])[:150], 1):
+        fid = f"F{i}"
+        ids.add(fid)
+        lines.append(f"[{fid}] figure: {r['source']} = {r['value']:.6g}{(' ' + r['unit']) if r.get('unit') else ''}")
     for e in ledger:
         ids.add(e["id"])
         lines.append(f"[{e['id']}] tool {e['tool']}: {e['text'][:600]}")
     return "\n".join(lines), ids
 
 
-def review(llm, draft: dict[str, Any], finding, ledger: list[dict[str, Any]], node_call) -> tuple[list[dict], list[str], Any]:
+def review(llm, draft: dict[str, Any], finding, ledger: list[dict[str, Any]], node_call,
+           facts: list[dict[str, Any]] | None = None) -> tuple[list[dict], list[str], Any]:
     """Return (verdict dicts, accusatory phrases, spend record). `node_call(schema, system, prompt)` enforces budgets."""
-    pack, ids = evidence_pack(finding, ledger)
+    pack, ids = evidence_pack(finding, ledger, facts)
     conclusions = {"summary": draft.get("summary", ""), "explanation": draft.get("explanation", ""),
                    "alternatives": draft.get("alternatives", []), "questions": draft.get("questions", [])}
     prompt = (f"<conclusions>\n{json.dumps(conclusions, indent=1)}\n</conclusions>\n<evidence_pack>\n{pack}\n</evidence_pack>\n"

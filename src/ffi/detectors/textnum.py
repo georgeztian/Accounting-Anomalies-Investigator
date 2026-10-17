@@ -34,14 +34,14 @@ TOTAL_LEAD = {"record", "total", "quarterly", "fiscal", "full", "full-year", "an
               "the", "our", "its", "company", "group", "and", "with", "of", "a", "an"}
 
 
-def _qualified(text: str, start: int) -> bool:
-    """True when a capitalised name (a segment or product) stands right before the matched total."""
+def qualified(text: str, start: int) -> bool:
+    """True when a name (a segment, region or product, "Greater China", "iPhone") stands right before the matched total."""
     words = re.findall(r"[A-Za-z][\w&'-]*", text[max(0, start - 40): start])
     if not words:
         return False
     w = words[-1]  # the word right before "revenue" / "net income"
     allowed = w.lower() in TOTAL_LEAD or re.search(r"quarter|year|month", w.lower())
-    return w[:1].isupper() and not allowed
+    return any(ch.isupper() for ch in w) and not allowed
 
 
 @dataclass
@@ -62,7 +62,7 @@ def check_amounts(text: str, known: dict[str, list[float]], quarter_ok: bool = F
         ctx = SKIP_CONTEXT.search(sentence)
         if ctx and not (quarter_ok and re.search(r"(?i)quarter|three months", ctx.group(0))):
             continue
-        if _qualified(text, m.start()):
+        if qualified(text, m.start()):
             continue
         item = "NET_INCOME" if "income" in m.group("what").lower() else "REVENUE"
         cands = [k for k in known.get(item, []) if k and k > 0]

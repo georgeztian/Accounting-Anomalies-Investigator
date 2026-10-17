@@ -65,12 +65,14 @@ def run_tool(ctx: RunContext, task: EvidenceTask, lid: str) -> dict[str, Any]:
             return _entry(lid, task, "No 10-K text available.", [], [])
         if t == "explaining_text":
             item = (task.item or "").upper()
-            from ffi.kg.build import ITEM_KEYWORDS
+            from ffi.kg.build import item_pattern
 
-            pat = ITEM_KEYWORDS.get(item)
+            pat = item_pattern(item)
             if not pat:
-                return _entry(lid, task, f"No keyword pattern for {item}.", [], [])
+                return _entry(lid, task, f"Unknown line item {item}: MD&A was not searched; use search_filing with words instead.", [], [])
             hits = search(doc, pat, ("item7",))
+            if not hits:
+                return _entry(lid, task, f"MD&A searched for {item}: no passage mentions it.", [], [])
         else:
             words = [re.escape(w) for w in re.findall(r"[A-Za-z][A-Za-z\-]{2,}", task.query or "")][:6]
             if not words:
@@ -102,9 +104,10 @@ def facts_table(ctx: RunContext, finding) -> list[dict[str, Any]]:
     """Every number the narrative may use, as formatted strings + raw values (the grounding gate's allow-list)."""
     rows: list[dict[str, Any]] = []
     for s in finding.signals:
-        for v, kind in ((s.raw_value, s.unit), (s.expected, s.unit)):
+        # the result and the test's reference value are labelled apart, so a baseline of 0 is never read as a second result
+        for v, what in ((s.raw_value, "result"), (s.expected, "reference value (what would be normal)")):
             if v is not None and np.isfinite(v):
-                rows.append({"source": s.detector_id, "value": float(v), "unit": kind})
+                rows.append({"source": f"{s.detector_id} {what}, {s.period}", "value": float(v), "unit": s.unit})
         for e in s.evidence:
             if e.value is not None:
                 rows.append({"source": e.label, "value": float(e.value), "unit": e.unit or ""})

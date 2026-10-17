@@ -287,21 +287,27 @@ def build_graph(ctx: RunContext, finding, llm: LLM):
             return res, {"node": "audit", "usd": round(llm.spend.usd - before, 5)}
 
         try:
-            verdicts, accusatory, sp = llm_auditor.review(llm, d, finding, state.get("ledger", []), node_call)
+            verdicts, accusatory, sp = llm_auditor.review(llm, d, finding, state.get("ledger", []), node_call, facts=facts)
         except BudgetExceeded as e:
             return over_budget("audit", e)
         except LLMRefusal:
             return Command(update={"status": "degraded", "audits": [{"round": state.get("audit_round", 0) + 1, "error": "auditor declined"}]},
                            goto="degrade")
-        failing = [v for v in verdicts if v["verdict"] != "supported"]
-        record = {"round": state.get("audit_round", 0) + 1, "claims": len(verdicts), "failing": len(failing), "verdicts": verdicts,
-                  "accusatory": accusatory}
+        # Only false or overstated claims send the draft back. "needs_context" asks for a finer qualification of a claim the
+        # evidence supports; treating it as a failure made the loop chase ever-finer caveats (the auditor objecting to the
+        # caveat it asked for in the previous round) until the rounds ran out. Such notes are kept with the audit and passed
+        # on whenever the draft goes back anyway.
+        failing = [v for v in verdicts if v["verdict"] in ("unsupported", "overstated")]
+        context = [v for v in verdicts if v["verdict"] == "needs_context"]
+        record = {"round": state.get("audit_round", 0) + 1, "claims": len(verdicts), "failing": len(failing),
+                  "context_notes": len(context), "verdicts": verdicts, "accusatory": accusatory}
         upd: dict[str, Any] = {"audits": [record], "spend": [sp]}
         lint_hits = (state.get("verification") or {}).get("lint", []) + accusatory
         if failing or not verdicts:
-            fb = [f"{v['verdict']}: '{v['claim']}' -> {v['correction'] or 'support with cited evidence or remove'}" for v in failing]
+            fb = [f"{v['verdict']}: '{v['claim']}' -> {v['correction'] or 'support with cited evidence or remove'}" for v in failing + context]
             return _round_failed(state, upd, fb or ["The auditor found no checkable claims; state the conclusion explicitly with evidence ids."])
-        upd["verification"] = {**(state.get("verification") or {}), "lint": lint_hits, "audit": "passed"}
+        upd["verification"] = {**(state.get("verification") or {}), "lint": lint_hits, "audit": "passed",
+                               "context_notes": [f"{v['claim']} -> {v['correction']}" for v in context]}
         if lint_hits:
             return Command(update=upd, goto="review_sensitive")
         return Command(update=upd, goto="review_publish")

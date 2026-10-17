@@ -269,7 +269,21 @@ def plain(text: str | None, expand: bool = True, terms: bool = True) -> str:
     out = re.sub(r"(?<![A-Za-z])([Aa])n (?=Management's)", lambda m: m.group(1) + " ", out)  # "an MD&A" once expanded
     if expand and out[:1].islower():
         out = out[:1].upper() + out[1:]
+    out = SENTENCE_START_RE.sub(_capitalize, out)  # rewrites put lower-case words first ("FY2023 was" -> "fiscal 2023 was")
     return re.sub(r"\s{2,}", " ", out).replace(" .", ".").strip()
+
+
+# a lower-case word opening a sentence; abbreviations ("e.g.", "vs.") do not end a sentence, and names such as "iPhone"
+# are written lower-case on purpose
+SENTENCE_START_RE = re.compile(r"(\S*)([.!?]\s+)([a-z])(?![a-z]*[A-Z])")
+ABBREVIATIONS = {"e.g", "i.e", "vs", "no", "approx", "incl", "etc", "ca", "cf", "al"}
+
+
+def _capitalize(m: re.Match) -> str:
+    prev = m.group(1).lower().lstrip("(")
+    if prev in ABBREVIATIONS or re.fullmatch(r"(?:[a-z]\.)+[a-z]?", prev):
+        return m.group(0)
+    return m.group(1) + m.group(2) + m.group(3).upper()
 
 
 def area(key: str) -> str:

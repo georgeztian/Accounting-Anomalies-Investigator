@@ -35,7 +35,39 @@ ITEM_KEYWORDS: dict[str, str] = {
     "RESTRUCTURING": r"\brestructuring\b",
     "DA": r"\bdepreciation\b",
     "SBC": r"\b(?:share|stock)-based compensation\b",
+    "AP": r"\b(?:accounts |trade )?payables?\b|\bvendor terms\b|\bpayment terms\b",
+    "CHANGE_AP": r"\b(?:accounts |trade )?payables?\b|\bvendor terms\b|\bpayment terms\b",
+    "SUPPLIER_FINANCE": r"\bsupplier financ|\bsupply chain financ|\bpayables? financ|\bstructured payables?\b",
+    "ACCRUED_LIABILITIES": r"\baccrued (?:liabilities|expenses)\b|\baccruals?\b",
+    "CHANGE_AR": r"\b(?:accounts )?receivables?\b",
+    "CHANGE_INVENTORY": r"\binventor(?:y|ies)\b",
+    "CONTRACT_ASSETS": r"\bcontract assets?\b|\bunbilled\b",
+    "ALLOWANCE": r"\ballowance for (?:credit|doubtful)|\bcredit losses\b",
+    "PROVISION_DOUBTFUL": r"\ballowance for (?:credit|doubtful)|\bcredit losses\b|\bbad debt",
+    "PPE_NET": r"\bproperty(?:,| and) (?:plant )?(?:and )?equipment\b",
+    "INTANGIBLES": r"\bintangible assets?\b",
+    "OPERATING_LEASE_LIABILITY": r"\b(?:operating )?lease liabilit",
+    "PURCHASE_OBLIGATIONS": r"\bpurchase (?:obligations|commitments)\b|\bunconditional purchase\b",
+    "WARRANTY_ACCRUAL": r"\bwarrant(?:y|ies)\b",
+    "CASH": r"\bcash and cash equivalents\b|\bliquidity\b",
+    "ACQUISITIONS": r"\bacquisitions?\b|\bbusiness combinations?\b",
+    "PPE_GROSS": r"\bproperty(?:,| and) (?:plant )?(?:and )?equipment\b",
+    "LITIGATION_ACCRUAL": r"\blitigation\b|\blegal proceedings\b|\bloss contingenc",
+    "GAIN_ON_SALE": r"\bgains? on (?:the )?(?:sale|disposal)",
 }
+
+
+def item_pattern(item: str) -> str | None:
+    """Keywords for one line item: the curated pattern, else the last two words of its label, the noun phrase a filing
+    uses ("Deferred tax valuation allowance" -> "valuation allowance")."""
+    if item in ITEM_KEYWORDS:
+        return ITEM_KEYWORDS[item]
+    from ffi.xbrl.canonical import BY_ID
+
+    it = BY_ID.get(item)
+    label = re.sub(r"\([^)]*\)", " ", it.label) if it else ""
+    words = [w for w in re.findall(r"[A-Za-z]{3,}", label) if w.lower() not in {"total", "incl", "net", "the", "and", "for", "paid", "from"}][-2:]
+    return r"\b" + r"\s+".join(re.escape(w) for w in words) + r"\b" if words else None
 CHANGE_RE = re.compile(r"(?i)\b(?:increas|decreas|grew|declin|rose|fell|higher|lower|primarily due|driven by|as a result of|compared to)")
 
 

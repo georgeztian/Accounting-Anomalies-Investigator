@@ -502,7 +502,7 @@ def cinv02(ctx: RunContext):
     return [mk("C.INV.02", ctx, raw_value=s0, expected=0.0, severity=sev, unit="growth spread", impact=imp,
                scheme=Scheme.SHIFT_EXPENSES_LATER, direction="income_increasing",
                rationale=f"Inventory growth minus COGS growth: {fmt_pct(s0)} this year, {fmt_pct(s1)} last year.",
-               evidence=ctx.evs(["INVENTORY", "COGS"], ks=(0, 1)))]
+               evidence=ctx.evs(["INVENTORY", "COGS"], ks=(0, 1, 2)))]  # three years: last year's spread needs the year before
 
 
 @detector("C.INV.03", "Margin up while inventory builds", F, Area.INVENTORY)
