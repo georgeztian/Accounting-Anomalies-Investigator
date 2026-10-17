@@ -538,6 +538,8 @@ def e04(ctx: RunContext):
         loc = locate(cur, c.quote)
         if loc is None:
             continue
+        if SUBSET_RE.search(c.quote) or (c.metric != "gross margin" and RATIO_CLAIM_RE.search(c.quote)):
+            continue  # a part of the business ("digitally-enabled comparable sales") or a ratio ("SG&A as a % of sales")
         checked += 1
         actual = (v1 - v0) if c.metric == "gross margin" else (v1 - v0) / abs(v0)
         actual_dir = "flat" if abs(actual) < (0.002 if c.metric == "gross margin" else 0.01) else ("increase" if actual > 0 else "decrease")
@@ -549,6 +551,13 @@ def e04(ctx: RunContext):
                rationale=(f"{checked} verifiable MD&A claims checked against XBRL; {len(contradictions)} inconsistent"
                           + (": " + "; ".join(_claim_gap(c, a) for c, a, _ in contradictions[:3]) if contradictions else "") + "."),
                evidence=[ctx.ev_span(cur, loc[0], loc[1], f"MD&A claim: {c.metric}") for c, _, loc in contradictions[:3]])]
+
+
+SUBSET_RE = re.compile(r"(?i)\bcomparable\b|same[- ]store|\bcomp(?:arable)? sales\b|digital|e-?commerce|\bonline\b|\bsegment|"
+                       r"\bexcluding\b|\bex-|\borganic\b|constant[- ]currency|\badjusted\b|non-gaap|\bper (?:share|square|unit)\b|"
+                       r"\btraffic\b|\baverage ticket\b|\bshipments?\b|\bunits?\b|\bancillary\b|\bbusinesses\b|"
+                       r"\bcategor(?:y|ies)\b|\bdivisions?\b|\bproduct lines?\b|\bregions?\b|\binternational\b|\bdomestic\b")
+RATIO_CLAIM_RE = re.compile(r"(?i)as a percent(?:age)? of|% of (?:net |total )?(?:sales|revenues?)|percent of (?:net |total )?(?:sales|revenues?)|basis points?")
 
 
 def _claim_gap(c: Claim, actual: float) -> str:
