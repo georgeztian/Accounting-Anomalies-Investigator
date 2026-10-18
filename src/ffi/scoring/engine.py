@@ -140,6 +140,7 @@ class Finding:
     client: dict | None = None  # plain-language explanation for the report (report/explain.py)
     years: list[str] = field(default_factory=list)  # multi-year report: fiscal years in which it was flagged
     timeline: list[dict] = field(default_factory=list)  # multi-year report: one row per year reviewed (scoring/span.py)
+    agent_text: list[str] = field(default_factory=list)  # alternatives / questions the investigation wrote (audited like its narrative)
 
     @property
     def detectors(self) -> list[str]:
@@ -231,6 +232,7 @@ def score(ctx: RunContext, results: list[DetectorResult]) -> ScoreResult:
         if m:
             xs, ys = zip(*m, strict=True)
             s.severity = float(np.interp(s.severity, xs, ys))
+            s.flagged = s.severity >= s.flag_at  # a recalibrated severity decides the flag, as the original did
     # 2. explained-away discounts -------------------------------------------------------------
     conds = _explain_conditions(ctx)
     for key, ids, factor in EXPLAIN_RULES:

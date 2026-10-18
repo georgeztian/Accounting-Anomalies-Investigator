@@ -85,6 +85,7 @@ STATUS_LABELS = {"flagged": "Flagged", "normal": "Normal", "suppressed": "Explai
 AUDIT_CHECKS = {"evidence_present": "Supporting evidence present", "fact_values": "Figures match the filings",
                 "quotes": "Quotes found word for word", "impact": "Impact and materiality recalculated",
                 "corroboration": "Supported by independent tests", "narrative": "Every number in the write-up traced to a source",
+                "agent_text": "The investigation's explanations and questions traced to sources",
                 "baseline": "Peer comparison"}
 
 # (pattern, text for the first occurrence in a passage, text for later occurrences)
@@ -179,13 +180,14 @@ TERMS: list[tuple[str, Any, str | None]] = [
     (r"Word lists are a subset of Loughran-McDonald categories\.", "Word lists come from standard finance-research dictionaries.", None),
     (r"\bextracted\b", "identified", None),
     (r"^required data not reported$", "The figures this test needs are not reported", None),
+    (r"\bnot tagged separately\b", "not reported separately in the financial data", None),
     (r"\bnot tagged\b", "not reported separately in the financial data", None),
     (r"\bUntagged\b", "Separately unreported", None),
     (r"\buntagged\b", "separately unreported", None),
     (r"\btagged\b", "reported", None),
     (r"\bmonetary facts\b", "amounts", None),
     (r"\bresidual\b", "difference", None),
-    (r"\bcompanyfacts\b", "the SEC's standardized financial data", None),
+    (r"\b(?:(?:the )?SEC's )?companyfacts(?: (?:data|API))?\b", "the SEC's standardized financial data", None),
     (r"\bknowledge graph\b", "relationship map", None),
     (r"\bKG\b", "relationship map", None),
 ]
@@ -257,13 +259,13 @@ def plain(text: str | None, expand: bool = True, terms: bool = True) -> str:
             # one pass, so the first-use explanation itself is never rewritten again
             seen = [False]
 
-            def rep(m: re.Match, first=first, later=later, seen=seen) -> str:
+            def first_use(m: re.Match, first=first, later=later, seen=seen) -> str:
                 if seen[0]:
                     return m.expand(later)
                 seen[0] = True
                 return m.expand(first)
 
-            out = pat.sub(rep, out)
+            out = pat.sub(first_use, out)
     out = re.sub(r"(?<!\.)\.\.(?!\.)", ".", out)
     out = re.sub(r"\b(\w+(?: \w+)?) or \1(?=[.,;:!?)]|$)", r"\1", out)  # rewrites can collide: "reported or tagged." -> "reported." (a repeat followed by more words, as in "cash and cash equivalents", is real text)
     out = re.sub(r"(?<![A-Za-z])([Aa])n (?=Management's)", lambda m: m.group(1) + " ", out)  # "an MD&A" once expanded

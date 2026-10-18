@@ -93,9 +93,10 @@ class LLM:
         self.offline = offline
         self.spend = Spend()
         self._lock = threading.Lock()
+        self._reserved = 0.0  # projected cost of calls in flight (several run at once: detectors, cases, explanations)
 
     def remaining(self) -> float:
-        return self.budget_usd - self.spend.usd
+        return self.budget_usd - self.spend.usd - self._reserved
 
     def _key(self, model: str, system: str, prompt: str, schema: type[BaseModel], effort: str) -> str:
         blob = json.dumps([model, system, prompt, schema.model_json_schema(), effort], sort_keys=True)
@@ -127,9 +128,19 @@ class LLM:
         if self.offline:
             raise LLMError(f"LLM response not cached (offline): {purpose}")
         projected = (len(system) + len(prompt)) / 3.5 * PRICES.get(model, (4, 20))[0] / 1e6 + max_tokens * 0.25 * PRICES.get(model, (4, 20))[1] / 1e6
-        if self.remaining() < projected or (max_usd is not None and projected > max_usd):
-            raise BudgetExceeded(f"{purpose}: projected ${projected:.3f} exceeds remaining ${self.remaining():.3f}")
+        with self._lock:  # check and reserve together, so concurrent calls cannot all pass the check against the same remainder
+            if self.remaining() < projected or (max_usd is not None and projected > max_usd):
+                raise BudgetExceeded(f"{purpose}: projected ${projected:.3f} exceeds remaining ${self.remaining():.3f}")
+            self._reserved += projected
+        try:
+            return self._call(schema, system, prompt, parts, path, purpose=purpose, model=model, effort=effort,
+                              max_tokens=max_tokens, timeout_s=timeout_s)
+        finally:
+            with self._lock:
+                self._reserved -= projected
 
+    def _call(self, schema: type[T], system: str, prompt: str, parts: list[str], path: Path, *, purpose: str, model: str,
+              effort: str, max_tokens: int, timeout_s: float | None) -> T:
         if self.backend == "claude-code":
             parsed = self._via_claude_code(schema, system, prompt, purpose=purpose, model=model, effort=effort, timeout_s=timeout_s)
             path.parent.mkdir(parents=True, exist_ok=True)

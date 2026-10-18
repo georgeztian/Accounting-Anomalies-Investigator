@@ -48,9 +48,11 @@ def b01(ctx: RunContext):
     return [mk("B.01", ctx, raw_value=m, expected=-2.22, severity=sev, unit="score", percentile_peer=pct, tags=tags,
                scheme=Scheme.PREMATURE_REVENUE if "driver:DSRI" in tags else None,
                rationale=(f"M-score {m:.2f} (reference flag > -1.78; peer median "
-                          f"{fmt_num(float(np.median(peers)) if peers else np.nan)}). Largest upward contributions: "
-                          + ", ".join(f"{k} {fmt_num(r[k], 2)}" for d, k in drivers if finite(r[k]))
-                          + (f". Imputed neutral for missing: {', '.join(miss)}." if miss else ".")),
+                          f"{fmt_num(float(np.median(peers)) if peers else np.nan)})."
+                          + (" Largest upward contributions: " + ", ".join(up) + "." if (up := [f"{k} {fmt_num(r[k], 2)}" for d, k in drivers
+                                                                                           if d > 0 and finite(r[k])]) else
+                             " No index raises the score above its neutral value.")
+                          + (f" Imputed neutral for missing: {', '.join(miss)}." if miss else "")),
                evidence=ev)]
 
 
@@ -135,7 +137,11 @@ def b04(ctx: RunContext):
     pooled = []
     peer_rows = {}
     for peer in ctx.peers.loaded:
-        r = _aq_rows(peer.annual, list(peer.annual.values.index)[1:])
+        # only the peer's years up to the one aligned with the focus year: its later years are later-period data
+        al = ctx.peers.aligned_period(peer, ctx.focus)
+        if al is None:
+            continue
+        r = _aq_rows(peer.annual, [q for q in peer.annual.values.index if q < al][1:])
         peer_rows[peer.cik] = r
         pooled.extend(r)
     own = _aq_rows(ctx.A, [p for p in ctx.A.periods if p < ctx.focus][1:])
@@ -180,7 +186,17 @@ def b05(ctx: RunContext):
     return [mk("B.05", ctx, raw_value=v, expected=float(np.median(peers)) if peers else None, severity=sev,
                unit="ratio", percentile_peer=pct, direction="income_increasing" if v > 0 else "neutral",
                rationale=f"Sloan accrual ratio {fmt_pct(v)} (peer median {fmt_pct(float(np.median(peers)) if peers else np.nan)}).",
-               evidence=ctx.evs(["NET_INCOME", "CFO", "CFI"], ks=(0,)))]
+               # the inputs the ratio was computed from: investment is capex and acquisitions (investing cash flow only
+               # when capex is not reported); net operating assets are averaged over two years
+               evidence=ctx.evs(["NET_INCOME", "CFO"] + (["CAPEX", "ACQUISITIONS"] if finite(ctx.a("CAPEX")) else ["CFI"]), ks=(0,))
+               + ctx.evs(["TOTAL_ASSETS", "CASH", "ST_INVESTMENTS", "TOTAL_LIABILITIES", "LONG_TERM_DEBT", "CURRENT_DEBT",
+                          "ST_BORROWINGS"], ks=(0, 1), role="supporting"))]
+
+
+MONTIER_LABELS = {"ni_cfo_gap_widening": "net income running further ahead of operating cash flow",
+                  "dso_rising": "receivable days rising", "dsi_rising": "inventory days rising",
+                  "other_ca_rising": "other current assets rising relative to revenue",
+                  "dep_rate_falling": "depreciation rate falling", "asset_growth_gt_10pct": "total assets growing more than 10%"}
 
 
 @detector("B.06", "Montier C-score", F, Area.EARNINGS_QUALITY)
@@ -189,7 +205,7 @@ def b06(ctx: RunContext):
     r = S.montier_c(ctx.A, ctx.focus)
     if r["available"] < 4:
         raise SkipDetector("fewer than 4 of 6 tests computable")
-    failed = [k.replace("_", " ") for k in ("ni_cfo_gap_widening", "dso_rising", "dsi_rising", "other_ca_rising", "dep_rate_falling", "asset_growth_gt_10pct") if r[k] == 1.0]
+    failed = [label for k, label in MONTIER_LABELS.items() if r[k] == 1.0]
     sev = float(np.clip((r["C"] - 2) / 3, 0, 1))
     return [mk("B.06", ctx, raw_value=r["C"], expected=2.0, severity=sev, unit=f"of {int(r['available'])}",
                rationale=f"C-score {int(r['C'])}/{int(r['available'])}" + (f": {', '.join(failed)}." if failed else "."))]
@@ -199,9 +215,15 @@ def b06(ctx: RunContext):
 def b07(ctx: RunContext):
     """Nine fundamental-strength tests; low scores add context (weakness), not anomaly."""
     r = S.piotroski_f(ctx.A, ctx.focus)
-    sev = float(np.clip((4 - r["F"]) / 4, 0, 1)) * 0.5
-    return [mk("B.07", ctx, raw_value=r["F"], expected=5.0, severity=sev, unit="of 9", flag_at=0.45,
-               rationale=f"Piotroski F-score {int(r['F'])}/9 (low = weak fundamentals, a pressure factor).")]
+    n = int(r["available"])
+    if n < 7:
+        raise SkipDetector(f"only {n} of the 9 tests computable")
+    scaled = r["F"] * 9 / n  # on the 0-9 scale when a test or two could not be computed
+    sev = float(np.clip((4 - scaled) / 4, 0, 1)) * 0.5
+    return [mk("B.07", ctx, raw_value=r["F"], expected=round(5.0 * n / 9, 2), severity=sev, unit=f"of {n}", flag_at=0.45,
+               rationale=(f"Piotroski F-score {int(r['F'])}/{n}: {int(r['F'])} of the {n} computable tests passed"
+                          + ("" if n == 9 else f" ({9 - n} could not be computed; {scaled:.1f} on the 0-9 scale)")
+                          + " (low = weak fundamentals, a pressure factor)."))]
 
 
 @detector("B.08", "Distress pressure (Altman Z)", F, Area.GOVERNANCE)

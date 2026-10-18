@@ -127,7 +127,7 @@ def build_span_model(out) -> dict[str, Any]:
         "periods": [P.plain(p, expand=False).capitalize() for p in periods],
         "period": f"{P.plain(periods[0], expand=False).capitalize()} to {P.plain(periods[-1], expand=False)}",
         "first_end": span.yearly[0]["period_end"], "last_end": span.yearly[-1]["period_end"], "years": n,
-        "as_of": str(ctx.as_of), "generated": datetime.now().strftime("%d %B %Y"),
+        "as_of": str(getattr(ctx, "cutoff", None) or ctx.as_of), "generated": datetime.now().strftime("%d %B %Y"),
         "analysis_type": ("Automated checks of the reported figures for each year, plus AI-assisted reading of the filings' text"
                           if llm else "Automated checks of the reported figures and filing text for each year"),
         "profile": ({"label": ctx.profile.label, "description": P.plain(ctx.profile.description),

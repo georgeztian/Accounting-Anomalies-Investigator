@@ -130,7 +130,7 @@ The text review did not find disclosure changes worth highlighting for this peri
 - **Company:** {{ m.company.match_note }}
 - **Company type:** {{ m.profile.label }}. {{ m.profile.description }}{% for n in m.profile.notes %} {{ n }}{% endfor %}
 - **What was analysed:** {{ m.analysis_type }}. The figures come from the company's filings with the US Securities and Exchange Commission (SEC).
-- **Point in time:** only filings public on or before {{ m.as_of }} were used, and the company's figures are taken as first reported.
+- **Point in time:** only filings public on or before {{ m.as_of }}, the end of the year's filing season, were used (SEC comment letters about the year's annual report, which come later, are the one exception), and the company's figures are taken as first reported.
 - **Comparison group:** {{ m.peer_method }} Companies: {% if m.peers %}{{ m.peers|map(attribute='name')|join(', ') }}{% else %}none{% endif %}.
 - **Legitimate causes checked:** {% if m.explain_conditions %}{% for k, v in m.explain_conditions.items() %}{{ v }}{{ '; ' if not loop.last }}{% endfor %}{% else %}no acquisition, change in accounting standards or stock split was found in the year reviewed.{% endif %}
 - **Data notes:**

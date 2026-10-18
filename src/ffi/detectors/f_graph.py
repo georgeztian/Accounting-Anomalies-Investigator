@@ -49,10 +49,14 @@ def f01(ctx: RunContext):
             fs = FactStore.load(ctx.client, cik, ctx.as_of)
         except Exception:  # noqa: BLE001
             continue
+        if fs.currency != ctx.currency:
+            continue  # sales in one currency against costs in another
         a = fs.annual()
         if a.values.empty:
             continue
         p = a.values.index[np.argmin(np.abs((a.values.index - ctx.focus).days))]
+        if abs((p - ctx.focus).days) > 183:
+            continue  # no fiscal year of the customer's that overlaps the focus year
         # what the customer spends in a year: all operating costs (revenue less operating income) plus capital spending;
         # summing cost lines misses businesses that report costs under other headings (e.g. restaurant expenses)
         opex = a.get("REVENUE", p) - a.get("OPERATING_INCOME", p)
@@ -121,6 +125,9 @@ def f04(ctx: RunContext):
     if len(ctx.doc.section_paragraphs("item7")) < 20:
         raise SkipDetector("MD&A section not located reliably in the 10-K text")
     edges = ctx.kg.edges("EXPLAINS")
+    # only this year's annual report can explain this year's changes; earlier years' MD&A discussed earlier changes
+    if not edges.empty:
+        edges = edges[edges["src"].str.contains(ctx.doc.accession, regex=False)]
     explained = set(edges["dst"].str.replace("lineitem:", "", regex=False)) if not edges.empty else set()
     pt = abs(ctx.a("PRETAX_INCOME"))
     rev = abs(ctx.a("REVENUE"))
@@ -142,8 +149,8 @@ def f04(ctx: RunContext):
     score = sum(d for _, d in gaps) / mat if gaps else 0.0
     sev = float(np.clip(score / 10, 0, 1)) * 0.7
     return [mk("F.04", ctx, raw_value=len(gaps), severity=sev, unit="unexplained items",
-               rationale=(f"{checked} line items moved materially (> {fmt_money(mat)} and > 10%); "
-                          + (f"{len(gaps)} have no MD&A or note discussion linked in the graph: "
+               rationale=(f"{checked} line item{'' if checked == 1 else 's'} moved materially (> {fmt_money(mat)} and > 10%); "
+                          + (f"{len(gaps)} {'has' if len(gaps) == 1 else 'have'} no discussion in this year's MD&A or notes: "
                              + ", ".join(f"{BY_ID[i].label} ({fmt_money(d)})" for i, d in gaps) + "." if gaps else "all are discussed.")),
                evidence=[e for i, _ in gaps[:3] for e in ctx.evs([i], ks=(0, 1))])]
 

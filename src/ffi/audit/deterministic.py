@@ -4,11 +4,12 @@ The auditor does not trust what detectors say about their evidence. For every fi
 the evidence from the sources the run downloaded:
 
   evidence_present   at least one primary fact or filing quote supports the conclusion
-  fact_values        every cited XBRL value is re-read from the raw companyfacts rows (same filing, same concept)
+  fact_values        every cited XBRL value is re-read from the raw companyfacts rows (same filing, concept and period)
   quotes             every quote is re-located verbatim in the filing text at its character span
   impact             low <= mid <= high and materiality is recomputed from scratch and compared
   corroboration      a pattern's members are still flagged, unsuppressed and drawn from >= 2 families (or >= 3 signals)
   narrative          every number in the narrative traces to a source value (facts, ledger, detector outputs)
+  agent_text         the innocent explanations and questions the investigation wrote pass the same gate
 
 Each round: audit -> apply corrections (drop or repair evidence, recompute materiality, downgrade
 uncorroborated patterns, replace an ungrounded narrative) -> audit again. At most MAX_ROUNDS rounds;
@@ -71,7 +72,7 @@ class AuditResult:
 
 
 # ------------------------------------------------------------------------------------- helpers
-def _facts_index(ctx) -> dict[tuple[str, str], np.ndarray]:
+def _facts_index(ctx) -> dict[tuple[str, str, str], np.ndarray]:
     return ctx.store.values_by_filing()  # built once per company and shared by every year of a multi-year review
 
 
@@ -79,6 +80,18 @@ def _concept_name(ev: EvidenceRef) -> str | None:
     if not ev.concept:
         return None
     return ev.concept.split(":", 1)[-1]
+
+
+def _fact_end(ev: EvidenceRef) -> str:
+    """The period end a cited fact is for, from its id ("fact:taxonomy:concept|unit|start|end|accession")."""
+    parts = ev.node_id.split("|")
+    return parts[3] if ev.node_id.startswith("fact:") and len(parts) == 5 else ""
+
+
+def _fact_matches(idx, e: EvidenceRef) -> bool:
+    """The cited value is what the cited filing reports under the cited concept for the cited period."""
+    vals = idx.get((e.accession, _concept_name(e) or "", _fact_end(e)), np.array([]))
+    return bool(np.any(np.abs(vals - e.value) <= max(abs(e.value) * 0.0005, 0.5)))
 
 
 def _doc_for(ctx, accession: str | None):
@@ -119,9 +132,7 @@ def audit_finding(ctx, finding, ledger: list[dict] | None = None) -> list[AuditC
         if e.kind != "fact" or e.value is None or not e.accession:
             continue
         n_facts += 1
-        vals = idx.get((e.accession, _concept_name(e) or ""), np.array([]))
-        tol = max(abs(e.value) * 0.0005, 0.5)
-        if not np.any(np.abs(vals - e.value) <= tol):
+        if not _fact_matches(idx, e):
             bad_facts.append(e.label)
     checks.append(AuditCheck("fact_values", "fail" if bad_facts else "pass",
                              (f"{len(bad_facts)} of {n_facts} cited values not found in the filing's XBRL: " + "; ".join(bad_facts[:3]))
@@ -168,10 +179,30 @@ def audit_finding(ctx, finding, ledger: list[dict] | None = None) -> list[AuditC
         checks.append(AuditCheck("narrative", st, f"{rep.numbers_checked} numbers traced to sources" if rep.ok else
                                  "untraceable: " + ", ".join(rep.unsupported_numbers[:4] + [f'quote "{q}"' for q in rep.unverified_quotes[:2]])))
 
+    bad_items = _ungrounded_agent_items(ctx, finding, ledger)
+    if bad_items is not None:
+        checks.append(AuditCheck("agent_text", "fail" if bad_items else "pass",
+                                 f"{len(bad_items)} innocent explanation(s) or question(s) written by the investigation not traceable: "
+                                 + "; ".join(t[:60] for t in bad_items[:2]) if bad_items else
+                                 "the investigation's innocent explanations and questions trace to sources"))
+
     thin = [s.detector_id for s in finding.signals if s.percentile_peer is not None and s.p_value is None and len(finding.signals) == 1]
     if thin:
         checks.append(AuditCheck("baseline", "warn", "single-signal finding resting on a peer comparison"))
     return checks
+
+
+def _ungrounded_agent_items(ctx, finding, ledger) -> list[str] | None:
+    """The innocent explanations and questions the investigation wrote that fail the grounding gate; None when the
+    finding carries none (they are the tests' own, written by code)."""
+    written = set(getattr(finding, "agent_text", None) or [])
+    items = [t for t in list(finding.alternatives) + list(finding.questions) if t in written]
+    if not items:
+        return None
+    allowed = _allowed_numbers(ctx, finding, ledger)
+    own = [finding.title] + [x for s in finding.signals for x in (s.name, s.rationale)]
+    docs = list(ctx.docs) + list(ctx.releases)
+    return [t for t in items if not grounding.check(t, allowed, docs, known_text=own).ok]
 
 
 # ------------------------------------------------------------------------------------- corrections
@@ -182,11 +213,9 @@ def correct(ctx, finding, checks: list[AuditCheck], template_narrative) -> list[
         idx = _facts_index(ctx)
         keep = []
         for e in finding.evidence:
-            if e.kind == "fact" and e.value is not None and e.accession:
-                vals = idx.get((e.accession, _concept_name(e) or ""), np.array([]))
-                if not np.any(np.abs(vals - e.value) <= max(abs(e.value) * 0.0005, 0.5)):
-                    fixes.append(f"removed unverifiable fact evidence '{e.label}'")
-                    continue
+            if e.kind == "fact" and e.value is not None and e.accession and not _fact_matches(idx, e):
+                fixes.append(f"removed unverifiable fact evidence '{e.label}'")
+                continue
             keep.append(e)
         finding.evidence = keep
     if "quotes" in failed:
@@ -227,6 +256,12 @@ def correct(ctx, finding, checks: list[AuditCheck], template_narrative) -> list[
             finding.score *= 0.6
             finding.title += " (single source)"
             fixes.append("downgraded from a corroborated pattern to a single-source signal")
+    if "agent_text" in failed:
+        bad = set(_ungrounded_agent_items(ctx, finding, finding.ledger) or [])
+        finding.alternatives = [a for a in finding.alternatives if a not in bad] or [
+            "No innocent explanation written by the investigation could be traced to the evidence."]
+        finding.questions = [q for q in finding.questions if q not in bad] or ["What explains this movement, and is it expected to persist?"]
+        fixes.append(f"removed {len(bad)} innocent explanation(s) or question(s) that could not be traced to sources")
     if "narrative" in failed:
         finding.narrative = template_narrative(finding)
         finding.narrative_source = f"template (previous {finding.narrative_source} narrative failed audit)"

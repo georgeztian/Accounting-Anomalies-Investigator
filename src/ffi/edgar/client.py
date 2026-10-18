@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
+import logging
 import threading
 import time
 from pathlib import Path
@@ -13,6 +15,8 @@ import httpx
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential_jitter
 
 from ffi.config import get_settings
+
+log = logging.getLogger(__name__)
 
 
 class EdgarError(RuntimeError):
@@ -124,15 +128,24 @@ class EdgarClient:
             if path.exists():  # stale copy beats nothing
                 return path.read_bytes()
             raise
-        path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(f".{threading.get_ident()}.tmp")
-        tmp.write_bytes(data)
-        tmp.replace(path)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_bytes(data)
+            tmp.replace(path)
+        except OSError as e:  # a cache file held open by another process (a sync client, an antivirus scan): not cached
+            log.debug("could not cache %s: %s", url, e)
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
         return data
 
     def evict(self, url: str) -> None:
-        """Drop a cached response the caller has stored in processed form."""
-        self._path(url).unlink(missing_ok=True)
+        """Drop a cached response the caller has stored in processed form. A file another process holds open (a sync
+        client such as Dropbox, an antivirus scan) stays until a later run: eviction only saves disk space."""
+        try:
+            self._path(url).unlink(missing_ok=True)
+        except OSError as e:
+            log.debug("could not evict %s: %s", url, e)
 
     def get_json(self, url: str, max_age_s: float | None = None) -> Any:
         return json.loads(self.get_bytes(url, max_age_s))

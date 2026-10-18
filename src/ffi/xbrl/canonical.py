@@ -30,10 +30,12 @@ def _i(id_, label, kind, unit, statement, *concepts) -> CanonicalItem:
 
 ITEMS: tuple[CanonicalItem, ...] = (
     # ---------------- Income statement
+    # total revenue before contract revenue: at banks and card issuers ASC 606 contract revenue leaves out net interest
+    # income (American Express: $38.8B of $65.9B in 2024), so it must not stand in for the total
     _i("REVENUE", "Revenue", "D", USD, "IS",
-       "Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax",
+       "Revenues", "RevenuesNetOfInterestExpense", "RevenueFromContractWithCustomerExcludingAssessedTax",
        "RevenueFromContractWithCustomerIncludingAssessedTax", "SalesRevenueNet", "SalesRevenueGoodsNet",
-       "SalesRevenueServicesNet", "RevenuesNetOfInterestExpense"),
+       "SalesRevenueServicesNet"),
     _i("COGS", "Cost of revenue", "D", USD, "IS",
        "CostOfRevenue", "CostOfGoodsAndServicesSold", "CostOfGoodsSold", "CostOfServices",
        "CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization"),
@@ -97,13 +99,17 @@ ITEMS: tuple[CanonicalItem, ...] = (
     _i("DIVIDENDS_PAID", "Dividends paid", "D", USD, "CF", "PaymentsOfDividends", "PaymentsOfDividendsCommonStock"),
     _i("DIVIDENDS_DECLARED", "Dividends declared", "D", USD, "NOTE",
        "DividendsCommonStockCash", "DividendsCommonStock", "Dividends", "DividendsCash"),
-    _i("BUYBACKS", "Share repurchases", "D", USD, "CF", "PaymentsForRepurchaseOfCommonStock"),
+    # cash paid first; filers that tag repurchases only in the statement of equity (American Express: $4.6B of treasury
+    # stock acquired in 2019 and no cash-flow tag) would otherwise show an unexplained fall in equity
+    _i("BUYBACKS", "Share repurchases", "D", USD, "CF", "PaymentsForRepurchaseOfCommonStock", "PaymentsForRepurchaseOfEquity",
+       "TreasuryStockValueAcquiredCostMethod", "StockRepurchasedDuringPeriodValue", "StockRepurchasedAndRetiredDuringPeriodValue"),
     _i("SHARE_TAX_WITHHELD", "Taxes paid on net share settlement of stock awards", "D", USD, "CF",
        "PaymentsRelatedToTaxWithholdingForShareBasedCompensation"),
     _i("DEBT_ISSUED", "Debt issued", "D", USD, "CF",
        "ProceedsFromIssuanceOfLongTermDebt", "ProceedsFromIssuanceOfDebt", "ProceedsFromIssuanceOfSeniorLongTermDebt"),
+    # option exercises are only part of the shares issued, so they rank last
     _i("EQUITY_ISSUED", "Equity issued", "D", USD, "CF", "ProceedsFromIssuanceOfCommonStock",
-       "ProceedsFromIssuanceOrSaleOfEquity", "ProceedsFromStockOptionsExercised"),
+       "ProceedsFromIssuanceOrSaleOfEquity", "StockIssuedDuringPeriodValueNewIssues", "ProceedsFromStockOptionsExercised"),
     _i("CONVERTIBLE_EQUITY_COMPONENT", "Equity component of convertible debt", "D", USD, "NOTE",
        "AdjustmentsToAdditionalPaidInCapitalEquityComponentOfConvertibleDebt"),
     _i("CASH_CHANGE", "Net change in cash", "D", USD, "CF",
@@ -203,6 +209,9 @@ ITEMS: tuple[CanonicalItem, ...] = (
        "RedeemableNoncontrollingInterestEquityCarryingAmount", "TemporaryEquityCarryingAmountAttributableToParent"),
     _i("LIABILITIES_AND_EQUITY", "Liabilities & equity", "I", USD, "BS", "LiabilitiesAndStockholdersEquity"),
     _i("RETAINED_EARNINGS", "Retained earnings", "I", USD, "BS", "RetainedEarningsAccumulatedDeficit"),
+    # dividends declared = paid + the change in dividends payable (Progressive declares an annual dividend in December
+    # and pays it in January, so the year's cash dividends belong to the previous year's declaration)
+    _i("DIVIDENDS_PAYABLE", "Dividends payable", "I", USD, "BS", "DividendsPayableCurrentAndNoncurrent", "DividendsPayableCurrent"),
     _i("WARRANTY_ACCRUAL", "Warranty reserve", "I", USD, "NOTE", "StandardProductWarrantyAccrual"),
     _i("VALUATION_ALLOWANCE", "Deferred tax valuation allowance", "I", USD, "NOTE", "DeferredTaxAssetsValuationAllowance"),
     _i("UTP", "Unrecognized tax benefits", "I", USD, "NOTE", "UnrecognizedTaxBenefits"),
@@ -301,10 +310,50 @@ IFRS: dict[str, tuple[str, ...]] = {
 
 BY_ID: dict[str, CanonicalItem] = {it.id: it for it in ITEMS}
 
+# Fallback concepts that measure a narrower or broader amount than the item's main concepts. Two values of an item are
+# on the same basis only when their concepts have the same basis key ("" = the main basis): a year of general and
+# administrative expense is not comparable with a year of selling, general and administrative expense.
+DIFFERENT_BASIS: dict[str, dict[str, str]] = {
+    "SGA": {"GeneralAndAdministrativeExpense": "general and administrative only", "AdministrativeExpense": "administrative only"},
+    "NET_INCOME": {"ProfitLoss": "including noncontrolling interests",
+                   "NetIncomeLossAvailableToCommonStockholdersBasic": "available to common shareholders"},
+    "CASH": {"CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents": "including restricted cash"},
+    "CASH_RESTRICTED_TOTAL": {"CashAndCashEquivalentsAtCarryingValue": "excluding restricted cash"},
+    "PPE_NET": {"PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetAfterAccumulatedDepreciationAndAmortization":
+                "including finance-lease assets"},
+    "PPE_GROSS": {"PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetBeforeAccumulatedDepreciationAndAmortization":
+                  "including finance-lease assets"},
+    "AR": {"ReceivablesNetCurrent": "all current receivables", "AccountsNotesAndLoansReceivableNetCurrent": "including notes and loans"},
+    "COGS": {"CostOfServices": "services only",
+             "CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization": "excluding depreciation"},
+    # pre-tax income before the share of equity-method investees' results (Toyota), which sits below income tax
+    "PRETAX_INCOME": {"IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments":
+                      "before equity-method income"},
+    "CAPEX": {"PaymentsToAcquireProductiveAssets": "all productive assets"},
+    "INVENTORY": {"InventoryGross": "before reserves"},
+    "EQUITY_ISSUED": {"ProceedsFromStockOptionsExercised": "option exercises only",
+                      "StockIssuedDuringPeriodValueNewIssues": "shares issued, from the statement of equity"},
+    "INTEREST_EXPENSE": {"InterestExpenseDebt": "on debt only"},
+    "RND": {"ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost": "excluding acquired research"},
+    # long-term debt including its current maturities, which CURRENT_DEBT may also hold
+    "LONG_TERM_DEBT": {c: "including current maturities" for c in
+                       ("LongTermDebt", "SeniorLongTermNotes", "SecuredLongTermDebt", "ConvertibleNotesPayable", "LongtermBorrowings")},
+    # current debt including short-term borrowings (DebtCurrent), or short-term borrowings alone, which ST_BORROWINGS may hold
+    "CURRENT_DEBT": {"DebtCurrent": "including short-term borrowings",
+                     "CurrentBorrowingsAndCurrentPortionOfNoncurrentBorrowings": "including short-term borrowings",
+                     "ShortTermBankLoansAndNotesPayable": "short-term borrowings only", "LinesOfCreditCurrent": "short-term borrowings only"},
+}
+
+
+def basis(item: str, concept: str | None) -> str:
+    """The basis key of a value of `item` reported under `concept` ("" = the item's main basis)."""
+    return DIFFERENT_BASIS.get(item, {}).get(concept or "", "")
+
+
 CONCEPT_TO_ITEMS: dict[tuple[str, str], list[tuple[str, int]]] = {}
 for _item in ITEMS:
     for _rank, _c in enumerate(_item.concepts):
-        tax, name = (_c.split(":", 1) if ":" in _c else ("us-gaap", _c))
-        CONCEPT_TO_ITEMS.setdefault((tax, name), []).append((_item.id, _rank))
+        _tax, _name = (_c.split(":", 1) if ":" in _c else ("us-gaap", _c))
+        CONCEPT_TO_ITEMS.setdefault((_tax, _name), []).append((_item.id, _rank))
     for _rank, _c in enumerate(IFRS.get(_item.id, ()), start=len(_item.concepts)):
         CONCEPT_TO_ITEMS.setdefault(("ifrs-full", _c), []).append((_item.id, _rank))

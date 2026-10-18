@@ -22,6 +22,7 @@ from ffi.detectors.stats import (
     severity_from_z,
 )
 from ffi.models_store import load_model
+from ffi.xbrl.canonical import BY_ID
 
 F = "D"
 
@@ -39,7 +40,7 @@ RATIOS: dict[str, tuple[str, Callable[[V], float]]] = {
     "accruals_ta": ("(NI - CFO) / assets", lambda v: safe_div(v.g("NET_INCOME") - v.g("CFO"), v.avg("TOTAL_ASSETS"))),
     "cfo_ni": ("CFO / NI", lambda v: safe_div(v.g("CFO"), v.g("NET_INCOME")) if v.g("NET_INCOME") > 0 else float("nan")),
     "capex_da": ("Capex / D&A", lambda v: safe_div(v.g("CAPEX"), v.g("DA"))),
-    "dep_rate": ("Depreciation / gross PP&E", lambda v: safe_div(v.g("DA"), v.g("PPE_GROSS"))),
+    "dep_rate": ("D&A / gross PP&E", lambda v: safe_div(v.g("DA"), v.g("PPE_GROSS"))),
     "soft_assets": ("Soft assets / assets", lambda v: safe_div(v.g("TOTAL_ASSETS") - v.g("PPE_NET") - v.g("CASH"), v.g("TOTAL_ASSETS"))),
     "goodwill_ta": ("Goodwill / assets", lambda v: safe_div(v.z("GOODWILL"), v.g("TOTAL_ASSETS"))),
     "leverage": ("Liabilities / assets", lambda v: safe_div(v.total_liabilities(), v.g("TOTAL_ASSETS"))),
@@ -50,7 +51,7 @@ RATIOS: dict[str, tuple[str, Callable[[V], float]]] = {
     "inv_growth_less_cogs": ("Inventory growth - COGS growth", lambda v: (safe_div(v.g("INVENTORY"), v.g("INVENTORY", 1)) - 1) - (safe_div(v.g("COGS"), v.g("COGS", 1)) - 1)),
     "other_ca_rev": ("Other current assets / revenue", lambda v: safe_div(v.g("OTHER_CURRENT_ASSETS"), v.g("REVENUE"))),
     "deferred_rev_rev": ("Deferred revenue / revenue", lambda v: safe_div(v.g("DEFERRED_REV_CURRENT"), v.g("REVENUE"))),
-    "interest_rate": ("Interest / debt", lambda v: safe_div(v.g("INTEREST_EXPENSE"), v.z("LONG_TERM_DEBT") + v.z("CURRENT_DEBT"))),
+    "interest_rate": ("Interest / debt", lambda v: safe_div(v.g("INTEREST_EXPENSE"), v.debt())),
 }
 
 
@@ -104,10 +105,11 @@ def d01(ctx: RunContext):
             worst = max(worst, 0.45)
     if not out_bits and not cps and all(len(x[0].dropna()) < 12 for x in series.values()):
         raise SkipDetector("fewer than 12 quarters of history")
-    near_events = ctx.events_of("AUDITOR_CHANGE", "OFFICER_CHANGE", "ACQUISITION", within_days=400)
+    near_events = sorted(ctx.events_of("AUDITOR_CHANGE", "ACQUISITION", within_days=400) + ctx.officer_changes(within_days=400),
+                         key=lambda e: e.date)
     txt = "; ".join(out_bits + cps) if (out_bits or cps) else "No unusual seasonal residuals or recent level shifts."
     if near_events and (out_bits or cps):
-        txt += f" Co-dated events: {', '.join(e.type.lower() for e in near_events[:3])}."
+        txt += f" Events in the same period: {', '.join(e.type.lower().replace('_', ' ') for e in near_events[:3])}."
     return [mk("D.01", ctx, raw_value=len(out_bits) + len(cps), severity=worst, unit="findings", rationale=txt,
                evidence=[ctx.ev_event(e) for e in near_events[:2]])]
 
@@ -167,7 +169,8 @@ def d03(ctx: RunContext):
     keys = [k for k in RATIOS if not ctx.profile or k not in ctx.profile.excluded_ratios]
     pool, labels = [], []
     for p in ctx.peers.loaded:
-        for per in list(p.annual.values.index)[-6:]:
+        al = ctx.peers.aligned_period(p, ctx.focus)  # the peer's years up to the focus year, never later ones
+        for per in ([q for q in p.annual.values.index if q <= al][-6:] if al is not None else []):
             pool.append(ratio_vector(p.annual, per))
             labels.append(f"peer:{p.cik}")
     for per in ctx.periods[-6:-1]:
@@ -385,7 +388,7 @@ def d08(ctx: RunContext):
     chg = safe_div(n1 - n0, n0)
     prev_items = {i for (i, p) in ctx.A.prov if p == p1}
     cur_items = {i for (i, p) in ctx.A.prov if p == ctx.focus}
-    gone = sorted(prev_items - cur_items)
+    gone = sorted(BY_ID[i].label for i in prev_items - cur_items)
     sev = float(np.clip((abs(chg) - 0.2) / 0.4, 0, 1)) * 0.5 + min(0.3, 0.05 * len(gone))
     return [mk("D.08", ctx, raw_value=chg, severity=sev, unit="change in tagged concepts",
                rationale=(f"Standard concepts tagged: {n1} vs {n0} last year ({fmt_pct(chg)})."

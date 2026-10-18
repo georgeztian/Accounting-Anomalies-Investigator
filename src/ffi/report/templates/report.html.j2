@@ -131,7 +131,7 @@
   <dt>Company</dt><dd>{{ m.company.match_note }}</dd>
   <dt>Company type</dt><dd>{{ m.profile.label }}. {{ m.profile.description }}{% for n in m.profile.notes %} {{ n }}{% endfor %}</dd>
   <dt>What was analysed</dt><dd>{{ m.analysis_type }}. The figures come from the company's filings with the US Securities and Exchange Commission (SEC).</dd>
-  <dt>Point in time</dt><dd>Only filings public on or before {{ m.as_of }} were used, and the company's figures are taken as first reported, before any later corrections.</dd>
+  <dt>Point in time</dt><dd>Only filings public on or before {{ m.as_of }}, the end of the year's filing season, were used (SEC comment letters about the year's annual report, which come later, are the one exception), and the company's figures are taken as first reported, before any later corrections.</dd>
   <dt>Comparison group</dt><dd>{{ m.peer_method }}</dd>
   <dt>Legitimate causes checked</dt><dd>{% if m.explain_conditions %}{% for k, v in m.explain_conditions.items() %}{{ v }}{{ '; ' if not loop.last }}{% endfor %}{% else %}No acquisition, change in accounting standards or stock split was found in the year reviewed, so no results were discounted for those reasons.{% endif %}</dd>
   <dt>Data notes</dt><dd><ul class="tight">{% for n in m.notes %}<li>{{ n }}</li>{% endfor %}</ul></dd>

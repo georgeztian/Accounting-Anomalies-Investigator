@@ -41,13 +41,17 @@ def _apply(f, result: dict, case: dict) -> None:
             f.alternatives = [f"{a['alternative']}: {a['assessment']}" for a in draft["alternatives"]]
         if draft.get("questions"):
             f.questions = draft["questions"]
+        if status == "published":  # a degraded draft re-uses the code-written alternatives and questions
+            f.agent_text = list(f.alternatives) + list(f.questions)
         cited = set(draft.get("cited_ledger_ids", []))
         for entry in result.get("ledger", []):
             if entry["id"] in cited:
                 for ev in entry.get("evidence", [])[:2]:
                     f.evidence.append(EvidenceRef(**{**ev, "char_span": tuple(ev["char_span"]) if ev.get("char_span") else None}))
     elif status == "explained":
-        f.alternatives = [f"{a['alternative']}: {a['reasoning']}" for a in result.get("alternatives", []) if a.get("supported")] + f.alternatives
+        written = [f"{a['alternative']}: {a['reasoning']}" for a in result.get("alternatives", []) if a.get("supported")]
+        f.alternatives = written + f.alternatives
+        f.agent_text = written
         f.narrative_source = "agent: closed as explained"
         f.score *= 0.5  # counts for half: in the risk ranking as well as in its strength
         f.priority *= 0.5

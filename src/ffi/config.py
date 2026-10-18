@@ -46,7 +46,8 @@ class Settings(BaseSettings):
 
 
 def find_claude_cli(explicit: str = "") -> str | None:
-    """The Claude Code CLI: FFI_CLAUDE_CLI, `claude` on PATH, or the binary bundled with the VS Code extension."""
+    """The Claude Code CLI: FFI_CLAUDE_CLI if set; else `claude` on PATH; else the most recently modified of the binary
+    bundled with the Claude Code extension for VS Code or Cursor, ~/.local/bin/claude and ~/.claude/local/claude."""
     import os
     import shutil
 

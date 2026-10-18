@@ -141,7 +141,7 @@
   <dt>Company type</dt><dd>{{ m.profile.label }}. {{ m.profile.description }}{% for n in m.profile.notes %} {{ n }}{% endfor %}</dd>
   <dt>What was analysed</dt><dd>{{ m.analysis_type }}. The figures come from the company's filings with the US Securities and Exchange Commission (SEC).</dd>
   <dt>Years</dt><dd>Each of the {{ m.years }} fiscal years was analysed on its own, with its own comparison group and the history available up to that year; findings were then matched across years. Each anomaly's estimated effect, investigation and re-check use the most recent year in which it was flagged.</dd>
-  <dt>Point in time</dt><dd>Only filings public on or before {{ m.as_of }} were used, and each year's figures are taken as first reported, before any later corrections.</dd>
+  <dt>Point in time</dt><dd>Each year was analysed with the filings public by the end of its own filing season ({{ m.as_of }} for the last year) (SEC comment letters about each year's annual report, which come later, are the one exception), and each year's figures are taken as first reported, before any later corrections.</dd>
   <dt>Comparison group (latest year)</dt><dd>{{ m.peer_method }}</dd>
   <dt>Legitimate causes checked</dt><dd>{% if m.explain_conditions %}{{ m.explain_conditions|join('; ') }}{% else %}No acquisition, change in accounting standards or stock split was found in any year reviewed, so no results were discounted for those reasons.{% endif %}</dd>
   <dt>Data notes</dt><dd><ul class="tight">{% for n in m.notes %}<li>{{ n }}</li>{% endfor %}</ul></dd>

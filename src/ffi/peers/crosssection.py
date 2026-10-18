@@ -10,6 +10,7 @@ as-first-reported values.
 
 from __future__ import annotations
 
+import contextlib
 import re
 
 import pandas as pd
@@ -17,10 +18,12 @@ import pandas as pd
 from ffi.edgar import endpoints
 from ffi.edgar.client import EdgarClient
 
-XSEC_VERSION = 2  # bump when the concept lists change, so cached cross-sections are rebuilt
+XSEC_VERSION = 3  # bump when the concept lists change, so cached cross-sections are rebuilt
+# Each list keeps the priority order of the canonical item (xbrl/canonical.py; a unit test checks it): total revenue net
+# of interest expense before ASC 606 contract revenue, which at banks and card issuers leaves out net interest income
 DURATION_CONCEPTS: dict[str, tuple[str, ...]] = {
-    "REVENUE": ("Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet",
-                "RevenuesNetOfInterestExpense"),  # last: banks and card issuers report revenue net of interest expense
+    "REVENUE": ("Revenues", "RevenuesNetOfInterestExpense", "RevenueFromContractWithCustomerExcludingAssessedTax",
+                "SalesRevenueNet"),
     "NET_INCOME": ("NetIncomeLoss",),
     "CFO": ("NetCashProvidedByUsedInOperatingActivities",),
     "COGS": ("CostOfRevenue", "CostOfGoodsAndServicesSold", "CostOfGoodsSold"),
@@ -84,12 +87,16 @@ def build(client: EdgarClient, ciks: list[int] | None, years: list[int], max_age
         current = re.compile(rf"xsec_v{XSEC_VERSION}_\d{{4}}\.parquet")
         for old in folder.glob("xsec_*.parquet"):
             if not current.fullmatch(old.name):
-                old.unlink(missing_ok=True)  # files of earlier versions (multi-year windows), which this one never reads
+                with contextlib.suppress(OSError):  # a file another process holds open is removed by a later run
+                    old.unlink(missing_ok=True)  # files of earlier versions (multi-year windows), which this one never reads
         for y in missing:
             part = built[built["year"] == y] if not built.empty else built
             if not part.empty:
-                folder.mkdir(parents=True, exist_ok=True)
-                part.to_parquet(paths[y], index=False)
+                try:
+                    folder.mkdir(parents=True, exist_ok=True)
+                    part.to_parquet(paths[y], index=False)
+                except OSError:
+                    continue  # not cached (the file is held open elsewhere); the raw frames stay for the next run
                 for url in _frame_urls(y):  # the year's raw frames (~15 MB) are only read to build this file
                     client.evict(url)
         frames = [pd.read_parquet(p) for p in fresh.values()] + ([built] if not built.empty else [])

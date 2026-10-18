@@ -213,12 +213,17 @@ def build_graph(ctx: RunContext, finding, llm: LLM):
         except LLMRefusal:
             return Command(update={"alternatives": [], "explained": False}, goto="quantify")
         known = {e["id"] for e in state.get("ledger", [])}
+        ledger_nums = [n for e in state.get("ledger", []) for n in e.get("numbers", []) + grounding.numbers_in(e.get("text", ""))]
         assessed = []
         for a in res.assessments:
             d = a.model_dump()
             d["ledger_ids"] = [i for i in d["ledger_ids"] if i in known]
             if d["supported"] and not d["ledger_ids"]:
                 d["supported"] = False  # no citation, no support
+            # the reasoning of a supported alternative reaches the report when the case closes as explained, so it must
+            # pass the grounding gate like any other AI-written text
+            if d["supported"] and not grounding.check(f"{d['alternative']}: {d['reasoning']}", allowed + ledger_nums, docs).ok:
+                d["reasoning"] = f"supported by the evidence gathered ({', '.join(d['ledger_ids'])})"
             assessed.append(d)
         explained = any(a["supported"] and a["strength"] == "strong" for a in assessed)
         return Command(update={"alternatives": assessed, "explained": explained, "spend": [sp]},
@@ -274,7 +279,9 @@ def build_graph(ctx: RunContext, finding, llm: LLM):
     def verify(state: CaseState):
         """Deterministic gate: every number traces to a source value, every quote exists, neutral language."""
         d = state["draft"] or {}
-        text = " ".join([d.get("summary", ""), d.get("explanation", "")] + [a["assessment"] for a in d.get("alternatives", [])])
+        # everything of the draft that reaches the report: the alternatives' names and the questions too
+        text = " ".join([d.get("summary", ""), d.get("explanation", "")]
+                        + [f"{a['alternative']}: {a['assessment']}" for a in d.get("alternatives", [])] + list(d.get("questions", [])))
         # numbers the draft may legitimately repeat: tool outputs, the detectors' own results, and amounts in quoted filing text
         ledger_nums = [n for e in state.get("ledger", []) for n in e.get("numbers", []) + grounding.numbers_in(e.get("text", ""))]
         signal_nums = [n for s in state["finding"].get("signals", []) for n in grounding.numbers_in(s.get("rationale", ""))]

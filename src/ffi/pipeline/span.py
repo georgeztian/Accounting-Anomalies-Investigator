@@ -150,11 +150,12 @@ def run_span(opts: RunOptions, span: int, choose=None, progress: Callable[[str],
         import gc
 
         gc.collect()  # release graph-database handles still held by finished years before deleting their files
-        for f in run_dir.glob("kg_*.duckdb*"):
+        for path in run_dir.glob("kg_*.duckdb*"):
             with contextlib.suppress(OSError):
-                f.unlink()
+                path.unlink()
         if not any(isinstance(c, dict) and c.get("status") in ("paused", "error", "running") for c in agent_cases):
-            (run_dir / "checkpoints.sqlite").unlink(missing_ok=True)
+            with contextlib.suppress(OSError):
+                (run_dir / "checkpoints.sqlite").unlink(missing_ok=True)
     _remove_superseded_reports(run_dir, company.cik)
     return out
 

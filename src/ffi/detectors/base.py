@@ -108,6 +108,7 @@ class Signal:
     tags: list[str] = field(default_factory=list)
     suppressed_by: str | None = None
     detector_version: str = "1"
+    flag_at: float = 0.5  # the severity at which this result is flagged (kept so a recalibrated severity is re-judged)
 
     @property
     def key(self) -> str:

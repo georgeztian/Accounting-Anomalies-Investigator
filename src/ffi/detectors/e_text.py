@@ -8,17 +8,19 @@ quote that cannot be located in the filing is discarded, and numbers are re-chec
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
 import pandas as pd
 from pydantic import BaseModel, Field
 
-from ffi.context import RunContext
+from ffi.context import RunContext, announced_quarter
 from ffi.detectors.base import Area, EvidenceRef, Scheme, SkipDetector, detector
 from ffi.detectors.helpers import finite, mk
+from ffi.detectors.scores import V
 from ffi.detectors.stats import fmt_num, fmt_pct, safe_div
-from ffi.detectors.textnum import qualified
+from ffi.detectors.textnum import QUARTER_WORDS, YEAR_WORDS, qualified, statement_period
 from ffi.llm import LLMError
 from ffi.text.document import TextDoc
 from ffi.text.search import count, search
@@ -244,7 +246,8 @@ def e10(ctx: RunContext):
     n_threads = len({f.filing_date.isoformat()[:7] for f in letters if f.form == "UPLOAD"})
     sev = float(np.clip((n_threads - 1) / 4, 0, 1)) * 0.5 + (0.15 if "revenue recognition" in topics else 0)
     return [mk("E.10", ctx, raw_value=len(letters), severity=sev, unit="letters", tags=["pressure"],
-               rationale=(f"{len(letters)} SEC comment-letter filings in three years ({n_threads} staff letter month(s))"
+               rationale=(f"{len(letters)} SEC comment-letter filings in the three years to the end of {ctx.focus_label} and the year after it, "
+                          f"when its annual report is reviewed ({n_threads} month(s) with staff letters)"
                           + (f"; topics in company responses: {', '.join(f'{k} ({v})' for k, v in topics.items())}." if topics else ".")),
                evidence=ev[:3])]
 
@@ -260,21 +263,34 @@ RELEASE_ITEMS = {"REVENUE": ("REVENUE",),
                  "NET_INCOME": ("NET_INCOME", "NET_INCOME_INCL_NCI", "NET_INCOME_TO_COMMON")}
 
 
-def _release_period_totals(ctx: RunContext, released: pd.Timestamp) -> dict[str, list[float]] | None:
-    """Reported totals for the quarter a release announces (the latest quarter ending within 120 days before it),
-    plus the fiscal year when that quarter closes one. None when that quarter has not been filed in XBRL."""
-    qs = [p for p in ctx.Q.periods if released - pd.Timedelta(days=120) <= p <= released]
-    if not qs:
+def reported_quarter(ctx: RunContext, released: pd.Timestamp) -> pd.Timestamp:
+    """The quarter an earnings release announces (see `announced_quarter`)."""
+    return announced_quarter(ctx.focus, released)
+
+
+def releases_in_year(ctx: RunContext) -> list:
+    """Releases announcing a quarter of the focus fiscal year (the fourth-quarter release announces the full year too);
+    a release for the next year's first quarter, filed weeks after the year end, is never read as this year's."""
+    start = ctx.focus - pd.DateOffset(months=12)
+    return [r for r in ctx.releases if start + pd.Timedelta(days=8) < reported_quarter(ctx, pd.Timestamp(r.period_end)) <= ctx.focus + pd.Timedelta(days=8)]
+
+
+def _release_period_totals(ctx: RunContext, released: pd.Timestamp) -> dict[str, dict[str, list[float]]] | None:
+    """Reported totals for the quarter a release announces, and for the fiscal year when that quarter closes one,
+    kept apart ({"Q": [...], "FY": [...]}) so a quarterly figure is never checked against a full-year total.
+    None when that quarter has not been filed in XBRL."""
+    q_end = reported_quarter(ctx, released)
+    q = next((p for p in ctx.Q.periods if abs((p - q_end).days) <= 8), None)
+    if q is None:
         return None
-    q = qs[-1]
     fy = next((p for p in ctx.A.periods if abs((p - q).days) <= 8), None)
-    out: dict[str, list[float]] = {}
+    out: dict[str, dict[str, list[float]]] = {}
     for key, items in RELEASE_ITEMS.items():
         if key == "REVENUE" and ctx.profile is not None and ctx.profile.key == "bank":
             continue  # banks headline revenue on a managed (taxable-equivalent) basis, a non-GAAP figure
-        vals = [ctx.Q.get(i, q) for i in items] + ([ctx.A.get(i, fy) for i in items] if fy is not None else [])
-        out[key] = [v for v in vals if finite(v)]
-    return out if any(out.values()) else None
+        out[key] = {"Q": [v for v in (ctx.Q.get(i, q) for i in items) if finite(v)],
+                    "FY": [v for v in (ctx.A.get(i, fy) for i in items) if finite(v)] if fy is not None else []}
+    return out if any(v["Q"] or v["FY"] for v in out.values()) else None
 
 
 @detector("E.12", "Earnings release vs filing", F, Area.INTEGRITY)
@@ -282,10 +298,11 @@ def e12(ctx: RunContext):
     """Company-wide revenue / net income in 8-K Ex. 99 earnings releases vs the later 10-Q/10-K XBRL totals."""
     from ffi.detectors.textnum import check_amounts
 
-    if not ctx.releases:
-        raise SkipDetector("no earnings releases fetched")
+    releases = releases_in_year(ctx)
+    if not releases:
+        raise SkipDetector("no earnings releases for this fiscal year fetched")
     checked, bad, used = 0, [], 0
-    for rel in ctx.releases[-4:]:
+    for rel in releases[-4:]:
         known = _release_period_totals(ctx, pd.Timestamp(rel.period_end))
         if known is None:
             continue  # the quarter this release reports is not in the XBRL filed by the as-of date
@@ -303,7 +320,7 @@ def e12(ctx: RunContext):
         if s >= 0:
             ev.append(ctx.ev_span(rel, s, s + len(x.text), f"Earnings release {rel.period_end}"))
     return [mk("E.12", ctx, raw_value=len(bad), severity=sev, unit="mismatches", scheme=Scheme.REPORTING_INTEGRITY,
-               rationale=(f"{checked} company-wide revenue / net income totals in {min(4, len(ctx.releases))} earnings releases matched "
+               rationale=(f"{checked} company-wide revenue / net income totals in {used} earnings releases matched "
                           f"against XBRL; {len(bad)} differ from the nearest reported total (a figure revised between release and filing)."),
                evidence=ev)]
 
@@ -332,27 +349,172 @@ NG_EPS_RE = re.compile(r"(?:non-gaap|adjusted)\s+(?:diluted\s+)?(?:eps|earnings 
 GAAP_EPS_RE = re.compile(r"(?<!non-)gaap\s+(?:diluted\s+)?(?:eps|earnings per (?:diluted )?share)[^$]{0,40}\$\s?(\d+\.\d{2})", re.I)
 
 
+EPS_LABEL_RE = re.compile(r"(?i)\beps\b|earnings per (?:common |diluted |basic )?share")
+ADJUSTED_RE = re.compile(r"(?i)non-gaap|adjusted|excluding|operating earnings|\bcore\b")
+MONEY2_RE = re.compile(r"\(?\$\s?(\d+\.\d{2})\)?")
+
+
+@dataclass
+class EpsFigure:
+    value: float
+    period: str  # "Q" (the quarter the release announces) | "FY" (the full fiscal year)
+    start: int
+    end: int
+
+
+def _eps_rows(text: str) -> list[tuple[str, list[float], int, int]]:
+    """EPS table rows: (label, $ values in column order, start, end). A row's values sit on its line after the label
+    and on the following lines that hold only numbers (tables often put each cell on its own line)."""
+    rows, pos, lines = [], 0, text.split("\n")
+    offsets = []
+    for line in lines:
+        offsets.append(pos)
+        pos += len(line) + 1
+    for i, line in enumerate(lines):
+        label = re.split(r"\$|\|", line, maxsplit=1)[0]
+        if len(label) > 160 or not EPS_LABEL_RE.search(label) or GUIDANCE_RE.search(label):
+            continue
+        vals = [float(x) for x in MONEY2_RE.findall(line[len(label):])]
+        j = i + 1
+        while j < len(lines) and j <= i + 12 and not re.search(r"[A-Za-z]", lines[j]):
+            vals += [float(x) for x in MONEY2_RE.findall(lines[j])]
+            j += 1
+        if vals:
+            rows.append((label.strip(), vals, offsets[i], offsets[j - 1] + len(lines[j - 1])))
+    return rows
+
+
+GUIDANCE_RE = re.compile(r"(?i)expect|guidance|outlook|forecast|target|range of")
+# a column header starts its line ("| Quarters Ended", "Years Ended December 31,"); the same words inside a sentence
+# ("Annual Report on Form 10-K for the year ended ...") are not a header
+HEADER_RE = re.compile(r"(?im)^[ \t|]*(?:(?:three|six|nine|twelve) months|quarters?|(?:fiscal )?years?)\s+ended\b|^[ \t|]*full[- ]year\s*$")
+YTD_RE = re.compile(r"(?i)six months|nine months|year[- ]to[- ]date")
+
+
+def _header_kinds(text: str, start: int) -> set[str]:
+    """The column groups of the table a row sits in, from the nearest header above it: {"Q"}, {"FY"}, {"Q", "FY"},
+    {"Q", "YTD"} (a nine-month column) or empty when there is no header within reach."""
+    hits = list(HEADER_RE.finditer(text, max(0, start - 3000), start))
+    if not hits:
+        return set()
+    last = hits[-1].start()
+    kinds = set()
+    for m in hits:
+        if last - m.start() > 300:  # an earlier table's header
+            continue
+        w = m.group(0).lower()
+        kinds.add("Q" if re.search(r"quarter|three months", w) else "YTD" if re.search(r"six|nine", w) else "FY")
+    return kinds
+
+
+def _row_figures(label: str, vals: list[float], start: int, end: int, q4: bool, header: set[str]) -> list[EpsFigure]:
+    """The figures a row states, each with its period, or none when the period cannot be told.
+
+    The row's label decides first ("Full Year Adjusted EPS", "Q4 EPS"); then the table header: a year-only table holds
+    full-year figures, a quarter-only table quarterly ones; under a quarter-and-year header a row of four values reads
+    quarter, prior quarter, year, prior year. A row whose period stays unclear (two values under a two-period header,
+    or no header in a fourth-quarter release, where either is possible) is skipped: a quarter is never read as a year."""
+    if YEAR_WORDS.search(label) and not QUARTER_WORDS.search(label):
+        return [EpsFigure(vals[0], "FY", start, end)]
+    if QUARTER_WORDS.search(label) and not YEAR_WORDS.search(label):
+        return [EpsFigure(vals[0], "Q", start, end)]
+    if YTD_RE.search(label):
+        return []
+    if header == {"FY"}:
+        return [EpsFigure(vals[0], "FY", start, end)]
+    if header == {"Q"}:
+        return [EpsFigure(vals[0], "Q", start, end)]
+    if "Q" in header and len(vals) >= 4:
+        return [EpsFigure(vals[0], "Q", start, end)] + ([EpsFigure(vals[2], "FY", start, end)] if "FY" in header else [])
+    if not header and not q4:  # a quarterly release without column headers: the first column is the quarter
+        return [EpsFigure(vals[0], "Q", start, end)]
+    return []
+
+
+# a table titled by its basis: a line that is only "GAAP" or "Non-GAAP" (optionally "results", "measures", "summary")
+TABLE_BASIS_RE = re.compile(r"(?im)^[ \t|]*(non-gaap|gaap)(?:\s+(?:results|measures|summary|financial measures))?[ \t|]*$")
+MIXED_BASIS_RE = re.compile(r"(?i)(?<!non-)\bgaap\b.*\bnon-gaap\b|\bnon-gaap\b.*(?<!non-)\bgaap\b")
+
+
+def _table_basis(text: str, start: int) -> str | None:
+    """"adjusted" or "gaap" when the row sits under a table titled by its basis (NVIDIA: a "GAAP" table, then a
+    "Non-GAAP" table with the same row labels), else None."""
+    hits = list(TABLE_BASIS_RE.finditer(text, max(0, start - 2000), start))
+    if not hits:
+        return None
+    return "adjusted" if hits[-1].group(1).lower() == "non-gaap" else "gaap"
+
+
+def release_eps(ctx: RunContext, rel) -> tuple[list[EpsFigure], list[EpsFigure]]:
+    """(adjusted, GAAP) diluted EPS figures stated in a release, each tagged with its period. A row's basis comes from
+    its label, else from the title of its table; a row stating both bases ("GAAP and non-GAAP EPS were $0.76 and
+    $0.81") is skipped, since which value is which cannot be read from the row alone."""
+    q4 = abs((reported_quarter(ctx, pd.Timestamp(rel.period_end)) - ctx.focus).days) <= 8
+    adjusted, gaap = [], []
+    for label, vals, s, e in _eps_rows(rel.text):
+        if re.search(r"(?i)\bbasic\b", label) and not re.search(r"(?i)diluted", label):
+            continue
+        if MIXED_BASIS_RE.search(label):
+            continue
+        figs = _row_figures(label, vals, s, e, q4, _header_kinds(rel.text, s))
+        is_adjusted = bool(ADJUSTED_RE.search(label)) or _table_basis(rel.text, s) == "adjusted"
+        (adjusted if is_adjusted else gaap).extend(figs)
+    if not adjusted:  # prose: "adjusted EPS of $3.04 for the fourth quarter"
+        for pattern, out in ((NG_EPS_RE, adjusted), (GAAP_EPS_RE, gaap)):
+            for m in pattern.finditer(rel.text):
+                lo = max(0, rel.text.rfind(".", 0, m.start()) + 1)
+                sentence = rel.text[lo: m.end() + 80]
+                if GUIDANCE_RE.search(sentence) or YTD_RE.search(sentence):
+                    continue
+                period = statement_period(sentence) or (None if q4 else "Q")  # unstated: only a quarter is possible
+                if period:
+                    out.append(EpsFigure(float(m.group(1)), period, m.start(), m.end()))
+    return adjusted, gaap
+
+
+def filed_eps(ctx: RunContext, rel, period: str) -> float:
+    """Reported diluted EPS from the filings for the same period a release figure covers: the fiscal year, or the
+    quarter the release announces. NaN when that period's EPS is not filed (a fourth quarter is often not tagged)."""
+    q_end = reported_quarter(ctx, pd.Timestamp(rel.period_end))
+    if period == "FY":
+        p = next((p for p in ctx.A.periods if abs((p - q_end).days) <= 8), None)
+        return ctx.A.get("EPS_DILUTED", p) if p is not None else float("nan")
+    p = next((p for p in ctx.Q.periods if abs((p - q_end).days) <= 8), None)
+    return ctx.Q.get("EPS_DILUTED", p) if p is not None and (("EPS_DILUTED", p) not in ctx.Q.derived) else float("nan")
+
+
 @detector("C.NG.01", "Non-GAAP to GAAP gap", "C", Area.NON_GAAP)
 def cng01(ctx: RunContext):
-    """Adjusted EPS vs GAAP EPS in the latest earnings release."""
-    if not ctx.releases:
-        raise SkipDetector("no earnings releases fetched")
-    for rel in reversed(ctx.releases):
-        ng = NG_EPS_RE.search(rel.text)
-        if not ng:
+    """Adjusted EPS vs GAAP EPS for the same period (quarter with quarter, full year with full year, never mixed),
+    in the latest earnings release of the focus fiscal year. GAAP EPS comes from the release's own table, else from
+    the filings for that same period; with neither, nothing is compared."""
+    releases = releases_in_year(ctx)
+    if not releases:
+        raise SkipDetector("no earnings releases for this fiscal year fetched")
+    for rel in reversed(releases):
+        adjusted, gaap = release_eps(ctx, rel)
+        if not adjusted:
             continue
-        g = GAAP_EPS_RE.search(rel.text)
-        q_eps = ctx.qhist("EPS_DILUTED").dropna()  # the latest quarter up to the focus year, never a later one
-        gaap = float(g.group(1)) if g else float(q_eps.iloc[-1]) if not q_eps.empty else float("nan")
-        adj = float(ng.group(1))
-        gap = safe_div(adj - gaap, abs(gaap))
-        sev = float(np.clip((gap - 0.20) / 0.60, 0, 1)) if finite(gap) else 0.0
-        s = rel.text.find(ng.group(0))
-        return [mk("C.NG.01", ctx, period=rel.period_end, raw_value=gap, severity=sev, unit="relative gap",
-                   scheme=Scheme.MISLEADING_METRICS, direction="income_increasing",
-                   rationale=f"Non-GAAP EPS ${adj:.2f} vs GAAP EPS ${gaap:.2f} ({fmt_pct(gap)} higher).",
-                   evidence=[ctx.ev_span(rel, s, s + len(ng.group(0)), "Non-GAAP EPS in earnings release")] if s >= 0 else [])]
-    return [mk("C.NG.01", ctx, raw_value=0.0, severity=0.0, rationale="No non-GAAP EPS found in recent earnings releases.")]
+        # prefer the full-year comparison in a fourth-quarter release: the report covers the fiscal year
+        for adj in sorted(adjusted, key=lambda a: a.period != "FY"):
+            same = next((g for g in gaap if g.period == adj.period), None)
+            base = same.value if same else filed_eps(ctx, rel, adj.period)
+            if not finite(base) or base == 0:
+                continue
+            gap = safe_div(adj.value - base, abs(base))
+            sev = float(np.clip((gap - 0.20) / 0.60, 0, 1)) if finite(gap) else 0.0
+            q_end = reported_quarter(ctx, pd.Timestamp(rel.period_end))
+            span = f"the full fiscal year {ctx.focus_label}" if adj.period == "FY" else f"the quarter ended {q_end.date()}"
+            src = "the release" if same else "the filed statements"
+            return [mk("C.NG.01", ctx, raw_value=gap, severity=sev, unit="relative gap",
+                       scheme=Scheme.MISLEADING_METRICS, direction="income_increasing",
+                       rationale=(f"Non-GAAP diluted EPS ${adj.value:.2f} vs GAAP diluted EPS ${base:.2f} for {span}, in the earnings "
+                                  f"release of {rel.period_end} (GAAP figure from {src}): adjusted EPS is "
+                                  f"{fmt_pct(abs(gap))} {'above' if gap >= 0 else 'below'} GAAP EPS."),
+                       evidence=[ctx.ev_span(rel, adj.start, adj.end, "Non-GAAP EPS in earnings release")])]
+        return [mk("C.NG.01", ctx, raw_value=None, severity=0.0,
+                   rationale="Non-GAAP EPS found, but no GAAP EPS for the same period (quarter or full year), so nothing was compared.")]
+    return [mk("C.NG.01", ctx, raw_value=0.0, severity=0.0, rationale="No non-GAAP EPS found in this fiscal year's earnings releases.")]
 
 
 NG_CATEGORIES = {
@@ -368,7 +530,7 @@ NG_CATEGORIES = {
 @detector("C.NG.02", "Recurring 'one-time' adjustments", "C", Area.NON_GAAP)
 def cng02(ctx: RunContext):
     """Adjustment categories that appear in most recent earnings releases' non-GAAP reconciliations."""
-    rels = ctx.releases[-4:]
+    rels = releases_in_year(ctx)[-4:]
     if len(rels) < 3:
         raise SkipDetector("fewer than 3 earnings releases")
     rec_rels = [r for r in rels if re.search(r"non-gaap|reconciliation", r.text, re.I)]
@@ -499,14 +661,40 @@ class Claims(BaseModel):
     claims: list[Claim]
 
 
+def _gross_profit(ctx: RunContext, k: int) -> float:
+    """Gross profit in dollars, measured the same way in this year and last year (the claim compares the two)."""
+    if finite(ctx.a("GROSS_PROFIT"), ctx.a("GROSS_PROFIT", 1)):
+        return ctx.a("GROSS_PROFIT", k)
+    return ctx.a("REVENUE", k) - ctx.a("COGS", k)
+
+
 METRIC_FN = {
     "revenue": lambda ctx, k: ctx.a("REVENUE", k),
-    "gross margin": lambda ctx, k: safe_div(ctx.a("REVENUE", k) - ctx.a("COGS", k), ctx.a("REVENUE", k)),
-    "operating expenses": lambda ctx, k: (ctx.a("SGA", k) if finite(ctx.a("SGA", k)) else 0) + (ctx.a("RND", k) if finite(ctx.a("RND", k)) else 0),
+    "gross margin": lambda ctx, k: V(ctx.A, ctx.focus).gross_margin(k, years=(0, 1)),
+    "gross profit": _gross_profit,
+    # total operating expenses: revenue less cost of sales less operating income, which holds every operating line; SG&A
+    # plus R&D leaves out amortization, restructuring and other lines that a company's total includes
+    "operating expenses": lambda ctx, k: ctx.a("REVENUE", k) - ctx.a("COGS", k) - ctx.a("OPERATING_INCOME", k),
+    # "costs and expenses" (Alphabet, Meta) includes cost of revenue: revenue less operating income
+    "costs and expenses": lambda ctx, k: ctx.a("REVENUE", k) - ctx.a("OPERATING_INCOME", k),
     "operating income": lambda ctx, k: ctx.a("OPERATING_INCOME", k),
     "net income": lambda ctx, k: ctx.a("NET_INCOME", k),
     "cash from operations": lambda ctx, k: ctx.a("CFO", k),
 }
+PERCENT_CLAIM_RE = re.compile(r"(?i)percentage|basis points?|\bpoints?\b|as a percent|margin rate|% of (?:net |total )?(?:sales|revenues?)")
+
+
+def claim_metric(c) -> str | None:
+    """Which reported measure a claim is about, decided from its own words, or None when they do not say: "gross margin"
+    is a percentage at most companies but a dollar amount at Apple ("Total gross margin increased"); "operating expenses"
+    and "costs and expenses" are different totals."""
+    if c.metric == "gross margin":
+        if re.search(r"(?i)gross profit", c.quote) or (re.search(r"(?i)\$\s?\d", c.quote) and not PERCENT_CLAIM_RE.search(c.quote)):
+            return "gross profit"
+        return "gross margin" if PERCENT_CLAIM_RE.search(c.quote) or c.magnitude_pct is None else None
+    if c.metric == "operating expenses" and re.search(r"(?i)costs and expenses", c.quote):
+        return "costs and expenses"
+    return c.metric
 
 
 @detector("E.04", "MD&A claims vs reported numbers", F, Area.DISCLOSURE, needs_llm=True, needs_text=True)
@@ -529,7 +717,8 @@ def e04(ctx: RunContext):
         if key in seen:
             continue  # the same claim made twice in MD&A is checked (and reported) once
         seen.add(key)
-        fn = METRIC_FN.get(c.metric)
+        metric = claim_metric(c)
+        fn = METRIC_FN.get(metric) if metric else None
         if fn is None:
             continue
         v1, v0 = fn(ctx, 0), fn(ctx, 1)
@@ -538,18 +727,19 @@ def e04(ctx: RunContext):
         loc = locate(cur, c.quote)
         if loc is None:
             continue
-        if (SUBSET_RE.search(c.quote) or _part_of_business(c) or (c.metric != "gross margin" and RATIO_CLAIM_RE.search(c.quote))):
+        if (SUBSET_RE.search(c.quote) or _part_of_business(c) or (metric != "gross margin" and RATIO_CLAIM_RE.search(c.quote))):
             continue  # a part of the business ("digitally-enabled comparable sales", "Products gross margin") or a ratio
         checked += 1
-        actual = (v1 - v0) if c.metric == "gross margin" else (v1 - v0) / abs(v0)
-        actual_dir = "flat" if abs(actual) < (0.002 if c.metric == "gross margin" else 0.01) else ("increase" if actual > 0 else "decrease")
-        mag_bad = (c.magnitude_pct is not None and c.metric != "gross margin" and abs(c.magnitude_pct / 100 - actual) > 0.02 + 0.1 * abs(actual))
+        ratio = metric == "gross margin"
+        actual = (v1 - v0) if ratio else (v1 - v0) / abs(v0)
+        actual_dir = "flat" if abs(actual) < (0.002 if ratio else 0.01) else ("increase" if actual > 0 else "decrease")
+        mag_bad = (c.magnitude_pct is not None and not ratio and abs(c.magnitude_pct / 100 - actual) > 0.02 + 0.1 * abs(actual))
         if (c.direction != actual_dir and "flat" not in (c.direction, actual_dir)) or mag_bad:
             contradictions.append((c, actual, loc))
     sev = min(1.0, 0.45 * len(contradictions))
     return [mk("E.04", ctx, raw_value=len(contradictions), severity=sev, unit="contradictions", scheme=Scheme.MISLEADING_METRICS,
                rationale=(f"{checked} verifiable MD&A claim{'' if checked == 1 else 's'} checked against XBRL; {len(contradictions)} inconsistent"
-                          + (": " + "; ".join(_claim_gap(c, a) for c, a, _ in contradictions[:3]) if contradictions else "") + "."),
+                          + (": " + "; ".join(_claim_gap(c, a, claim_metric(c) or c.metric) for c, a, _ in contradictions[:3]) if contradictions else "") + "."),
                evidence=[ctx.ev_span(cur, loc[0], loc[1], f"MD&A claim: {c.metric}") for c, _, loc in contradictions[:3]])]
 
 
@@ -579,15 +769,16 @@ def _part_of_business(c: Claim) -> bool:
     return qualified(c.quote, m.start())
 
 
-def _claim_gap(c: Claim, actual: float) -> str:
+def _claim_gap(c: Claim, actual: float, metric: str) -> str:
     """One contradiction in words: what MD&A says against what the reported figures show."""
-    if c.metric == "gross margin":
+    if metric == "gross margin":
         said = f"gross margin {'rose' if c.direction == 'increase' else 'fell' if c.direction == 'decrease' else 'was flat'}"
-        return f"MD&A says {said}, but the reported figures show it moved {actual * 100:+.1f} percentage points"
+        moved = f"{'rose' if actual > 0 else 'fell'} {abs(actual) * 100:.1f} percentage points" if abs(actual) >= 0.0005 else "was unchanged"
+        return f"MD&A says {said}, but the reported gross margin (gross profit as a share of revenue) {moved}"
     verb = {"increase": "rose", "decrease": "fell", "flat": "was flat"}[c.direction]
     stated = f" {abs(c.magnitude_pct):.1f}%" if c.magnitude_pct is not None and c.direction != "flat" else ""
     shown = f"{'a rise' if actual > 0 else 'a fall'} of {fmt_pct(abs(actual))}" if abs(actual) >= 0.01 else "almost no change"
-    return f"MD&A says {c.metric} {verb}{stated}, but the reported figures show {shown}"
+    return f"MD&A says {metric} {verb}{stated}, but the reported figures show {shown}"
 
 
 class Relationship(BaseModel):
@@ -659,7 +850,7 @@ def covenant_signal(ctx: RunContext):
     except LLMError as e:
         raise SkipDetector(f"LLM unavailable: {e}") from e
     ebitda = ctx.a("OPERATING_INCOME") + (ctx.a("DA") if finite(ctx.a("DA")) else 0)
-    debt = sum(ctx.a(i) for i in ("LONG_TERM_DEBT", "CURRENT_DEBT", "ST_BORROWINGS") if finite(ctx.a(i)))
+    debt = V(ctx.A, ctx.focus).debt()  # total borrowings, no part counted twice
     out = []
     for c in res.covenants:
         loc = locate(cur, c.quote)
@@ -711,10 +902,15 @@ def _measure_core(text: str) -> str:
 def cng03(ctx: RunContext):
     """LLM reads the latest and a year-earlier release's reconciliation: new add-back categories and renamed measures."""
     llm = _llm(ctx)
-    if len(ctx.releases) < 2:
+    rels = releases_in_year(ctx)
+    if not rels or len(ctx.releases) < 2:
         raise SkipDetector("need two earnings releases a year apart")
-    cur = ctx.releases[-1]
-    old = ctx.releases[-5] if len(ctx.releases) >= 5 else ctx.releases[0]
+    cur = rels[-1]
+    # the release for the same quarter a year earlier, so like is compared with like
+    target = reported_quarter(ctx, pd.Timestamp(cur.period_end)) - pd.DateOffset(months=12)
+    old = next((r for r in ctx.releases if abs((reported_quarter(ctx, pd.Timestamp(r.period_end)) - target).days) <= 20), None)
+    if old is None or old is cur:  # never another quarter's release: its adjustments are not like for like
+        raise SkipDetector("no earnings release for the same quarter a year earlier")
 
     def rec(doc: TextDoc) -> Reconciliation:
         i = doc.text.lower().find("reconciliation")
@@ -737,7 +933,8 @@ def cng03(ctx: RunContext):
     sev = min(0.7, 0.2 * len(new_cats) + 0.1 * len(new_metrics) + 0.3 * len(asym))
     return [mk("C.NG.03", ctx, raw_value=len(new_cats), severity=sev, unit="new categories", scheme=Scheme.MISLEADING_METRICS,
                tags=[f"asymmetric:{x}" for x in asym],  # read by C.NG.04
-               rationale=(f"New adjustment categories vs {old.period_end}: {', '.join(new_cats) or 'none'}; new measure names: {', '.join(new_metrics) or 'none'}"
+               rationale=(f"New adjustment categories in the release of {cur.period_end} vs the same quarter's release a year earlier "
+                          f"({old.period_end}): {', '.join(new_cats) or 'none'}; new measure names: {', '.join(new_metrics) or 'none'}"
                           + (f"; gains added to adjusted income: {', '.join(asym)}." if asym else ".")))]
 
 

@@ -15,7 +15,7 @@ DEFAULT_INPUTS: dict[str, tuple[str, ...]] = {
     "B.06": ("NET_INCOME", "CFO", "AR", "INVENTORY", "OTHER_CURRENT_ASSETS", "PPE_GROSS", "TOTAL_ASSETS"),
     "B.07": ("NET_INCOME", "CFO", "TOTAL_ASSETS"), "B.08": ("TOTAL_ASSETS", "RETAINED_EARNINGS", "OPERATING_INCOME", "PUBLIC_FLOAT"),
     "B.09": ("NET_INCOME", "EPS_DILUTED", "TOTAL_ASSETS"), "B.10": ("OPERATING_INCOME", "CFO", "TOTAL_ASSETS"),
-    "C.CF.02": ("CFO", "CHANGE_AP", "CHANGE_AR", "CHANGE_INVENTORY"), "C.CF.07": ("LONG_TERM_DEBT", "CURRENT_DEBT", "ST_BORROWINGS"),
+    "C.CF.02": ("CFO", "CHANGE_AP", "CHANGE_AR", "CHANGE_INVENTORY"),
     "C.RES.01": ("ALLOWANCE", "INV_RESERVE", "WARRANTY_ACCRUAL", "PRETAX_INCOME"), "C.RES.06": ("LITIGATION_ACCRUAL",),
     "D.02": ("REVENUE", "NET_INCOME", "CFO", "TOTAL_ASSETS", "AR", "INVENTORY"),
     "D.03": ("REVENUE", "NET_INCOME", "CFO", "TOTAL_ASSETS", "AR", "INVENTORY"),
@@ -68,6 +68,7 @@ def mk(detector_id: str, ctx: Any, *, period: str | None = None, **kw: Any) -> S
         severity=sev,
         flagged=bool(flagged),
         rationale=kw.pop("rationale", ""),
+        flag_at=float(flag_at),
         **kw,
     )
 

@@ -6,6 +6,7 @@ versions: as-first-reported (what the market saw first) and latest (after any re
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -225,14 +226,25 @@ class FactStore:
         self.as_of = as_of
         self._fye: list[pd.Timestamp] | None = None
         self._memo: dict[tuple[str, str], object] = {}  # built panels and version tables (callers must not mutate them)
+        self._root: FactStore | None = None  # the unrestricted store this one was cut from (see `restricted`)
         counts = self.df["taxonomy"].value_counts() if not self.df.empty else pd.Series(dtype=int)
         self.taxonomy = "ifrs-full" if counts.get("ifrs-full", 0) > counts.get("us-gaap", 0) else "us-gaap"
+
+    def restricted(self, cutoff: date) -> FactStore:
+        """This store as it stood on `cutoff`: only facts filed by then. A past fiscal year is analysed with what was
+        public by the end of its filing season, so no later filing (a restated comparative, a later year's annual report
+        or quarterly report) reaches its panels. The reporting currency and annual forms stay those of the company."""
+        new = copy.copy(self)
+        new.df = self.df[self.df["filed"] <= pd.Timestamp(cutoff)].reset_index(drop=True) if not self.df.empty else self.df
+        new.as_of, new._fye, new._memo = cutoff, None, {}
+        new._root = self._root or self  # the audit's index of every reported value is built once, on the full store
+        return new
 
     def __getstate__(self) -> dict:
         return {k: v for k, v in self.__dict__.items() if not k.startswith("_memo")}  # caches are rebuilt on demand
 
     def __setstate__(self, state: dict) -> None:
-        self.__dict__.update(state)
+        self.__dict__.update({"_root": None, **state})
         self._memo = {}
 
     @classmethod
@@ -385,11 +397,16 @@ class FactStore:
             self._memo[("versions", freq)] = self._versions(freq)
         return self._memo[("versions", freq)]  # type: ignore[return-value]
 
-    def values_by_filing(self) -> dict[tuple[str, str], np.ndarray]:
-        """Every reported value by (accession, concept), for re-reading cited facts (the independent audit)."""
-        if ("values", "accn_concept") not in self._memo:
-            self._memo[("values", "accn_concept")] = {k: g.to_numpy(float) for k, g in self.df.groupby(["accn", "concept"])["val"]}
-        return self._memo[("values", "accn_concept")]  # type: ignore[return-value]
+    def values_by_filing(self) -> dict[tuple[str, str, str], np.ndarray]:
+        """Every reported value by (accession, concept, period end as YYYY-MM-DD), for re-reading cited facts (the
+        independent audit): a cited value must be the one the filing reports for the cited period, not merely a value
+        the filing reports for that concept in some period."""
+        if self._root is not None:
+            return self._root.values_by_filing()
+        if ("values", "accn_concept_end") not in self._memo:
+            d = self.df.assign(_end=self.df["end"].dt.strftime("%Y-%m-%d")) if not self.df.empty else self.df.assign(_end=[])
+            self._memo[("values", "accn_concept_end")] = {k: g.to_numpy(float) for k, g in d.groupby(["accn", "concept", "_end"])["val"]}
+        return self._memo[("values", "accn_concept_end")]  # type: ignore[return-value]
 
     def _versions(self, freq: str) -> pd.DataFrame:
         d = self.df

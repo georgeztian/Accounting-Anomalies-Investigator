@@ -3,7 +3,7 @@
 Give it a public company. It reads the company's SEC filings and writes an **accounting-anomaly report**. Every number in the report links back to the filing it came from.
 
 ```powershell
-anomaly-report "Super Micro Computer (SMCI)"
+anomaly-report "Apple Inc. (AAPL)"
 ```
 
 The report contains:
@@ -27,7 +27,7 @@ The report contains:
 - Python **3.11 or 3.12**, run inside a **virtual environment**. Outside one, the app exits with code 2.
 - Internet access to `sec.gov`. After the first run, `--offline` works from the local cache.
 - Optional, for the LLM text detectors and the investigation agent, either of:
-  - **a Claude subscription** (Pro or Max) with [Claude Code](https://claude.com/claude-code) installed and logged in; or
+  - **a Claude subscription** with [Claude Code](https://claude.com/claude-code) installed and logged in; or
   - an Anthropic API key.
 
 ## Setup
@@ -76,8 +76,8 @@ ANTHROPIC_API_KEY=                                  # optional: leave empty to u
 The app finds the Claude CLI in this order:
 1. `FFI_CLAUDE_CLI`;
 2. `claude` on your PATH;
-3. the binary bundled with the Claude Code extension for VS Code or Cursor;
-4. `~/.local/bin` and `~/.claude/local`, where the Claude Code installer puts it.
+3. otherwise the most recently installed of: the binary bundled with the Claude Code extension for VS Code or Cursor,
+   and `~/.local/bin` or `~/.claude/local`, where the Claude Code installer puts it.
 
 Log in once by running `claude` in a terminal. The API key is removed from the CLI's environment, so subscription runs are never billed to an API account.
 
@@ -114,7 +114,7 @@ recursion_limit = 40
 
 | Option | What it controls | Default |
 |---|---|---|
-| `--period FY2022` | **Which fiscal year the report covers** (with `--span`, the last year of the span). | the latest annual report |
+| `--period FY2022` | **Which fiscal year the report covers** (with `--span`, the last year of the span). Each year is analysed with what was public by the end of its filing season (120 days after the year end, or when its annual report was filed if later): later restatements, reports, releases and 8-K events are not used. | the latest annual report |
 | `--span 10` | **How many fiscal years one report covers.** Each year is analysed on its own, then the findings are merged into anomalies tracked across the years (see *Multi-year review* below). | one year |
 | `--years 10` | **How much history feeds the tests** for each year analysed (trends, the company's own baselines, multi-year ratios). It never adds years to the report. | 10 |
 
@@ -167,7 +167,8 @@ anomaly-report train --labels data/labels_4_02.csv                # fit and save
 1. The company's filings and figures load once, and each annual report, earnings release and peer company is read
    once for all the years that use it. Each year is then analysed exactly like a single-year run, with its
    own comparison group, its own annual-report text and earnings releases, and the history available up to that year. Each year's figures are
-   taken **as first reported**, which is what investors saw at the time.
+   taken **as first reported**, from the filings public by the end of that year's filing season, which is what
+   investors saw at the time.
 2. The findings are **merged across years**. The same scheme pattern in several years becomes one anomaly; a single test
    flagged in one year joins that pattern when the pattern appears in another year. Each anomaly records the years it was
    flagged in and its strength in every year, and recurrence raises its score.
@@ -310,7 +311,7 @@ Every formula, threshold, regression and model behind the tests, the scoring and
 | Normalize | [xbrl/](src/ffi/xbrl/) | Maps us-gaap, ifrs-full and dei concepts to canonical line items, in priority order. Keeps every reported value with its filing date, and builds annual and quarterly panels both *as first reported* and *latest*. It detects the reporting currency and never mixes currencies. It accepts annual statements filed on 6-K, as many 40-F filers do. |
 | Text | [text/](src/ffi/text/) | Splits annual reports into Item sections and notes. 20-F items are mapped onto the 10-K sections. When MD&A and the statements are filed as exhibits, it reads those too: Exhibit 13 for some banks and insurers, and the 40-F exhibits. Each paragraph gets a stable ID, so any quote can be checked verbatim. |
 | Peers | [peers/](src/ffi/peers/) | Starts from active filers with the same 4-digit SIC code and widens to 3 and then 2 digits until there are enough. It picks the 15 nearest on size, margins and growth. The industry cross-section is built from XBRL frames and cached per calendar year, as a processed table only. |
-| Knowledge graph | [kg/](src/ffi/kg/) | DuckDB storage with NetworkX traversal. It holds companies, filings, facts and their restated versions, line items, sections, quotes, events, the auditor and signals. Every read is filtered by the `--as-of` date. |
+| Knowledge graph | [kg/](src/ffi/kg/) | DuckDB storage with NetworkX traversal. It holds companies, filings, facts and their restated versions, line items, sections, quotes, events, the auditor and signals. Every read is filtered by the year's point in time: the end of its filing season, never after `--as-of`. |
 | Detect | [pipeline/detect.py](src/ffi/pipeline/detect.py) | Runs the detectors in dependency order. Detectors that don't apply to the profile are marked *n/a*, and a missing input gives a *skipped* status with a reason. A bug in one detector is reported, not fatal. Tests run in parallel; the AI tests get their own pool and start first. |
 | Score | [scoring/engine.py](src/ffi/scoring/engine.py) | Applies the explained-away discounts, controls false discoveries (Benjamini–Hochberg) and matches scheme-pattern templates. A pattern needs corroboration from at least 2 detector families. Then it computes the risk index and ranks the findings. |
 | Materiality | [materiality/impact.py](src/ffi/materiality/impact.py) | Estimates each finding's impact range and its effect on pre-tax income, net income and EPS. Compares it with auditor-style materiality thresholds and checks the SAB 99 qualitative factors. |
@@ -341,7 +342,7 @@ Python computes every number, flag, score and ranking. The LLM does three things
 2. Plans and interprets the agent's investigations.
 3. Writes finding narratives.
 
-Every LLM output is schema-bound JSON with verbatim quotes. Before a narrative reaches the report, it must pass a **grounding gate**: every number must match a known value, and every quote must exist verbatim in a filing. It must also pass the independent LLM auditor and the language linter.
+Every LLM output is schema-bound JSON with verbatim quotes. Before a narrative, an innocent explanation or a question reaches the report, it must pass a **grounding gate**: every number must match a known value, and every quote of four words or more must exist verbatim in a filing. It must also pass the independent LLM auditor and the language linter.
 
 ### Independent audit of key conclusions
 
@@ -352,11 +353,12 @@ Every reported finding is audited independently, with a correction loop of **at 
 | Check | What is verified |
 |---|---|
 | `evidence_present` | At least one primary XBRL fact or filing quote supports the conclusion |
-| `fact_values` | Every cited value is re-read from the raw XBRL of the same filing and concept |
+| `fact_values` | Every cited value is re-read from the raw XBRL of the same filing, concept and period |
 | `quotes` | Every quote is found verbatim at its position in the filing text |
 | `impact` | The impact range is ordered, and materiality recomputed from scratch matches |
 | `corroboration` | A pattern's members are still flagged and come from at least 2 families |
 | `narrative` | Every number in the narrative traces to a source value |
+| `agent_text` | The innocent explanations and questions the investigation wrote pass the same check; failing ones are removed |
 
 In each round the auditor checks the finding, applies corrections and checks again. Corrections can remove unverifiable evidence, re-anchor quotes, recompute materiality, downgrade an uncorroborated pattern, or replace an ungrounded narrative.
 
@@ -383,8 +385,8 @@ intake → hypothesize → plan_evidence → [review_plan] → gather (parallel 
   - In `interactive` mode you're prompted at each one.
   - `--pause-on <name>` stops the run there and saves its state.
   - `--resume <run_id>` continues from the last checkpoint without repeating LLM calls.
-- **Budgets.** Each step has limits on input size, output tokens, tool calls, time and dollars. `--budget-usd` caps the whole run (default $6).
-- **Retries.** Transient API errors are retried 3 times with backoff. Budget and refusal errors are not retried. When retries run out, the case is downgraded rather than failing the run.
+- **Budgets.** Each step has limits on input size, output tokens, tool calls, time and dollars. `--budget-usd` caps the whole run (default $6); calls that run at once reserve their projected cost first, so together they cannot pass the cap.
+- **Retries.** A step that hits a transient API error is attempted up to 3 times with backoff (the API client also retries each request up to 3 times). Budget and refusal errors are not retried. When retries run out, the case is downgraded rather than failing the run.
 - **Parallelism.** Unattended runs investigate up to 3 findings in parallel. The statistical tests run on 4 threads, and each LLM detector gets a thread of its own. Interactive runs go one finding at a time.
 - **Agent tools** are read-only Python functions:
   - `get_fact`, `ratio`, `peer_stats`, `search_filing`;
@@ -401,6 +403,32 @@ intake → hypothesize → plan_evidence → [review_plan] → gather (parallel 
 - **Earnings-call checks and company-specific operating metrics** are skipped. They need licensed transcripts or company-specific extraction.
 - **The supervised misstatement model is a ranking signal, not a probability.** It is trained on weak labels: 8-K Item 4.02 non-reliance filings.
 - **Market value** is approximated by the public float on the 10-K cover page.
+
+## Reviewing the project
+
+A full review is defined in `.claude/agents/independent-reviewer.md`. In Claude Code, ask for the *independent-reviewer*
+agent. It works in six passes: static checks; a comparison audit; results against independent sources; leads from
+saved runs; reports, docs and edge cases; and efficiency. The comparison audit checks that both sides of every
+comparison match on period, point in time, scope, concept, basis, unit, sign and denominator.
+
+Two of those passes have their own scripts, and both can be run on their own:
+
+```powershell
+.venv/Scripts/python tools/review/sweep.py                  # every test, no AI, over a varied panel of companies
+.venv/Scripts/python tools/review/sweep.py --period FY2019  # the same panel at an earlier year (point-in-time behaviour)
+.venv/Scripts/python tools/review/mine_runs.py              # what the AI investigation and auditor said about the tests in saved runs
+```
+
+`sweep.py` reports four kinds of problem:
+- errors and implausible results;
+- tests that flag most of the panel;
+- each company's EPS from its own earnings-release tables against the filed EPS for the same period;
+- the hand-checked figures in `tools/review/known_values.toml` against the figures the pipeline reads.
+
+`mine_runs.py` lists, from saved runs:
+- conclusions that blame a test or its inputs ("compared figures from different periods");
+- auditor corrections that point at missing pipeline inputs;
+- the objections that stopped investigations from finishing.
 
 ## Project layout
 
@@ -423,10 +451,15 @@ src/ffi/
   report/       model, span_model, plain (client wording), explain, charts, linter, render, snapshot (saved runs), templates/
   training/     labels (8-K 4.02), train / backtest
   models/       trained model for the supervised detector
+tools/review/   sweep (panel run + cross-source checks), mine_runs (leads from saved runs), known_values.toml
+.claude/agents/ independent-reviewer.md (the review procedure)
 ```
+
+## Disclaimer
+
+Reports produced by this tool are based on public filings and are decision support, not investment, legal or audit advice.
 
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE).
 
-Reports produced by this tool are based on public SEC filings and are decision support, not investment, legal or audit advice.

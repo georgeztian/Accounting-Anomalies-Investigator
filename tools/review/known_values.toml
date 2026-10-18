@@ -1,0 +1,34 @@
+# Figures checked by hand against the company's own filings, as first reported (USD; EPS in USD per share).
+# tools/review/sweep.py compares each with the figure the pipeline reads for the same fiscal year; a disagreement
+# beyond 0.5% points to a parsing, period, scale or tagging problem. Add a figure only after reading it in the filing.
+
+[AXP.FY2024]  # Q4 2024 earnings release, full-year columns
+REVENUE = 65_949e6        # total revenues net of interest expense
+NET_INCOME = 10_129e6
+EPS_DILUTED = 14.01
+
+[AXP.FY2025]  # Q4 2025 earnings release, full-year columns
+REVENUE = 72_229e6
+NET_INCOME = 10_833e6
+EPS_DILUTED = 15.38
+
+[AAPL.FY2024]  # 2024 Form 10-K
+REVENUE = 391_035e6
+NET_INCOME = 93_736e6
+
+[AAPL.FY2023]  # 2023 Form 10-K
+REVENUE = 383_285e6
+NET_INCOME = 96_995e6
+
+[AXP.FY2019]  # 2019 Form 10-K: selected financial data and statement of shareholders' equity
+NET_INCOME = 6_759e6
+BUYBACKS = 4_585e6            # repurchase of common shares, tagged only in the statement of equity
+DIVIDENDS_DECLARED = 1_358e6  # cash dividends declared, common
+
+[NVDA.FY2019]  # fiscal 2019 Form 10-K (year ended January 27, 2019): MD&A summary table
+REVENUE = 11_716e6
+NET_INCOME = 4_141e6
+
+[PGR.FY2025]  # 2025 Form 10-K: parent-only statements and balance sheet
+NET_INCOME = 11_308e6
+DIVIDENDS_PAYABLE = 7_972e6   # declared in December 2025, paid in January 2026

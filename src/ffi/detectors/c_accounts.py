@@ -18,7 +18,7 @@ import pandas as pd
 from ffi.context import RunContext
 from ffi.detectors.base import Area, ImpactEstimate, Scheme, SkipDetector, detector
 from ffi.detectors.helpers import finite, mk, need
-from ffi.detectors.scores import V
+from ffi.detectors.scores import V, debt_parts, dep_measure, same_basis
 from ffi.detectors.stats import (
     fmt_money,
     fmt_num,
@@ -57,20 +57,25 @@ class Assessment:
         return ", ".join(bits)
 
 
-def ratio_hist(ctx: RunContext, fn: Ratio, n: int = 5) -> list[float]:
+def ratio_hist(ctx: RunContext, fn: Ratio, n: int = 5, basis_of: dict | None = None) -> list[float]:
+    """The ratio in each of the last `n` years before the focus year. With `basis_of` (the focus year's tracked reading,
+    see scores.V), a year whose inputs were reported on a different basis (general and administrative expense where the
+    focus year has selling, general and administrative expense) is left out rather than compared."""
     vals = []
     for p in ctx.periods[:-1][-n:]:
-        v = fn(V(ctx.A, p))
-        if finite(v):
+        track: dict = {}
+        v = fn(V(ctx.A, p, track))
+        if finite(v) and (basis_of is None or same_basis(basis_of, track)):
             vals.append(v)
     return vals
 
 
 def assess(ctx: RunContext, fn: Ratio, higher_is_bad: bool = True, z_start: float = 1.5, z_full: float = 4.0,
            use_peers: bool = True, min_abs: float = 0.0) -> Assessment:
-    cur = fn(V(ctx.A, ctx.focus))
+    focus_basis: dict = {}
+    cur = fn(V(ctx.A, ctx.focus, focus_basis))
     need(cur)
-    hist = ratio_hist(ctx, fn)
+    hist = ratio_hist(ctx, fn, basis_of=focus_basis)
     peers = ctx.peer_values(lambda P, p, k: fn(V(P, p))) if use_peers else []
     sign = 1 if higher_is_bad else -1
     zs = sign * robust_z(cur, hist) if len(hist) >= 3 else float("nan")
@@ -111,24 +116,26 @@ def gap_impact(a: Assessment, driver: float, method: str, basis: str, higher_is_
 
 
 # ============================================================================ revenue
-def _total_deferred(v: V, b: int = 0) -> float:
-    c, n = v.g("DEFERRED_REV_CURRENT", b), v.g("DEFERRED_REV_NONCURRENT", b)
-    if not finite(c) and not finite(n):
-        return float("nan")
-    return (c if finite(c) else 0.0) + (n if finite(n) else 0.0)
+DEFERRED = ("DEFERRED_REV_CURRENT", "DEFERRED_REV_NONCURRENT")
+
+
+def _total_deferred(v: V, b: int = 0, years: tuple[int, ...] | None = None) -> float:
+    """Deferred revenue at year `b`, from the components reported in every one of `years` (default: `b` alone), so a
+    change never includes a balance that was simply not tagged the year before. NaN when no component qualifies."""
+    parts = [i for i in DEFERRED if all(finite(v.g(i, y)) for y in (years or (b,)))]
+    return float(sum(v.g(i, b) for i in parts)) if parts else float("nan")
+
+
+def _deferred_change(v: V, b: int = 0) -> float:
+    """Change in deferred revenue over year `b`; zero when it is not reported in both years."""
+    d1, d0 = _total_deferred(v, b, (b, b + 1)), _total_deferred(v, b + 1, (b, b + 1))
+    return d1 - d0 if finite(d1, d0) else 0.0
 
 
 def _cash_rev_gap(v: V) -> float:
     rev, rev0 = v.g("REVENUE"), v.g("REVENUE", 1)
-    dar = v.g("AR") - v.g("AR", 1)
-    d1 = _total_deferred(v)
-    d0 = _total_deferred(v, 1)
-    ddef = (d1 - d0) if finite(d1, d0) else 0.0
-    cash = rev - dar + ddef
-    dar0 = v.g("AR", 1) - v.g("AR", 2)
-    d00 = _total_deferred(v, 2)
-    ddef0 = (d0 - d00) if finite(d0, d00) else 0.0
-    cash0 = rev0 - dar0 + ddef0
+    cash = rev - (v.g("AR") - v.g("AR", 1)) + _deferred_change(v, 0)
+    cash0 = rev0 - (v.g("AR", 1) - v.g("AR", 2)) + _deferred_change(v, 1)
     return (safe_div(rev, rev0) - 1) - (safe_div(cash, cash0) - 1)
 
 
@@ -156,14 +163,13 @@ def crev01(ctx: RunContext):
 def crev02(ctx: RunContext):
     """Billings (revenue + d deferred revenue) growing slower than revenue: recognition outpacing new business."""
     v = V(ctx.A, ctx.focus)
-    d1, d0 = _total_deferred(v), _total_deferred(v, 1)
+    d1, d0 = _total_deferred(v, 0, (0, 1)), _total_deferred(v, 1, (0, 1))  # the same components in both years
     rev, rev0 = v.g("REVENUE"), v.g("REVENUE", 1)
-    need(d1, d0, rev, rev0, reason="deferred revenue not reported")
+    need(d1, d0, rev, rev0, reason="deferred revenue not reported in both years")
     if safe_div(d0, rev0) < 0.02:
         raise SkipDetector("deferred revenue immaterial (< 2% of revenue)")
-    d00 = _total_deferred(v, 2)
     bill1 = rev + (d1 - d0)
-    bill0 = rev0 + ((d0 - d00) if finite(d00) else 0.0)
+    bill0 = rev0 + _deferred_change(v, 1)
     rg, bg = safe_div(rev, rev0) - 1, safe_div(bill1, bill0) - 1
     gap = rg - bg
     ratio_now, ratio_prev = safe_div(d1, rev), safe_div(d0, rev0)
@@ -214,7 +220,8 @@ def crev04(ctx: RunContext):
     if ctx.focus not in shares:
         raise SkipDetector("four quarters of revenue not available for the focus year")
     cur = shares[ctx.focus]
-    hist = [v for k, v in shares.items() if k < ctx.focus][-5:]
+    hist_years = [k for k in shares if k < ctx.focus][-5:]
+    hist = [shares[k] for k in hist_years]
     z = robust_z(cur, hist) if len(hist) >= 3 else float("nan")
     sev = severity_from_z(z, 1.5, 4.0) if np.isfinite(z) else 0.0
     mz = robust_z(margins.get(ctx.focus, np.nan), [v for k, v in margins.items() if k < ctx.focus][-5:])
@@ -230,8 +237,10 @@ def crev04(ctx: RunContext):
     return [mk("C.REV.04", ctx, raw_value=cur, expected=float(np.median(hist)) if hist else None, severity=sev,
                unit="Q4 share", percentile_self=percentile_of(cur, hist) if len(hist) >= 3 else None,
                scheme=Scheme.PREMATURE_REVENUE, direction="income_increasing", impact=impact,
-               rationale=(f"Q4 delivered {fmt_pct(cur)} of fiscal-year revenue vs a prior median of "
+               rationale=(f"Q4 delivered {fmt_pct(cur)} of fiscal-year revenue vs a median of "
                           f"{fmt_pct(float(np.median(hist)) if hist else np.nan)}"
+                          + (f" over the {len(hist)} prior year(s) with four reported quarters "
+                             f"({ctx.label(hist_years[0])}-{ctx.label(hist_years[-1])})" if hist else " (no prior year with four quarters)")
                           + (f"; Q4 gross margin exceeded Q1-Q3 by {fmt_pct(margins[ctx.focus])}" if ctx.focus in margins else "") + "."),
                evidence=ev)]
 
@@ -299,13 +308,13 @@ def crev09(ctx: RunContext):
 @detector("C.REV.10", "Revenue vs remaining performance obligations", F, Area.REVENUE)
 def crev10(ctx: RunContext):
     """Revenue growth exceeding RPO (backlog) growth for consecutive years: borrowing from the future."""
-    rpo = ctx.hist("RPO", 4).dropna()
-    rev = ctx.hist("REVENUE", 4).dropna()
+    rpo_all, rev_all = ctx.hist("RPO", 4), ctx.hist("REVENUE", 4)
+    rpo = rpo_all.dropna()
     if len(rpo) < 3:
         raise SkipDetector("RPO not reported for 3 years")
-    rg = rev.pct_change().reindex(rpo.index)
-    pg = rpo.pct_change()
-    gaps = (rg - pg).dropna()
+    # growth from one fiscal year to the next only: a year that is not reported leaves a gap, never a two-year change
+    gaps = (rev_all.pct_change(fill_method=None) - rpo_all.pct_change(fill_method=None)).dropna()
+    rev = rev_all.dropna()
     streak = 0
     for g in reversed(gaps.tolist()):
         if g > 0.03:
@@ -360,9 +369,11 @@ def car01(ctx: RunContext):
     qa, qr = ctx.qhist("AR", 8), ctx.qhist("REVENUE", 8)
     if len(qa.dropna()) >= 5 and len(qr.dropna()) >= 5:
         qd = (qa / qr * 91).dropna()
-        if len(qd) >= 5:
-            yoy = qd.iloc[-1] - qd.iloc[-5]
-            qnote = f" Latest quarter DSO {qd.iloc[-1]:.0f} days vs {qd.iloc[-5]:.0f} a year earlier ({yoy:+.0f})."
+        # the same quarter a year earlier, found by date: a quarter missing in between must not shift the comparison
+        prior = [q for q in qd.index if abs((qd.index[-1] - q).days - 364) <= 10] if len(qd) else []
+        if prior:
+            yoy = qd.iloc[-1] - qd[prior[0]]
+            qnote = f" Latest quarter DSO {qd.iloc[-1]:.0f} days vs {qd[prior[0]]:.0f} a year earlier ({yoy:+.0f})."
     return [mk("C.AR.01", ctx, raw_value=a.cur, expected=a.baseline, severity=a.severity, unit="days",
                percentile_peer=a.pct_peer, percentile_self=a.pct_self, p_value=a.p_value, impact=imp,
                scheme=Scheme.PREMATURE_REVENUE, direction="income_increasing",
@@ -399,8 +410,12 @@ def car02(ctx: RunContext):
 @detector("C.AR.03", "Provision below write-offs", F, Area.RECEIVABLES)
 def car03(ctx: RunContext):
     """Provision for credit losses below write-offs for 2+ years: the reserve is being drawn down into income."""
-    rows = [(ctx.a("PROVISION_DOUBTFUL", k), ctx.a("WRITE_OFFS", k)) for k in range(3)]
-    rows = [(p, w) for p, w in rows if finite(p, w)]
+    rows = []
+    for k in range(3):  # consecutive years back from the focus year; a year not reported ends the run
+        p, w = ctx.a("PROVISION_DOUBTFUL", k), ctx.a("WRITE_OFFS", k)
+        if not finite(p, w):
+            break
+        rows.append((p, w))
     if len(rows) < 2:
         raise SkipDetector("provision and write-offs not tagged for 2 years")
     short = [w - p for p, w in rows if p < w]
@@ -558,13 +573,14 @@ def cinv05(ctx: RunContext):
 @detector("C.EXP.01", "Capitalization rate", F, Area.CAPITALIZATION, needs_peers=True)
 def cexp01(ctx: RunContext):
     """Capitalized software additions / (opex + capitalized) vs history and peers."""
+    comps = _spend_items(ctx)
+
     def fn(v: V) -> float:
-        cap = v.g("CAP_SOFTWARE_ADDITIONS")
-        opex = v.z("SGA") + v.z("RND")
-        return safe_div(cap, opex + cap) if finite(cap) and opex > 0 else float("nan")
+        cap, opex = v.g("CAP_SOFTWARE_ADDITIONS"), _spend(v, comps)
+        return safe_div(cap, opex + cap) if finite(cap, opex) and opex > 0 else float("nan")
 
     a = assess(ctx, fn)
-    base = ctx.a("CAP_SOFTWARE_ADDITIONS") + ctx.a("SGA") + (ctx.a("RND") if finite(ctx.a("RND")) else 0)
+    base = ctx.a("CAP_SOFTWARE_ADDITIONS") + _spend(V(ctx.A, ctx.focus), comps)
     return [mk("C.EXP.01", ctx, raw_value=a.cur, expected=a.baseline, severity=a.severity, unit="share of spend",
                percentile_peer=a.pct_peer, p_value=a.p_value,
                impact=gap_impact(a, base, "ratio_reversion", "(capitalization rate - baseline) x (opex + capitalized)"),
@@ -586,9 +602,15 @@ def cexp02(ctx: RunContext):
                evidence=ctx.evs(["OTHER_CURRENT_ASSETS", "OTHER_NONCURRENT_ASSETS", "REVENUE"], ks=(0, 1)))]
 
 
-def _dep(v: V, b: int = 0) -> float:
-    d = v.g("DEPRECIATION", b)
-    return d if finite(d) else v.g("DA", b) - v.z("AMORTIZATION_INTANGIBLES", b)
+def _spend_items(ctx: RunContext) -> tuple[str, ...]:
+    """The overhead lines (SG&A, R&D) the focus year reports; every year compared must report the same ones."""
+    return tuple(i for i in ("SGA", "RND") if finite(ctx.a(i))) or ("SGA",)
+
+
+def _spend(v: V, items: tuple[str, ...]) -> float:
+    """SG&A plus R&D from exactly `items`: a year that does not report one of them is not comparable (NaN), so a line
+    that is simply not tagged that year is never read as a cut in spending."""
+    return float(sum(v.g(i) for i in items))
 
 
 @detector("C.EXP.03", "Useful-life extension", F, Area.DEPRECIATION)
@@ -597,11 +619,8 @@ def cexp03(ctx: RunContext):
     impact = depreciation at the prior life - reported. Every year uses the same depreciation measure, so a year that
     tags depreciation on its own is never compared with years that only report D&A."""
     v = V(ctx.A, ctx.focus)
-    years = [k for k in range(4) if finite(v.g("PPE_GROSS", k))]
-    if all(finite(v.g("DEPRECIATION", k)) for k in years):
-        dep, basis = (lambda k: v.g("DEPRECIATION", k)), "depreciation"
-    else:
-        dep, basis = (lambda k: v.g("DA", k) - v.z("AMORTIZATION_INTANGIBLES", k)), "depreciation and amortization less amortization of intangibles"
+    years = tuple(k for k in range(4) if finite(v.g("PPE_GROSS", k)))
+    basis, dep = dep_measure(v, years or (0,))
     life = safe_div(v.g("PPE_GROSS"), dep(0))
     lives = [safe_div(v.g("PPE_GROSS", k), dep(k)) for k in range(1, 4)]
     lives = [x for x in lives if finite(x) and x > 0]
@@ -623,15 +642,24 @@ def cexp03(ctx: RunContext):
 
 @detector("C.EXP.04", "Depreciation rate drop", F, Area.DEPRECIATION, needs_peers=True)
 def cexp04(ctx: RunContext):
-    """Depreciation / average gross PP&E vs history and peers."""
-    fn = lambda v: safe_div(_dep(v), v.avg("PPE_GROSS"))  # noqa: E731
+    """Depreciation / average gross PP&E vs history and peers, with one depreciation measure for every year and peer."""
+    basis, _ = dep_measure(V(ctx.A, ctx.focus), tuple(range(min(6, len(ctx.periods)))) or (0,))
+
+    def dep(v: V) -> float:
+        if basis == "depreciation":
+            return v.g("DEPRECIATION")
+        if basis.startswith("depreciation and amortization less"):
+            return v.g("DA") - v.g("AMORTIZATION_INTANGIBLES")
+        return v.g("DA")
+
+    fn = lambda v: safe_div(dep(v), v.avg("PPE_GROSS"))  # noqa: E731
     a = assess(ctx, fn, higher_is_bad=False)
     return [mk("C.EXP.04", ctx, raw_value=a.cur, expected=a.baseline, severity=a.severity, unit="rate",
                percentile_peer=a.pct_peer, p_value=a.p_value,
                impact=gap_impact(a, ctx.avg("PPE_GROSS"), "ratio_reversion", "(baseline rate - rate) x avg gross PP&E", higher_is_bad=False),
                scheme=Scheme.SHIFT_EXPENSES_LATER, direction="income_increasing",
-               rationale=f"Depreciation rate: {a.describe()}.",
-               evidence=ctx.evs(["DEPRECIATION", "DA", "PPE_GROSS"], ks=(0, 1)))]
+               rationale=f"Depreciation rate ({basis} / average gross PP&E): {a.describe()}.",
+               evidence=ctx.evs(["DEPRECIATION", "DA", "AMORTIZATION_INTANGIBLES", "PPE_GROSS"], ks=(0, 1)))]
 
 
 @detector("C.EXP.05", "Capex far above depreciation", F, Area.CAPITALIZATION)
@@ -652,7 +680,8 @@ def cexp05(ctx: RunContext):
 @detector("C.EXP.06", "Discretionary expense cut", F, Area.MARGINS)
 def cexp06(ctx: RunContext):
     """(SG&A + R&D) / revenue drops sharply vs own trend (real earnings management)."""
-    fn = lambda v: safe_div(v.z("SGA") + v.z("RND"), v.g("REVENUE"))  # noqa: E731
+    comps = _spend_items(ctx)
+    fn = lambda v: safe_div(_spend(v, comps), v.g("REVENUE"))  # noqa: E731
     a = assess(ctx, fn, higher_is_bad=False, use_peers=False, z_start=2.0)
     return [mk("C.EXP.06", ctx, raw_value=a.cur, expected=a.baseline, severity=a.severity * 0.8, unit="share of revenue",
                percentile_self=a.pct_self,
@@ -790,7 +819,7 @@ def cres04(ctx: RunContext):
     need(m0, m1)
     big = safe_div(c1, rev1)
     rebound = m0 - m1
-    mgmt = ctx.events_of("OFFICER_CHANGE", within_days=730)
+    mgmt = ctx.officer_changes(within_days=730)
     sev = float(np.clip((big - 0.03) / 0.07, 0, 1) * np.clip(rebound / 0.05, 0, 1))
     if mgmt and sev > 0:
         sev = min(1.0, sev + 0.2)
@@ -942,7 +971,10 @@ def ccf05(ctx: RunContext):
 @detector("C.CF.06", "Free cash flow vs EBITDA", F, Area.CASH_FLOW, needs_peers=True)
 def ccf06(ctx: RunContext):
     """(CFO - capex) / EBITDA below peers and falling."""
-    fn = lambda v: safe_div(v.g("CFO") - v.z("CAPEX"), v.g("OPERATING_INCOME") + v.z("DA")) if (v.g("OPERATING_INCOME") + v.z("DA")) > 0 else float("nan")  # noqa: E731
+    def fn(v: V) -> float:  # without D&A or capex the ratio is not EBITDA-based free cash flow, so it is not computed
+        ebitda = v.g("OPERATING_INCOME") + v.g("DA")
+        return safe_div(v.g("CFO") - v.g("CAPEX"), ebitda) if ebitda > 0 else float("nan")
+
     a = assess(ctx, fn, higher_is_bad=False, z_start=1.5)
     return [mk("C.CF.06", ctx, raw_value=a.cur, expected=a.baseline, severity=a.severity * 0.8, unit="x",
                percentile_peer=a.pct_peer, p_value=a.p_value, scheme=Scheme.CFO_INFLATION,
@@ -950,25 +982,37 @@ def ccf06(ctx: RunContext):
                evidence=ctx.evs(["CFO", "CAPEX", "OPERATING_INCOME", "DA"], ks=(0,)))]
 
 
-def _debt(v: V, b: int = 0) -> float:
-    return v.z("LONG_TERM_DEBT", b) + v.z("CURRENT_DEBT", b) + v.z("ST_BORROWINGS", b)
+DEBT_LABELS = {"LONG_TERM_DEBT": "long-term debt", "CURRENT_DEBT": "current debt", "ST_BORROWINGS": "short-term borrowings"}
 
 
 @detector("C.CF.07", "Quarter-end debt window dressing", F, Area.DEBT)
 def ccf07(ctx: RunContext):
-    """Year-end debt well below the average of the three preceding quarter-ends."""
+    """Year-end debt well below the average of the three preceding quarter-ends. Every quarter-end sums the same
+    borrowings, reported under the same tags: a line the annual report tags and the quarterly reports do not (or the
+    reverse) would otherwise read as a fall in debt."""
     q = ctx.Q
     ps = [p for p in q.periods if p <= ctx.focus + pd.Timedelta(days=8)][-4:]
     if len(ps) < 4:
         raise SkipDetector("four quarter-ends of debt needed")
-    debts = [sum(q.get(i, p) for i in ("LONG_TERM_DEBT", "CURRENT_DEBT", "ST_BORROWINGS") if finite(q.get(i, p))) for p in ps]
+    parts = [debt_parts(V(q, p)) for p in ps]
+    concepts = [{i: (q.prov[(i, p)].concept if (i, p) in q.prov else None) for i in pp} for pp, p in zip(parts, ps, strict=True)]
+    items = [i for i in DEBT_LABELS if all(i in pp for pp in parts) and len({c.get(i) for c in concepts}) == 1]
+    if not items:
+        raise SkipDetector("no borrowing line reported on the same basis at all four quarter-ends")
+    debts = [float(sum(pp[i] for i in items)) for pp in parts]
     if min(debts[:3]) <= 0:
-        raise SkipDetector("quarterly debt not tagged")
+        raise SkipDetector("quarterly debt not reported")
     avg3 = float(np.mean(debts[:3]))
     dip = safe_div(avg3 - debts[3], avg3)
     sev = float(np.clip((dip - 0.10) / 0.30, 0, 1)) * 0.8
+    what = " and ".join(DEBT_LABELS[i] for i in items)
+    left_out = [DEBT_LABELS[i] for i in DEBT_LABELS if i not in items and any(i in pp for pp in parts)]
     return [mk("C.CF.07", ctx, raw_value=dip, severity=sev, unit="share", scheme=Scheme.HIDE_LIABILITIES,
-               rationale=f"Year-end debt {fmt_money(debts[3])} vs {fmt_money(avg3)} average at the prior three quarter-ends ({fmt_pct(dip)} lower).")]
+               rationale=(f"Year-end {what} {fmt_money(debts[3])} vs {fmt_money(avg3)} average at the prior three quarter-ends "
+                          f"({fmt_pct(abs(dip))} {'lower' if dip >= 0 else 'higher'})"
+                          + (f"; {', '.join(left_out)} left out (not reported on the same basis at every quarter-end)" if left_out else "")
+                          + "."),
+               evidence=[e for p in ps for i in items if (e := ctx.ev(i, panel="Q", period=p))])]
 
 
 # ============================================================================ debt / off-balance-sheet
@@ -976,7 +1020,7 @@ def ccf07(ctx: RunContext):
 def cbs01(ctx: RunContext):
     """Interest expense / average reported debt far above peers: possible unrecorded debt."""
     def fn(v: V) -> float:
-        d = (_debt(v) + _debt(v, 1)) / 2
+        d = (v.debt() + v.debt(1)) / 2
         return safe_div(v.g("INTEREST_EXPENSE"), d) if d > 0 else float("nan")
 
     a = assess(ctx, fn, z_start=2.0)
@@ -985,7 +1029,7 @@ def cbs01(ctx: RunContext):
     return [mk("C.BS.01", ctx, raw_value=a.cur, expected=a.baseline, severity=a.severity, unit="rate",
                percentile_peer=a.pct_peer, p_value=a.p_value, scheme=Scheme.HIDE_LIABILITIES,
                rationale=f"Interest expense / average debt: {a.describe()}.",
-               evidence=ctx.evs(["INTEREST_EXPENSE", "LONG_TERM_DEBT", "CURRENT_DEBT"], ks=(0,)))]
+               evidence=ctx.evs(["INTEREST_EXPENSE"], ks=(0,)) + ctx.evs(["LONG_TERM_DEBT", "CURRENT_DEBT", "ST_BORROWINGS"], ks=(0, 1)))]
 
 
 @detector("C.BS.02", "Off-balance-sheet commitments growth", F, Area.DEBT)
@@ -997,6 +1041,7 @@ def cbs02(ctx: RunContext):
 
     o1, o0 = obl(0), obl(1)
     need(o1, o0, reason="commitments not tagged")
+    named = [n for i, n in (("PURCHASE_OBLIGATIONS", "purchase obligations"), ("GUARANTEES", "guarantees")) if finite(ctx.a(i))]
     g = safe_div(o1, o0) - 1
     rg = safe_div(ctx.a("REVENUE"), ctx.a("REVENUE", 1)) - 1
     size = safe_div(o1, ctx.a("TOTAL_ASSETS"))
@@ -1005,7 +1050,8 @@ def cbs02(ctx: RunContext):
     if switched:
         sev *= 0.4
     return [mk("C.BS.02", ctx, raw_value=g, severity=sev, unit="growth", scheme=Scheme.HIDE_LIABILITIES,
-               rationale=(f"Purchase obligations and guarantees {fmt_money(o1)} ({fmt_pct(size)} of assets) grew {fmt_pct(g)} vs revenue {fmt_pct(rg)}."
+               rationale=(f"{' and '.join(named).capitalize()} {fmt_money(o1)} ({fmt_pct(size)} of assets) changed {fmt_pct(g)} "
+                          f"vs revenue {fmt_pct(rg)}."
                           + (f" Discounted: {'; '.join(switched)}, so the years may not be comparable." if switched else "")),
                evidence=ctx.evs(["PURCHASE_OBLIGATIONS", "GUARANTEES"], ks=(0, 1)))]
 
@@ -1101,11 +1147,13 @@ def cma05(ctx: RunContext):
     """Large post-close goodwill adjustments relative to goodwill acquired."""
     adj, ga = ctx.a("GOODWILL_MEASUREMENT_ADJ"), ctx.a("GOODWILL_ACQUIRED", 1)
     need(adj, reason="measurement-period adjustments not tagged")
-    base = ga if finite(ga) and ga > 0 else ctx.a("GOODWILL")
+    by_acquired = finite(ga) and ga > 0
+    base = ga if by_acquired else ctx.a("GOODWILL")
+    base_name = "of last year's goodwill from acquisitions" if by_acquired else "of total goodwill"
     share = abs(safe_div(adj, base))
     sev = float(np.clip((share - 0.10) / 0.30, 0, 1)) * 0.7
     return [mk("C.MA.05", ctx, raw_value=adj, severity=sev, unit="USD", scheme=Scheme.ACQUISITION_GAMES,
-               rationale=f"Measurement-period goodwill adjustments {fmt_money(adj)} ({fmt_pct(share)} of the base).",
+               rationale=f"Measurement-period goodwill adjustments {fmt_money(adj)} ({fmt_pct(share)} {base_name}).",
                evidence=ctx.evs(["GOODWILL_MEASUREMENT_ADJ", "GOODWILL_ACQUIRED"], ks=(0, 1)))]
 
 
@@ -1137,23 +1185,38 @@ def cgov02(ctx: RunContext):
     sev = min(1.0, 0.8 * len(nr) + 0.35 * len(fin_days) + 0.1 * len(other_days))
     return [mk("C.GOV.02", ctx, raw_value=len(nr) + len(fin_days) + len(other_days), severity=sev, unit="events", tags=["pressure"],
                scheme=Scheme.REPORTING_INTEGRITY,
-               rationale=(f"{len(nr)} non-reliance 8-K(s) and {len(am)} amended annual report(s) in the last three years, filed on "
-                          f"{len(fin_days) + len(other_days)} day(s); {len(fin_days)} of those day(s) re-filed financial statements "
-                          "(the others amended exhibits or Part III information only)."),
+               rationale=((f"{len(nr)} non-reliance 8-K(s) and {len(am)} amended annual report(s) in the last three years, filed on "
+                           f"{len(fin_days) + len(other_days)} day(s); {len(fin_days)} of those day(s) re-filed financial statements "
+                           "(the others amended exhibits or Part III information only).") if nr or am else
+                          "No non-reliance 8-K or amended annual report in the last three years."),
                evidence=[ctx.ev_event(e, "primary") for e in (nr + am)[:4]])]
 
 
 @detector("C.GOV.03", "Officer turnover", F, Area.GOVERNANCE)
 def cgov03(ctx: RunContext):
-    """8-K Item 5.02 officer/director departures (CFO exits are the strongest signal)."""
+    """8-K Item 5.02 officer departures and appointments in two years: CFO changes are the strongest signal, then CEO,
+    then chief accounting officer. Filings about the same role within nine months describe one transition (its
+    announcement and its completion) and count once."""
     ev = ctx.events_of("OFFICER_CHANGE", within_days=730)
-    cfo = [e for e in ev if "CFO/CAO change" in e.description]
-    ceo = [e for e in ev if "CEO change" in e.description]
-    sev = min(1.0, 0.05 * len(ev) + 0.35 * len(cfo) + 0.2 * len(ceo))
+
+    def transitions(tag: str) -> list:
+        out: list = []
+        for e in sorted((e for e in ev if tag in e.description), key=lambda e: e.date):
+            if not out or (e.date - out[-1].date).days > 270:
+                out.append(e)
+        return out
+
+    cfo, cao, ceo = transitions("CFO change"), transitions("CAO change"), transitions("CEO change")
+    # only filings that change a senior officer count; pay-plan and director filings (most Item 5.02 filings) do not,
+    # and a filing that could not be read adds a little, since it may hold a change
+    unread = [e for e in ev if e.description.strip() == "8-K Item 5.02"]
+    sev = min(1.0, 0.05 * len(unread) + 0.35 * len(cfo) + 0.2 * len(ceo) + 0.15 * len(cao))
     return [mk("C.GOV.03", ctx, raw_value=len(ev), severity=sev * 0.8, unit="events", tags=["pressure"],
-               rationale=(f"{len(ev)} Item 5.02 filing(s) in two years; {len(cfo)} describe a CFO/CAO departure or appointment"
-                          f" and {len(ceo)} a CEO change. A planned succession is a common benign cause."),
-               evidence=[ctx.ev_event(e) for e in (cfo or ev)[:3]])]
+               rationale=(f"{len(ev)} Item 5.02 filing(s) in two years: {len(cfo)} CFO, {len(ceo)} CEO and {len(cao)} chief "
+                          f"accounting officer transition(s)"
+                          + (f"; {len(unread)} filing(s) could not be read" if unread else "")
+                          + ". The other filings concern pay plans or directors. A planned succession is a common benign cause."),
+               evidence=[ctx.ev_event(e) for e in (cfo + ceo + cao or ev)[:3]])]
 
 
 @detector("C.GOV.04", "Late filing", F, Area.GOVERNANCE)

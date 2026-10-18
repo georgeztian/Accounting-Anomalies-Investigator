@@ -21,6 +21,7 @@ from ffi.xbrl.canonical import BY_ID
 from ffi.xbrl.facts import FactStore, Panel
 
 STATUTORY_TAX = 0.21
+OFFICER_ROLE_TAGS = ("CFO change", "CEO change", "CAO change")  # written by pipeline.run._officer_change_kind
 
 
 @dataclass
@@ -63,6 +64,7 @@ class RunContext:
     currency: str = "USD"  # reporting currency of all monetary amounts
     annual_form: str = "10-K"  # 10-K | 20-F | 40-F
     history: int = 4  # fiscal years of figures the investigation tools return (all years reviewed in a multi-year run)
+    cutoff: date | None = None  # last day this year's analysis reads (end of its filing season, never after as_of)
 
     # ------------------------------------------------------------------ periods
     @property
@@ -150,7 +152,7 @@ class RunContext:
         r0 = self.A.prov.get((item, p0)) if p0 is not None else None
         r1 = self.A.prov.get((item, p1)) if p1 is not None else None
         if r0 and r1 and r0.concept != r1.concept:
-            return f"{item} uses {r0.concept} this year but {r1.concept} the year before"
+            return f"{BY_ID[item].label.lower()} is reported under a different XBRL element this year than the year before"
         return None
 
     def evs(self, items: list[str], ks: tuple[int, ...] = (0, 1), role: str = "primary") -> list[EvidenceRef]:
@@ -206,6 +208,12 @@ class RunContext:
     def prior_doc(self) -> TextDoc | None:
         return self.docs[-2] if len(self.docs) > 1 else None
 
+    def officer_changes(self, within_days: int) -> list[Event]:
+        """Item 5.02 filings read and found to change the CEO, CFO or chief accounting officer. Most 5.02 filings are
+        about pay plans or directors; those, and filings that could not be read, are not officer changes."""
+        return [e for e in self.events_of("OFFICER_CHANGE", within_days=within_days)
+                if any(tag in e.description for tag in OFFICER_ROLE_TAGS)]
+
     def events_of(self, *types: str, within_days: int | None = None) -> list[Event]:
         out = [e for e in self.events if e.type in types]
         if within_days is not None:
@@ -213,6 +221,13 @@ class RunContext:
             hi = (self.focus + pd.Timedelta(days=120)).date()
             out = [e for e in out if lo <= e.date <= hi]
         return out
+
+
+def announced_quarter(focus: pd.Timestamp, released: pd.Timestamp) -> pd.Timestamp:
+    """The quarter an earnings release dated `released` announces: the latest quarter end on the fiscal calendar of the
+    year ending `focus` at least a week before the release (releases follow their quarter by 2-10 weeks)."""
+    ends = [focus + pd.DateOffset(months=3 * k) for k in range(-8, 9)]
+    return max(e for e in ends if e <= released - pd.Timedelta(days=7))
 
 
 def prev_period(panel: Panel, period: pd.Timestamp) -> pd.Timestamp | None:

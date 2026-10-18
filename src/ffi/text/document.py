@@ -125,6 +125,13 @@ def build_doc(accession: str, form: str, period_end: str, url: str, raw_html: st
         if header.startswith("Item 7"):
             # an annual-report exhibit holds MD&A and then the audited statements: start Item 8 at the audit report
             cut = next((j for j, (ln, _) in enumerate(part) if j > len(part) // 4 and len(ln) < 120 and AUDIT_REPORT_RE.match(ln)), None)
+            mdna = next((j for j, (ln, _) in enumerate(part) if cut is not None and j > cut and len(ln) < 130
+                         and re.fullmatch(rf"(?i)(?:{SECTION_TITLES['item7']})\.?", ln.replace("|", " ").strip())), None)
+            if mdna is not None:
+                # the statements come first and MD&A after the audit report (Progressive): everything before MD&A's own
+                # title is the financial statements, so MD&A is never read as notes and the notes never as MD&A
+                lines += [("Item 8. Financial Statements (Exhibit 13 annual report)", False)] + part[:mdna] + [(header, False)] + part[mdna:]
+                continue
             if cut is not None:
                 part = part[:cut] + [("Item 8. Financial Statements", False)] + part[cut:]
         lines += [(header, False)] + part

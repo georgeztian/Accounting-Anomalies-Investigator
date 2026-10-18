@@ -305,7 +305,7 @@ def build_model(out) -> dict[str, Any]:
         "company": {"name": ctx.company.display_name or ctx.company.name, "ticker": ctx.company.ticker,
                     "sic_description": " ".join((ctx.company.sic_description or "").split()),
                     "match_note": _resolution(ctx), "warnings": [P.plain(w) for w in ctx.company.warnings], "auditor": ctx.auditor},
-        "period": P.plain(ctx.focus_label, expand=False).capitalize(), "period_end": str(ctx.focus.date()), "as_of": str(ctx.as_of),
+        "period": P.plain(ctx.focus_label, expand=False).capitalize(), "period_end": str(ctx.focus.date()), "as_of": str(getattr(ctx, "cutoff", None) or ctx.as_of),
         "generated": datetime.now().strftime("%d %B %Y"),
         "analysis_type": ("Automated checks of the reported figures, plus AI-assisted reading of the filings' text"
                           if llm else "Automated checks of the reported figures and filing text"),

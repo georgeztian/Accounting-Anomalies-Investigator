@@ -54,8 +54,8 @@ def quotes_in(text: str) -> list[str]:
             if q[:1] in ".,;:)":
                 open_at = m.end()  # out of step (an unmatched mark earlier): this mark opens a quote, it does not close one
                 continue
-            if len(q) >= 25:
-                out.append(q[:300])  # a long quote is checked on its opening words
+            if len(q) >= 25 or len(q.split()) >= 4:
+                out.append(q[:300])  # a long quote is checked on its opening words; a word or three in quotes is a term
             open_at = None
     return out
 
@@ -102,8 +102,8 @@ def check(text: str, allowed: list[float], docs: list, rel_tol: float = 0.015, k
         num = m.group("num")
         if YEAR_RE.match(num) and not m.group("suf"):
             continue
-        if re.fullmatch(r"\d", num) and not m.group("suf"):
-            continue  # small counts ("two years", "3 signals") are not financial figures
+        if re.fullmatch(r"\d", num) and not m.group("suf") and "$" not in token:
+            continue  # small counts ("two years", "3 signals") are not financial figures; "$5" is
         before = text[max(0, m.start() - 3): m.start()]
         if re.search(r"(?:FY|Q|\[L)$", before, re.I) or text[m.end(): m.end() + 1] == "]":
             continue  # fiscal labels and ledger ids

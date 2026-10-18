@@ -15,7 +15,8 @@ KG_FORMS = {"10-K", "10-K/A", "10-Q", "10-Q/A", "8-K", "NT 10-K", "NT 10-Q", "CO
 
 # MD&A / note paragraphs that discuss a line item AND a change create EXPLAINS edges (rule-based extractor).
 ITEM_KEYWORDS: dict[str, str] = {
-    "REVENUE": r"\b(?:net sales|revenues?)\b",
+    # insurers discuss premiums, banks net interest income
+    "REVENUE": r"\b(?:net sales|revenues?|premiums (?:written|earned)|net interest income)\b",
     # cost of revenue goes by many captions ("merchandise costs" at retailers) and is usually explained through gross margin
     "COGS": r"\bcosts? of (?:sales|revenues?|goods(?: sold)?|products?|merchandise)\b|\bmerchandise costs?\b|\bproduct costs?\b|\bgross (?:margin|profit)\b",
     "GROSS_PROFIT": r"\bgross (?:margin|profit)\b",

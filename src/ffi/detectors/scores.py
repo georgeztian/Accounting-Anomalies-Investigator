@@ -3,25 +3,45 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 
 import numpy as np
 import pandas as pd
 
-from ffi.context import pv
+from ffi.context import prev_period, pv
 from ffi.detectors.stats import safe_div
+from ffi.xbrl.canonical import basis
 from ffi.xbrl.facts import Panel
 
 NAN = float("nan")
 
 
 class V:
-    """Value accessor: V(panel, period).g(item, back=0)."""
+    """Value accessor: V(panel, period).g(item, back=0).
 
-    def __init__(self, panel: Panel, period: pd.Timestamp) -> None:
-        self.P, self.p = panel, period
+    With `track` (a dict), every value read is recorded as (item, back) -> its basis key, or None when the value is
+    missing, so a comparison can tell whether two years were measured on the same basis (see `same_basis`)."""
+
+    def __init__(self, panel: Panel, period: pd.Timestamp, track: dict | None = None) -> None:
+        self.P, self.p, self.track = panel, period, track
+
+    def period(self, back: int = 0) -> pd.Timestamp | None:
+        p: pd.Timestamp | None = self.p
+        for _ in range(back):
+            p = prev_period(self.P, p) if p is not None else None
+        return p
+
+    def concept(self, item: str, back: int = 0) -> str | None:
+        """The XBRL concept a value was read from (None when it is missing or derived)."""
+        p = self.period(back)
+        rec = self.P.prov.get((item, p)) if p is not None else None
+        return rec.concept if rec is not None else None
 
     def g(self, item: str, back: int = 0) -> float:
-        return pv(self.P, item, self.p, back)
+        v = pv(self.P, item, self.p, back)
+        if self.track is not None:
+            self.track[(item, back)] = basis(item, self.concept(item, back)) if np.isfinite(v) else None
+        return v
 
     def z(self, item: str, back: int = 0) -> float:
         """Value, treating a missing optional line as zero."""
@@ -42,12 +62,79 @@ class V:
             eq = self.g("EQUITY", back) + self.z("NCI", back)
         return ta - eq
 
-    def gross_margin(self, back: int = 0) -> float:
+    def gross_margin(self, back: int = 0, years: tuple[int, ...] | None = None) -> float:
+        """Gross profit / revenue. When years are compared, every one of `years` uses the same measure: the tagged gross
+        profit only if it is reported in all of them, else revenue less cost of sales in all of them. (Costco tagged
+        gross profit on net sales, which leaves out membership fees, in one year only: mixing it with revenue less cost
+        of sales from total revenue moved the margin 2 points with no change in the business.)"""
+        yrs = years or (back,)
         rev = self.g("REVENUE", back)
-        gp = self.g("GROSS_PROFIT", back)
-        if not np.isfinite(gp):
-            gp = rev - self.g("COGS", back)
-        return safe_div(gp, rev)
+        if all(np.isfinite(self.g("GROSS_PROFIT", b)) for b in yrs):
+            return safe_div(self.g("GROSS_PROFIT", back), rev)
+        if all(np.isfinite(self.g("COGS", b)) for b in yrs):
+            return safe_div(rev - self.g("COGS", back), rev)
+        return NAN
+
+    def debt(self, back: int = 0) -> float:
+        """Total borrowings without counting a part twice: long-term debt tagged including its current maturities
+        already holds what a current-maturities tag reports, and a current-debt tag that includes short-term borrowings
+        already holds what a short-term-borrowings tag reports. Missing parts count as zero; NaN when none is tagged."""
+        parts = debt_parts(self, back)
+        return float(sum(parts.values())) if parts else NAN
+
+
+def debt_parts(v: V, back: int = 0) -> dict[str, float]:
+    """The borrowings that make up total debt, by canonical item, with overlapping tags left out (see V.debt)."""
+    lt, cur, st = v.g("LONG_TERM_DEBT", back), v.g("CURRENT_DEBT", back), v.g("ST_BORROWINGS", back)
+    lt_incl_current = bool(basis("LONG_TERM_DEBT", v.concept("LONG_TERM_DEBT", back))) and np.isfinite(lt)
+    cur_basis = basis("CURRENT_DEBT", v.concept("CURRENT_DEBT", back))
+    out: dict[str, float] = {}
+    if np.isfinite(lt):
+        out["LONG_TERM_DEBT"] = lt
+    keep_st = np.isfinite(st)
+    if np.isfinite(cur):
+        if cur_basis == "":  # current maturities of long-term debt
+            if not lt_incl_current:
+                out["CURRENT_DEBT"] = cur
+        elif cur_basis == "including short-term borrowings":
+            if not lt_incl_current:
+                out["CURRENT_DEBT"] = cur
+                keep_st = False  # already inside the current-debt total
+            elif not keep_st:
+                out["CURRENT_DEBT"] = cur  # the only record of short-term borrowings (its current maturities count twice)
+        elif not keep_st:  # short-term borrowings only, and not tagged separately
+            out["CURRENT_DEBT"] = cur
+    if keep_st:
+        out["ST_BORROWINGS"] = st
+    return out
+
+
+def noncurrent_ltd(v: V, back: int = 0) -> float:
+    """Long-term debt excluding its current maturities (which current liabilities already hold)."""
+    lt = v.g("LONG_TERM_DEBT", back)
+    if not np.isfinite(lt) or not basis("LONG_TERM_DEBT", v.concept("LONG_TERM_DEBT", back)):
+        return lt
+    cur = v.g("CURRENT_DEBT", back)
+    if np.isfinite(cur) and basis("CURRENT_DEBT", v.concept("CURRENT_DEBT", back)) == "":
+        return lt - cur
+    return lt  # tagged only including its current maturities, which are not reported apart
+
+
+def same_basis(focus: dict, other: dict) -> bool:
+    """Two tracked readings (see V) measured every item they share on the same basis."""
+    return all(focus[k] == other[k] for k in focus.keys() & other.keys() if focus[k] is not None and other[k] is not None)
+
+
+def dep_measure(v: V, backs: tuple[int, ...]) -> tuple[str, Callable[[int], float]]:
+    """One depreciation measure for every year compared: depreciation when it is tagged in all of them, else D&A less
+    amortization of intangibles when that amortization is tagged in all of them, else D&A. A series that mixes
+    measures (depreciation in one year, D&A less amortization in another) moves with the tagging, not the business."""
+    if all(np.isfinite(v.g("DEPRECIATION", b)) for b in backs):
+        return "depreciation", lambda b: v.g("DEPRECIATION", b)
+    if all(np.isfinite(v.g("AMORTIZATION_INTANGIBLES", b)) for b in backs):
+        return ("depreciation and amortization less amortization of intangibles",
+                lambda b: v.g("DA", b) - v.g("AMORTIZATION_INTANGIBLES", b))
+    return "depreciation and amortization", lambda b: v.g("DA", b)
 
 
 # ---------------------------------------------------------------------------- Beneish M (8-var)
@@ -64,24 +151,29 @@ def beneish(P: Panel, p: pd.Timestamp) -> dict[str, float]:
     def aq(b: int) -> float:
         return 1 - safe_div(v.g("CURRENT_ASSETS", b) + v.g("PPE_NET", b) + v.z("ST_INVESTMENTS", b), v.g("TOTAL_ASSETS", b))
 
+    _, dep = dep_measure(v, (0, 1))  # the same measure in both years
+
     def deprate(b: int) -> float:
-        d = v.g("DEPRECIATION", b)
-        if not np.isfinite(d):
-            d = v.g("DA", b)
+        d = dep(b)
         return safe_div(d, d + v.g("PPE_NET", b))
 
     def sga(b: int) -> float:
         return safe_div(v.g("SGA", b), v.g("REVENUE", b))
 
+    ltd_years = [np.isfinite(v.g("LONG_TERM_DEBT", b)) for b in (0, 1)]
+
     def lev(b: int) -> float:
-        return safe_div(v.g("CURRENT_LIABILITIES", b) + v.z("LONG_TERM_DEBT", b), v.g("TOTAL_ASSETS", b))
+        if any(ltd_years) and not all(ltd_years):
+            return NAN  # long-term debt reported in one year only: the index would measure the tagging
+        ltd = noncurrent_ltd(v, b)
+        return safe_div(v.g("CURRENT_LIABILITIES", b) + (ltd if np.isfinite(ltd) else 0.0), v.g("TOTAL_ASSETS", b))
 
     ico = v.g("INCOME_CONT_OPS")
     if not np.isfinite(ico):
         ico = v.g("NET_INCOME")
     comp = {
         "DSRI": safe_div(safe_div(ar, rev), safe_div(ar0, rev0)),
-        "GMI": safe_div(v.gross_margin(1), v.gross_margin(0)),
+        "GMI": safe_div(v.gross_margin(1, years=(0, 1)), v.gross_margin(0, years=(0, 1))),
         "AQI": safe_div(aq(0), aq(1)),
         "SGI": safe_div(rev, rev0),
         "DEPI": safe_div(deprate(1), deprate(0)),
@@ -106,8 +198,10 @@ F_BASE_RATE = 0.0037
 def _rsst_parts(v: V, b: int) -> tuple[float, float, float]:
     ca, cash, sti = v.g("CURRENT_ASSETS", b), v.g("CASH", b), v.z("ST_INVESTMENTS", b)
     cl = v.g("CURRENT_LIABILITIES", b)
-    debt_cl = v.z("CURRENT_DEBT", b) + v.z("ST_BORROWINGS", b)
-    ta, tl, ltd = v.g("TOTAL_ASSETS", b), v.total_liabilities(b), v.z("LONG_TERM_DEBT", b)
+    total, ltd = v.debt(b), noncurrent_ltd(v, b)
+    total, ltd = (total if np.isfinite(total) else 0.0), (ltd if np.isfinite(ltd) else 0.0)
+    debt_cl = total - ltd  # borrowings inside current liabilities
+    ta, tl = v.g("TOTAL_ASSETS", b), v.total_liabilities(b)
     inv_adv = v.z("EQUITY_METHOD_INVESTMENTS", b)
     wc = (ca - cash - sti) - (cl - debt_cl)
     nco = (ta - ca - inv_adv) - (tl - cl - ltd)
@@ -130,7 +224,10 @@ def dechow_f(P: Panel, p: pd.Timestamp) -> dict[str, float]:
     roa1 = safe_div(v.g("NET_INCOME"), ata)
     roa0 = safe_div(v.g("NET_INCOME", 1), v.avg("TOTAL_ASSETS", 1))
     ch_roa = roa1 - roa0
-    issue = 1.0 if (v.z("DEBT_ISSUED") > 0 or v.z("EQUITY_ISSUED") > 0) else 0.0
+    # securities sold for cash (the cash-flow statement); shares the statement of equity shows as issued include employee
+    # stock plans, which raise no capital
+    raised = v.z("EQUITY_ISSUED") if basis("EQUITY_ISSUED", v.concept("EQUITY_ISSUED")) != "shares issued, from the statement of equity" else 0.0
+    issue = 1.0 if (v.z("DEBT_ISSUED") > 0 or raised > 0) else 0.0
     comp = {"rsst_acc": rsst, "ch_rec": ch_rec, "ch_inv": ch_inv, "soft_assets": soft, "ch_cs": ch_cs,
             "ch_roa": ch_roa, "issue": issue}
     if not all(np.isfinite(comp[k]) for k in ("rsst_acc", "ch_rec", "soft_assets", "ch_roa")):
@@ -152,7 +249,8 @@ def sloan_accruals(P: Panel, p: pd.Timestamp) -> float:
 
     def noa(b: int) -> float:
         op_assets = v.g("TOTAL_ASSETS", b) - v.g("CASH", b) - v.z("ST_INVESTMENTS", b)
-        op_liab = v.total_liabilities(b) - v.z("CURRENT_DEBT", b) - v.z("ST_BORROWINGS", b) - v.z("LONG_TERM_DEBT", b)
+        debt = v.debt(b)
+        op_liab = v.total_liabilities(b) - (debt if np.isfinite(debt) else 0.0)
         return op_assets - op_liab
 
     avg_noa = (noa(0) + noa(1)) / 2
@@ -173,8 +271,8 @@ def montier_c(P: Panel, p: pd.Timestamp) -> dict[str, float]:
     dso1, dso0 = safe_div(v.g("AR"), v.g("REVENUE")), safe_div(v.g("AR", 1), v.g("REVENUE", 1))
     dsi1, dsi0 = safe_div(v.g("INVENTORY"), v.g("COGS")), safe_div(v.g("INVENTORY", 1), v.g("COGS", 1))
     oca1, oca0 = safe_div(v.g("OTHER_CURRENT_ASSETS"), v.g("REVENUE")), safe_div(v.g("OTHER_CURRENT_ASSETS", 1), v.g("REVENUE", 1))
-    dep = "DEPRECIATION" if np.isfinite(v.g("DEPRECIATION")) else "DA"
-    dr1, dr0 = safe_div(v.g(dep), v.g("PPE_GROSS")), safe_div(v.g(dep, 1), v.g("PPE_GROSS", 1))
+    _, dep = dep_measure(v, (0, 1))
+    dr1, dr0 = safe_div(dep(0), v.g("PPE_GROSS")), safe_div(dep(1), v.g("PPE_GROSS", 1))
     ag = safe_div(v.g("TOTAL_ASSETS"), v.g("TOTAL_ASSETS", 1)) - 1
     tests = {
         "ni_cfo_gap_widening": gap1 > gap0 if np.isfinite(gap1) and np.isfinite(gap0) else None,
@@ -194,15 +292,22 @@ def piotroski_f(P: Panel, p: pd.Timestamp) -> dict[str, float]:
     roa = safe_div(v.g("NET_INCOME"), v.g("TOTAL_ASSETS", 1))
     roa0 = safe_div(v.g("NET_INCOME", 1), v.g("TOTAL_ASSETS", 2))
     cfo = safe_div(v.g("CFO"), v.g("TOTAL_ASSETS", 1))
-    lev1, lev0 = safe_div(v.z("LONG_TERM_DEBT"), v.avg("TOTAL_ASSETS")), safe_div(v.z("LONG_TERM_DEBT", 1), v.avg("TOTAL_ASSETS", 1))
+    l1, l0 = noncurrent_ltd(v, 0), noncurrent_ltd(v, 1)
+    if np.isfinite(l1) == np.isfinite(l0):  # no long-term debt tagged in either year counts as none in both
+        l1, l0 = (l1, l0) if np.isfinite(l1) else (0.0, 0.0)
+        lev1, lev0 = safe_div(l1, v.avg("TOTAL_ASSETS")), safe_div(l0, v.avg("TOTAL_ASSETS", 1))
+    else:
+        lev1 = lev0 = NAN  # tagged in one year only: the change in leverage is unknown
     cr1 = safe_div(v.g("CURRENT_ASSETS"), v.g("CURRENT_LIABILITIES"))
     cr0 = safe_div(v.g("CURRENT_ASSETS", 1), v.g("CURRENT_LIABILITIES", 1))
     sh1, sh0 = v.g("SHARES_DILUTED"), v.g("SHARES_DILUTED", 1)
-    gm1, gm0 = v.gross_margin(0), v.gross_margin(1)
+    gm1, gm0 = v.gross_margin(0, years=(0, 1)), v.gross_margin(1, years=(0, 1))
     at1 = safe_div(v.g("REVENUE"), v.g("TOTAL_ASSETS", 1))
     at0 = safe_div(v.g("REVENUE", 1), v.g("TOTAL_ASSETS", 2))
-    tests = [roa > 0, cfo > 0, roa > roa0, cfo > roa, lev1 < lev0, cr1 > cr0, sh1 <= sh0 * 1.005, gm1 > gm0, at1 > at0]
-    return {"F": float(sum(bool(t) for t in tests))}
+    pairs = [(roa, 0.0), (cfo, 0.0), (roa, roa0), (cfo, roa), (lev0, lev1), (cr1, cr0), (sh0 * 1.005, sh1), (gm1, gm0), (at1, at0)]
+    # a test whose inputs are missing is not computable, not failed: a missing tag must not read as weak fundamentals
+    done = [a > b if i != 6 else a >= b for i, (a, b) in enumerate(pairs) if np.isfinite(a) and np.isfinite(b)]
+    return {"F": float(sum(done)), "available": float(len(done))}
 
 
 def altman(P: Panel, p: pd.Timestamp) -> dict[str, float]:

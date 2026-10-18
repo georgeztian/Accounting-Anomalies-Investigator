@@ -8,8 +8,10 @@ import pandas as pd
 from ffi.context import RunContext
 from ffi.detectors.base import Area, EvidenceRef, ImpactEstimate, Scheme, SkipDetector, detector
 from ffi.detectors.helpers import finite, mk, need
+from ffi.detectors.scores import V
 from ffi.detectors.stats import fmt_money, fmt_pct, safe_div
-from ffi.xbrl.canonical import BY_ID
+from ffi.xbrl.canonical import BY_ID, basis
+from ffi.xbrl.facts import ANNUAL_DAYS, FactRecord
 
 F = "A"
 
@@ -80,14 +82,35 @@ def a03(ctx: RunContext):
     cfo, cfi, cff = ctx.a("CFO"), ctx.a("CFI"), ctx.a("CFF")
     fx = ctx.a("FX_EFFECT_CASH")
     need(end, beg, cfo, cfi, cff)
+    v = V(ctx.A, ctx.focus)
+    if basis("CASH_RESTRICTED_TOTAL", v.concept("CASH_RESTRICTED_TOTAL")) != basis("CASH_RESTRICTED_TOTAL", v.concept("CASH_RESTRICTED_TOTAL", 1)):
+        raise SkipDetector("cash is reported including restricted cash in one year and excluding it in the other")
     flows = cfo + cfi + cff + (fx if finite(fx) else 0.0)
     resid = (end - beg) - flows
     base = max(abs(end), abs(cfo), 1.0)
     sev = _residual_severity(resid, base, 0.01, 0.05)
     return [mk("A.03", ctx, raw_value=resid, expected=0.0, severity=sev, unit="USD", scheme=Scheme.REPORTING_INTEGRITY,
-               rationale=(f"Change in cash {fmt_money(end - beg)} vs CFO+CFI+CFF+FX {fmt_money(flows)}; "
+               rationale=(f"Change in cash {fmt_money(end - beg)} vs operating, investing and financing cash flows plus the "
+                          f"currency effect {fmt_money(flows)}; "
                           f"unexplained {fmt_money(resid)}."),
                evidence=ctx.evs(["CASH_RESTRICTED_TOTAL"], ks=(0, 1)) + ctx.evs(["CFO", "CFI", "CFF"], ks=(0,)))]
+
+
+def dividends_declared(ctx: RunContext) -> tuple[float, str]:
+    """Dividends charged to equity in the focus year and how the figure was obtained. Declared dividends are what reduce
+    equity; cash dividends paid lag them when a dividend declared near the year end is paid after it (Progressive
+    declares an annual dividend in December and pays it in January), so paid dividends are adjusted for the change in
+    dividends payable, and used alone only when that change is not reported."""
+    dec = ctx.a("DIVIDENDS_DECLARED")
+    if finite(dec):
+        return dec, "declared"
+    paid = ctx.a("DIVIDENDS_PAID")
+    if not finite(paid):
+        return 0.0, "none reported"
+    p1, p0 = ctx.a("DIVIDENDS_PAYABLE"), ctx.a("DIVIDENDS_PAYABLE", 1)
+    if finite(p1, p0):
+        return paid + (p1 - p0), "paid, adjusted for the change in dividends payable"
+    return paid, "paid (declared not reported)"
 
 
 @detector("A.04", "Equity roll-forward", F, Area.INTEGRITY)
@@ -96,9 +119,10 @@ def a04(ctx: RunContext):
     e1, e0 = ctx.a("EQUITY"), ctx.a("EQUITY", 1)
     ni = ctx.a("NET_INCOME")
     need(e1, e0, ni)
-    add = {i: ctx.a(i) for i in ("OCI", "DIVIDENDS_PAID", "BUYBACKS", "EQUITY_ISSUED", "SBC", "CONVERTIBLE_EQUITY_COMPONENT")}
+    add = {i: ctx.a(i) for i in ("OCI", "BUYBACKS", "EQUITY_ISSUED", "SBC", "CONVERTIBLE_EQUITY_COMPONENT")}
     g = {k: (v if finite(v) else 0.0) for k, v in add.items()}
-    expected_end = (e0 + ni + g["OCI"] - g["DIVIDENDS_PAID"] - g["BUYBACKS"] + g["EQUITY_ISSUED"] + g["SBC"]
+    div, div_how = dividends_declared(ctx)
+    expected_end = (e0 + ni + g["OCI"] - div - g["BUYBACKS"] + g["EQUITY_ISSUED"] + g["SBC"]
                     + g["CONVERTIBLE_EQUITY_COMPONENT"])
     resid = e1 - expected_end
     base = max(abs(e1), abs(e0), 1.0)
@@ -114,11 +138,12 @@ def a04(ctx: RunContext):
         nci_note = (f" Noncontrolling interests are {fmt_pct(nci / incl)} of total equity; exchanges of their units "
                     "into common stock move equity to the parent without any cash flow.")
     return [mk("A.04", ctx, raw_value=resid, expected=0.0, severity=sev, unit="USD", scheme=Scheme.REPORTING_INTEGRITY,
-               rationale=(f"Equity moved {fmt_money(e1 - e0)}; NI, OCI, dividends, buybacks, issuance and SBC explain "
+               rationale=(f"Equity moved {fmt_money(e1 - e0)}; NI, OCI, dividends ({div_how}), buybacks, issuance and SBC explain "
                           f"{fmt_money(expected_end - e0)}. Unexplained {fmt_money(resid)} "
                           f"({fmt_pct(safe_div(resid, base))} of equity). Untagged equity offerings, convertible-note "
                           "components, warrant exercises and tax withholding on vesting are common causes." + nci_note),
-               evidence=ctx.evs(["EQUITY"], ks=(0, 1)) + ctx.evs(["NET_INCOME", "BUYBACKS", "DIVIDENDS_PAID"], ks=(0,)))]
+               evidence=ctx.evs(["EQUITY", "DIVIDENDS_PAYABLE"], ks=(0, 1))
+               + ctx.evs(["NET_INCOME", "BUYBACKS", "DIVIDENDS_DECLARED", "DIVIDENDS_PAID"], ks=(0,)))]
 
 
 @detector("A.05", "Retained-earnings roll-forward", F, Area.INTEGRITY)
@@ -126,10 +151,7 @@ def a05(ctx: RunContext):
     """RE(t) = RE(t-1) + NI - dividends (repurchases charged to RE are recognised)."""
     r1, r0, ni = ctx.a("RETAINED_EARNINGS"), ctx.a("RETAINED_EARNINGS", 1), ctx.a("NET_INCOME")
     need(r1, r0, ni)
-    div = ctx.a("DIVIDENDS_DECLARED")
-    if not finite(div):
-        div = ctx.a("DIVIDENDS_PAID")
-    div = div if finite(div) else 0.0
+    div, div_how = dividends_declared(ctx)
     resid = r1 - (r0 + ni - div)
     bb = ctx.a("BUYBACKS")
     tw = ctx.a("SHARE_TAX_WITHHELD")
@@ -153,13 +175,15 @@ def a05(ctx: RunContext):
     base = max(abs(ni), abs(r1) * 0.1, 1.0)
     sev = _residual_severity(resid_eff, base, 0.05, 0.30)
     return [mk("A.05", ctx, raw_value=resid, expected=0.0, severity=sev, unit="USD", scheme=Scheme.REPORTING_INTEGRITY,
-               rationale=f"Retained earnings moved {fmt_money(r1 - r0)} vs NI less dividends {fmt_money(ni - div)}; residual {fmt_money(resid)}.{explained}",
-               evidence=ctx.evs(["RETAINED_EARNINGS"], ks=(0, 1)) + ctx.evs(["NET_INCOME", "DIVIDENDS_PAID", "BUYBACKS", "SHARE_TAX_WITHHELD"], ks=(0,)))]
+               rationale=(f"Retained earnings moved {fmt_money(r1 - r0)} vs NI less dividends ({div_how}) {fmt_money(ni - div)}; "
+                          f"residual {fmt_money(resid)}.{explained}"),
+               evidence=ctx.evs(["RETAINED_EARNINGS", "DIVIDENDS_PAYABLE"], ks=(0, 1))
+               + ctx.evs(["NET_INCOME", "DIVIDENDS_DECLARED", "DIVIDENDS_PAID", "BUYBACKS", "SHARE_TAX_WITHHELD"], ks=(0,)))]
 
 
 @detector("A.06", "Quarterly-to-annual consistency", F, Area.INTEGRITY)
 def a06(ctx: RunContext):
-    """Q4 implied by FY less Q1-Q3 is plausible (sign and magnitude) for revenue and net income."""
+    """Q4 implied by FY less Q1-Q3 is plausible (sign and magnitude) for revenue and cost of sales."""
     qp = ctx.q_periods()
     if not qp:
         raise SkipDetector("no quarterly data")
@@ -197,19 +221,24 @@ def a07(ctx: RunContext):
     """Pre-tax income - tax = income from continuing operations; EPS x shares = NI."""
     pt, tax = ctx.a("PRETAX_INCOME"), ctx.a("INCOME_TAX")
     ni, nci = ctx.a("NET_INCOME"), ctx.a("NCI_INCOME")
+    # pre-tax income tagged before the share of equity-method investees' results (Toyota): that share is added below tax
+    eqm = ctx.a("EQUITY_METHOD_INCOME")
+    before_eqm = bool(basis("PRETAX_INCOME", V(ctx.A, ctx.focus).concept("PRETAX_INCOME"))) and finite(eqm)
     # pre-tax income includes the noncontrolling holders' share, so any after-tax subtotal may tie: continuing
     # operations, net income including NCI, or the parent's net income plus the NCI share
     cands = [v for v in (ctx.a("INCOME_CONT_OPS"), ctx.a("NET_INCOME_INCL_NCI"),
                          ni + nci if finite(ni, nci) else float("nan"), ni) if finite(v)]
     need(pt, tax, *(cands[:1] or [float("nan")]))
-    ico = min(cands, key=lambda v: abs((pt - tax) - v))
-    resid = (pt - tax) - ico
+    after_tax = pt - tax + (eqm if before_eqm else 0.0)
+    ico = min(cands, key=lambda v: abs(after_tax - v))
+    resid = after_tax - ico
     base = max(abs(pt), 1.0)
     # equity-method income and discontinued ops can legitimately sit between these lines
     sev = _residual_severity(resid, base, 0.03, 0.15)
     return [mk("A.07", ctx, raw_value=resid, expected=0.0, severity=sev, unit="USD", scheme=Scheme.REPORTING_INTEGRITY,
-               rationale=f"Pre-tax income less tax {fmt_money(pt - tax)} vs income after tax {fmt_money(ico)}; gap {fmt_money(resid)}.",
-               evidence=ctx.evs(["PRETAX_INCOME", "INCOME_TAX", "NET_INCOME"], ks=(0,)))]
+               rationale=(f"Pre-tax income less tax{' plus equity-method income' if before_eqm else ''} {fmt_money(after_tax)} "
+                          f"vs income after tax {fmt_money(ico)}; gap {fmt_money(resid)}."),
+               evidence=ctx.evs(["PRETAX_INCOME", "INCOME_TAX", "NET_INCOME"] + (["EQUITY_METHOD_INCOME"] if before_eqm else []), ks=(0,)))]
 
 
 @detector("A.08", "PP&E roll-forward", F, Area.INTEGRITY)
@@ -299,17 +328,31 @@ def a12(ctx: RunContext):
 def a13(ctx: RunContext):
     """Current tax expense (total - deferred) vs income taxes paid, 3-year cumulative."""
     tot = ctx.hist("INCOME_TAX", 3)
-    dfd = ctx.hist("DEFERRED_TAX_EXPENSE", 3)
-    paid = ctx.hist("INCOME_TAXES_PAID", 3)
-    if len(tot.dropna()) < 2 or len(paid.dropna()) < 2:
-        raise SkipDetector("tax expense or taxes paid not reported for 2+ years")
-    cur = (tot - dfd.reindex(tot.index).fillna(0)).sum()
-    cash = paid.sum()
+    dfd = ctx.hist("DEFERRED_TAX_EXPENSE", 3).reindex(tot.index)
+    paid = ctx.hist("INCOME_TAXES_PAID", 3).reindex(tot.index)
+    # both sums cover the same years; deferred tax is subtracted in every year or (never reported) in none
+    years = tot.index[tot.notna() & paid.notna()]
+    if dfd[years].notna().any():
+        years = years[dfd[years].notna().to_numpy()]
+    if len(years) < 2:
+        raise SkipDetector("tax expense and taxes paid not both reported for 2+ years")
+    cur = float((tot[years] - dfd[years].fillna(0)).sum())
+    cash = float(paid[years].sum())
     gap = safe_div(cur - cash, max(abs(cur), abs(cash), 1.0))
     sev = float(np.clip((abs(gap) - 0.25) / 0.5, 0, 1)) if finite(gap) else 0.0
     return [mk("A.13", ctx, raw_value=gap, expected=0.0, severity=sev * 0.7, unit="ratio", area=Area.RESERVES,
-               rationale=f"3-year current tax expense {fmt_money(cur)} vs cash taxes paid {fmt_money(cash)} (gap {fmt_pct(gap)}). Timing of payments and uncertain positions explain moderate gaps.",
+               rationale=(f"{len(years)}-year current tax expense {fmt_money(cur)} vs cash taxes paid {fmt_money(cash)} over the same years "
+                          f"({ctx.label(years[0])}-{ctx.label(years[-1])}; gap {fmt_pct(gap)})"
+                          + ("" if dfd[years].notna().any() else "; deferred tax is not reported, so total tax expense is used")
+                          + ". Timing of payments and uncertain positions explain moderate gaps."),
                evidence=ctx.evs(["INCOME_TAX", "INCOME_TAXES_PAID"], ks=(0,)))]
+
+
+def _fact_id(row) -> str:
+    """The fact id of a versions row, in the form every other cited fact uses (taxonomy:concept|unit|start|end|accession)."""
+    start = row["start"] if "start" in row and not pd.isna(row["start"]) else None
+    return FactRecord(row["item"], row["concept"], row["taxonomy"], row["unit"], start, pd.Timestamp(row["end"]),
+                      float(row["val"]), row["accn"], row["form"], pd.Timestamp(row["filed"])).fact_id
 
 
 SIGNIFICANT_ITEMS = ("REVENUE", "NET_INCOME", "PRETAX_INCOME", "OPERATING_INCOME", "CFO", "TOTAL_ASSETS", "EQUITY",
@@ -345,15 +388,15 @@ def a14(ctx: RunContext):
         sev = float(np.clip(0.3 + 4 * mat if income_item else 0.15 + 2 * mat, 0, 1))
         # labelled: re-reported in an amendment, or within a year after a non-reliance notice
         is_labeled = last["accn"] in amended or any(0 <= (pd.Timestamp(last["filed"]) - d).days <= 366 for d in non_reliance)
-        period_label = f"FY{pd.Timestamp(end).year}"
+        period_label = ctx.A.label(pd.Timestamp(end)) if pd.Timestamp(end) in ctx.A.labels else f"FY{pd.Timestamp(end).year}"
         tags = ["labeled_restatement" if is_labeled else "unlabeled_revision"]
         direction = "income_increasing" if (income_item and first["val"] > last["val"] and item != "COGS") else "neutral"
         ev = [
-            EvidenceRef(node_id=f"fact:{first['concept']}|{first['accn']}|{end}", kind="fact",
+            EvidenceRef(node_id=f"fact:{_fact_id(first)}", kind="fact",
                         label=f"{BY_ID[item].label} {period_label} as first reported", accession=first["accn"],
                         doc_url=ctx.doc_url(first["accn"]), concept=first["concept"], period=period_label,
                         value=float(first["val"]), unit=ctx.currency, filed=str(pd.Timestamp(first["filed"]).date())),
-            EvidenceRef(node_id=f"fact:{last['concept']}|{last['accn']}|{end}", kind="fact",
+            EvidenceRef(node_id=f"fact:{_fact_id(last)}", kind="fact",
                         label=f"{BY_ID[item].label} {period_label} as re-reported", accession=last["accn"],
                         doc_url=ctx.doc_url(last["accn"]), concept=last["concept"], period=period_label,
                         value=float(last["val"]), unit=ctx.currency, filed=str(pd.Timestamp(last["filed"]).date())),
@@ -362,7 +405,7 @@ def a14(ctx: RunContext):
                       scheme=Scheme.REPORTING_INTEGRITY, direction=direction, tags=tags,
                       impact=ImpactEstimate(abs(delta), abs(delta), abs(delta), "disclosed_amount",
                                             f"{BY_ID[item].label}: re-reported {fmt_money(last['val'])} vs first {fmt_money(first['val'])}") if income_item else None,
-                      rationale=(f"{BY_ID[item].label} for {period_label} was first reported as {fmt_money(first['val'])} "
+                      rationale=(f"{BY_ID[item].label} for {period_label} was reported as {fmt_money(first['val'])} "
                                  f"(filed {pd.Timestamp(first['filed']).date()}) and later as {fmt_money(last['val'])} "
                                  f"(filed {pd.Timestamp(last['filed']).date()}), a change of {fmt_pct(delta / first['val'] if first['val'] else np.nan)}"
                                  f"{'' if is_labeled else ', without a 10-K/A or non-reliance filing'}. Reclassifications and recasts are common legitimate causes."),
@@ -372,6 +415,19 @@ def a14(ctx: RunContext):
                    rationale="No significant prior-period values were re-reported differently in the last 3 years.")]
     out.sort(key=lambda s: -s.severity)
     return out[:6]
+
+
+def _as_presented(ctx: RunContext, item: str, period: pd.Timestamp) -> float:
+    """`item` for `period` as the focus year's annual report states it: its comparatives may be recast, and its text
+    describes the recast figures. The first-reported value when that report does not carry the period."""
+    rec = ctx.A.prov.get((item, ctx.focus))
+    d = ctx.store.df
+    if rec is not None and not d.empty:
+        rows = d[(d["accn"] == rec.accn) & (d["item"] == item) & d["days"].between(*ANNUAL_DAYS)
+                 & ((d["end"] - period).abs() <= pd.Timedelta(days=8))]
+        if not rows.empty:
+            return float(rows.sort_values("rank").iloc[0]["val"])
+    return ctx.A.get(item, period)
 
 
 @detector("A.15", "Text-number consistency (MD&A vs XBRL)", F, Area.INTEGRITY, needs_text=True)
@@ -385,7 +441,12 @@ def a15(ctx: RunContext):
     text = doc.section_text("item7")
     if len(text) < 2000:
         raise SkipDetector("MD&A section not found")
-    known = {item: [ctx.a(item, k) for k in range(3)] for item in ("REVENUE", "NET_INCOME")}
+    # each stated total is compared with the year the sentence names; an unnamed year is the focus year (a match with
+    # an earlier year's total still counts as checked, but only the focus year's total can make it a mismatch)
+    # earlier years as this annual report presents them (its comparatives), which is what its MD&A describes
+    years = [ctx.period_at(k) for k in range(3)]
+    known = {item: {"years": {p.year: _as_presented(ctx, item, p) for p in years if p is not None}, "focus": ctx.focus.year}
+             for item in ("REVENUE", "NET_INCOME")}
     checked, bad = check_amounts(text, known)
     if checked == 0:
         raise SkipDetector("no company-wide revenue / net income totals stated in MD&A in a recognisable form")

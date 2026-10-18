@@ -21,7 +21,7 @@ import pandas as pd
 
 from ffi import __version__
 from ffi.config import get_settings, get_tuning
-from ffi.context import Event, RunContext
+from ffi.context import Event, RunContext, announced_quarter
 from ffi.detectors.stats import CURRENCY
 from ffi.edgar import endpoints
 from ffi.edgar.client import EdgarClient, EdgarError
@@ -137,16 +137,23 @@ OFFICER_RE = re.compile(
 )
 
 
+ITEM_502_TITLE_RE = re.compile(r"(?i)departure of directors or (?:certain|principal) officers;?(?:\s*election of directors;?)?"
+                               r"(?:\s*appointment of (?:certain|principal) officers;?)?(?:\s*compensatory arrangements of certain officers\.?)?")
+
+
 def _officer_change_kind(raw_html: str) -> str:
     """Describe which senior officer an Item 5.02 8-K changes (compensation-only 5.02s mention none)."""
     from ffi.text.document import html_to_lines
 
     text = " ".join(line for line, _ in html_to_lines(raw_html))[:20000]
+    text = ITEM_502_TITLE_RE.sub(" ", text)  # the item's own title says "Appointment of Certain Officers" in every 5.02
     roles = set()
     for m in OFFICER_RE.finditer(text):
         role = (m.group(1) or m.group(4) or "").lower()
-        if "financial" in role or "accounting" in role:
-            roles.add("CFO/CAO change")
+        if "financial" in role:
+            roles.add("CFO change")
+        elif "accounting" in role:
+            roles.add("CAO change")
         elif "executive" in role:
             roles.add("CEO change")
     return (" - " + ", ".join(sorted(roles))) if roles else " - no senior finance/CEO departure or appointment language"
@@ -231,7 +238,10 @@ def load_releases(client: EdgarClient, cik: int, filings, focus: pd.Timestamp, a
     from ffi.concurrency import map_concurrent
 
     lo, hi = (focus - pd.Timedelta(days=430)).date(), min(as_of, (focus + pd.Timedelta(days=RELEASE_DAYS_AFTER)).date())
-    cands = [f for f in filings if f.form == "8-K" and "2.02" in (f.items or "").split(",") and lo <= f.filing_date <= hi][-n:]
+    # a release filed within the window can still announce the next year's first quarter (American Express files it
+    # about 107 days after its year end); it is later-period information and is never read
+    cands = [f for f in filings if f.form == "8-K" and "2.02" in (f.items or "").split(",") and lo <= f.filing_date <= hi
+             and announced_quarter(focus, pd.Timestamp(f.report_date or f.filing_date)) <= focus + pd.Timedelta(days=8)][-n:]
 
     def load(f):
         if cache is not None and f.accession in cache:
@@ -247,6 +257,17 @@ def load_releases(client: EdgarClient, cik: int, filings, focus: pd.Timestamp, a
         return doc
 
     return [d for d in map_concurrent(load, cands, workers=4) if d is not None and not isinstance(d, Exception)]
+
+
+def point_in_time(focus: pd.Timestamp, filings, as_of: date) -> date:
+    """The last day a fiscal year's analysis may read: the end of its filing season (RELEASE_DAYS_AFTER days after the
+    year end, or the day its annual report was filed if that is later), never after --as-of. A past year (--period, or
+    the earlier years of a multi-year review) is analysed with what was public then: no later restatement, annual or
+    quarterly report, earnings release or 8-K event reaches its figures, tests or investigation."""
+    season = (focus + pd.Timedelta(days=RELEASE_DAYS_AFTER)).date()
+    filed = [f.filing_date for f in filings if f.form in ANNUAL_TEXT_FORMS and f.report_date
+             and abs((pd.Timestamp(f.report_date) - focus).days) <= 15]
+    return min(as_of, max([season, *([min(filed)] if filed else [])]))
 
 
 def pick_focus(store: FactStore, period: str | None) -> pd.Timestamp:
@@ -275,7 +296,6 @@ class Prepared:
     as_of: date
     llm: Any
     notes: list[str]
-    panels: tuple[Any, Any, Any]  # annual as first reported, annual latest, quarterly (built once, sliced per year)
     # shared by the years of a multi-year review: parsed filings by accession, peers' annual panels by CIK
     doc_cache: dict[str, TextDoc] = field(default_factory=dict)
     release_cache: dict[str, TextDoc] = field(default_factory=dict)
@@ -305,7 +325,6 @@ def prepare(opts: RunOptions, choose=None, step: Step | None = None) -> Prepared
         store = FactStore(company.cik, cf.raw, as_of)  # holds only filings public by as_of
         CURRENCY.set(store.currency)  # money in narratives and the report is shown in the reporting currency
         profile = for_company(company.sic, company.annual_form, store.currency, store.taxonomy)
-        panels = (store.annual("first"), store.annual("latest"), store.quarterly("first"))
     llm = None
     notes: list[str] = []
     if opts.mode != "deterministic":
@@ -316,14 +335,18 @@ def prepare(opts: RunOptions, choose=None, step: Step | None = None) -> Prepared
         else:
             notes.append("No LLM available (no ANTHROPIC_API_KEY and no logged-in Claude Code CLI): ran in deterministic mode "
                          "(LLM detectors and the investigation agent skipped).")
-    return Prepared(client, company, filings, cf, store, profile, get_tuning(), as_of, llm, notes, panels)
+    return Prepared(client, company, filings, cf, store, profile, get_tuning(), as_of, llm, notes)
 
 
 def analyse_year(prep: Prepared, opts: RunOptions, focus: pd.Timestamp, run_dir: Path, step: Step,
                  kg_file: str = "kg.duckdb") -> YearAnalysis:
     """Peers, filing text, knowledge graph, detectors and scoring for one fiscal year."""
     client, company, filings, store, as_of, tuning = prep.client, prep.company, prep.filings, prep.store, prep.as_of, prep.tuning
-    A0, AL0, Q = prep.panels
+    cutoff = point_in_time(focus, filings, as_of)
+    with step("Normalizing XBRL facts"):
+        if cutoff < as_of:  # only what was public by the end of the year's filing season
+            store = store.restricted(cutoff)
+        A0, AL0, Q = store.annual("first"), store.annual("latest"), store.quarterly("first")  # memoized per store
     keep = [p for p in A0.values.index if p <= focus][-(opts.years + 3):]
     A = dataclasses.replace(A0, values=A0.values.loc[keep])
     A_latest = dataclasses.replace(AL0, values=AL0.values.loc[[p for p in AL0.values.index if p in keep]])
@@ -331,9 +354,9 @@ def analyse_year(prep: Prepared, opts: RunOptions, focus: pd.Timestamp, run_dir:
     # background while the cross-section and peers are built (all traffic shares one SEC rate limiter).
     background = ThreadPoolExecutor(max_workers=3, thread_name_prefix="ffi-prefetch")
     bg = lambda fn, *a: background.submit(contextvars.copy_context().run, fn, *a)  # noqa: E731
-    events_fut = bg(load_events, client, company.cik, filings, as_of, focus)
-    docs_fut = bg(load_docs, client, company.cik, filings, list(A.values.index), focus, as_of, 3, prep.doc_cache)
-    releases_fut = bg(load_releases, client, company.cik, filings, focus, as_of, 6, prep.release_cache)
+    events_fut = bg(load_events, client, company.cik, filings, cutoff, focus)
+    docs_fut = bg(load_docs, client, company.cik, filings, list(A.values.index), focus, cutoff, 3, prep.doc_cache)
+    releases_fut = bg(load_releases, client, company.cik, filings, focus, cutoff, 6, prep.release_cache)
 
     peers: PeerSet | None = None
     xsec = pd.DataFrame()
@@ -374,9 +397,9 @@ def analyse_year(prep: Prepared, opts: RunOptions, focus: pd.Timestamp, run_dir:
         if p in keep:
             notes.append(f"XBRL data quality: {item.replace('_', ' ').lower()} for {A.label(p)} is tagged in "
                          f"{'millions' if factor == 1e6 else 'thousands'}; rescaled using net income / EPS.")
-    kg = DuckNXGraphStore(run_dir / kg_file, as_of=as_of)
+    kg = DuckNXGraphStore(run_dir / kg_file, as_of=cutoff)
     llm = prep.llm
-    ctx = RunContext(company=company, store=store, A=A, A_latest=A_latest, Q=Q, filings=filings, focus=focus, as_of=as_of,
+    ctx = RunContext(company=company, store=store, A=A, A_latest=A_latest, Q=Q, filings=filings, focus=focus, as_of=as_of, cutoff=cutoff,
                      kg=kg, peers=peers, xsec=xsec, industry_ciks=industry, industry_digits=digits, docs=docs, releases=releases,
                      events=events, auditor=auditor, llm=llm, mode=opts.mode if llm else "deterministic", tuning=tuning,
                      notes=notes, client=client, profile=prep.profile, currency=store.currency, annual_form=company.annual_form)

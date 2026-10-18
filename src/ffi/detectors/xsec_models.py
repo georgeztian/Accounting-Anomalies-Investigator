@@ -68,7 +68,9 @@ def _kothari_xy(r: pd.DataFrame | dict) -> tuple[np.ndarray, np.ndarray]:
     A = np.asarray(r["TOTAL_ASSETS_1"], dtype=float)
     tacc = (np.asarray(r["NET_INCOME"], float) - np.asarray(r["CFO"], float)) / A
     drev = (np.asarray(r["REVENUE"], float) - np.asarray(r["REVENUE_1"], float)) / A
-    drec = (np.nan_to_num(np.asarray(r["AR"], float)) - np.nan_to_num(np.asarray(r["AR_1"], float))) / A
+    ar, ar1 = np.asarray(r["AR"], float), np.asarray(r["AR_1"], float)
+    # a change in receivables needs both years: one year missing is an unknown change (zero), not the whole balance
+    drec = np.where(np.isfinite(ar) & np.isfinite(ar1), ar - ar1, 0.0) / A
     ppe = np.nan_to_num(np.asarray(r["PPE_NET"], float)) / A
     roa = np.asarray(r["NET_INCOME"], float) / A
     X = np.column_stack([np.atleast_1d(1 / A), np.atleast_1d(drev - drec), np.atleast_1d(ppe), np.atleast_1d(roa)])
@@ -133,9 +135,11 @@ def roychowdhury(ctx) -> dict[str, XsecResult] | None:
         t["CFO"] / tA, np.array([1 / tA, tS / tA, (tS - tS1) / tA]))
     # abnormal production: (COGS + dINV)/A = a + b1(1/A) + b2(S/A) + b3(dS/A) + b4(dS_{t-1}/A)
     if "COGS" in rows and "INVENTORY" in rows:
-        prod = rows["COGS"].to_numpy(float) + (rows["INVENTORY"].fillna(0) - rows["INVENTORY_1"].fillna(0)).to_numpy(float)
+        inv, inv1 = rows["INVENTORY"].to_numpy(float), rows["INVENTORY_1"].to_numpy(float)
+        prod = rows["COGS"].to_numpy(float) + np.where(np.isfinite(inv) & np.isfinite(inv1), inv - inv1, 0.0)
         dS1 = S1 - rows["REVENUE_2"].to_numpy(float)
-        tprod = t["COGS"] + (np.nan_to_num(t["INVENTORY"]) - np.nan_to_num(t["INVENTORY_1"]))
+        tdinv = t["INVENTORY"] - t["INVENTORY_1"]
+        tprod = t["COGS"] + (tdinv if np.isfinite(tdinv) else 0.0)
         fit("PROD", prod / A, np.column_stack([1 / A, S / A, dS / A, dS1 / A]),
             tprod / tA, np.array([1 / tA, tS / tA, (tS - tS1) / tA, (tS1 - tS2) / tA]))
     # abnormal discretionary expenses: SGA/A = a + b1(1/A) + b2(S_{t-1}/A)

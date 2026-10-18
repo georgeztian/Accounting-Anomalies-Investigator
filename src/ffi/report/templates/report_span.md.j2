@@ -131,7 +131,7 @@ The text review did not flag disclosure changes in any year.
 - **Company type:** {{ m.profile.label }}. {{ m.profile.description }}{% for n in m.profile.notes %} {{ n }}{% endfor %}
 - **What was analysed:** {{ m.analysis_type }}. The figures come from the company's filings with the US Securities and Exchange Commission (SEC).
 - **Years:** each of the {{ m.years }} fiscal years was analysed on its own, with its own comparison group and the history available up to that year; findings were then matched across years. Each anomaly's estimated effect, investigation and re-check use the most recent year in which it was flagged.
-- **Point in time:** only filings public on or before {{ m.as_of }} were used, and each year's figures are taken as first reported, before any later corrections.
+- **Point in time:** each year was analysed with the filings public by the end of its own filing season ({{ m.as_of }} for the last year) (SEC comment letters about each year's annual report, which come later, are the one exception), and each year's figures are taken as first reported, before any later corrections.
 - **Comparison group (latest year):** {{ m.peer_method }} Companies: {% if m.peers %}{{ m.peers|map(attribute='name')|join(', ') }}{% else %}none{% endif %}.
 - **Legitimate causes checked:** {% if m.explain_conditions %}{{ m.explain_conditions|join('; ') }}{% else %}no acquisition, change in accounting standards or stock split was found in any year reviewed.{% endif %}
 - **Data notes:**

@@ -1,8 +1,10 @@
 """Command-line interface.
 
     anomaly-report "Apple Inc. (AAPL)" [options]   run the analysis and write a report
+    anomaly-report render [run]                    rebuild a saved run's report (no downloads, tests or AI calls)
+    anomaly-report batch companies.txt             many companies, one ranked summary
     anomaly-report detectors                       list the detector catalogue
-    anomaly-report train ...                       offline model training / backtest
+    anomaly-report labels / train ...              starter labels, offline model training / backtest
     anomaly-report cache-info                      show cache location and size
 """
 
