@@ -95,9 +95,16 @@ These are not warning signs in themselves, but pressure (financial strain, leade
 {% endfor %}{% else %}
 No accounting anomaly met the reporting threshold.
 {% endfor %}
+## Results set aside as probable test errors
+
+{{ m.set_aside_note }}
+
+{% for s in m.set_aside %}- **{{ s.title }}**{% if s.years %} ({{ s.years }}){% endif %} — based on: {{ s.tests|join('; ') }}. Why it was set aside: {{ s.reason }}
+{% else %}- {{ m.none_text }}
+{% endfor %}
 ## All tests performed
 
-{{ m.statuses.ok }} tests ran; {{ m.statuses.skipped }} could not run because data was missing; {{ m.statuses['n/a'] }} do not apply to this type of company; {{ m.statuses.error }} failed. Severity runs from 0 (nothing unusual) to 1 (strongest); a result is flagged at {{ "%.1f"|format(m.flag_at) }}. "Explained" means the result was unusual but a known legitimate cause was found.
+{{ m.statuses.ok }} tests ran; {{ m.statuses.skipped }} could not run because data was missing; {{ m.statuses['n/a'] }} do not apply to this type of company; {{ m.statuses.error }} failed. Severity runs from 0 (nothing unusual) to 1 (strongest); a result is flagged at {{ "%.1f"|format(m.flag_at) }}. "Explained" means the result was unusual but a known legitimate cause was found. "Held back" means the result or one of its inputs was physically impossible (for example a part larger than its whole), so it was not counted.
 {% for fam in m.families %}
 ### {{ fam.name }} ({{ fam.flagged }} flagged of {{ fam.ran }} that ran)
 

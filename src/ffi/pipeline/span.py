@@ -110,10 +110,12 @@ def run_span(opts: RunOptions, span: int, choose=None, progress: Callable[[str],
     agent_cases: list[Any] = []
     if prep.llm is not None and reported:
         with step("Investigating top anomalies (agent)"):
-            from ffi.agent.runner import investigate_cases
+            from ffi.agent.runner import investigate_with_backfill
 
-            targets = reported[: opts.max_cases]
-            agent_cases = investigate_cases([(context_of(f), f) for f in targets], run_dir, run_id, agent_ui)
+            # anomalies shown in the report are investigated in order; each one set aside as a test error is replaced by the next
+            agent_cases = investigate_with_backfill([(context_of(f), f) for f in result.findings[: REPORTED + opts.max_cases]],
+                                                    opts.max_cases, run_dir, run_id, agent_ui)
+        span_scoring.apply_set_aside(result, years)
 
     with step("Independent audit of findings"):
         def audit_one(f) -> None:

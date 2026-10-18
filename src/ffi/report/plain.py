@@ -79,7 +79,7 @@ FAMILY_NAMES = {"A": "Accounting integrity checks", "B": "Forensic scoring model
 AREA_NAMES = {"m&a": "acquisitions", "non_gaap": "adjusted (non-GAAP) measures", "related_party": "related parties",
               "earnings_quality": "earnings quality", "cash_flow": "cash flow", "integrity": "reporting integrity"}
 
-STATUS_LABELS = {"flagged": "Flagged", "normal": "Normal", "suppressed": "Explained", "skipped": "Not run",
+STATUS_LABELS = {"flagged": "Flagged", "normal": "Normal", "suppressed": "Explained", "held": "Held back", "skipped": "Not run",
                  "n/a": "Not applicable", "error": "Error", "ok": "Normal"}
 
 AUDIT_CHECKS = {"evidence_present": "Supporting evidence present", "fact_values": "Figures match the filings",

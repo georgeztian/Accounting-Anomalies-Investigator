@@ -32,3 +32,27 @@ NET_INCOME = 4_141e6
 [PGR.FY2025]  # 2025 Form 10-K: parent-only statements and balance sheet
 NET_INCOME = 11_308e6
 DIVIDENDS_PAYABLE = 7_972e6   # declared in December 2025, paid in January 2026
+
+[BLK.FY2025]  # 2025 Form 10-K, consolidated statement of financial condition (temporary equity 5,427 = 2,636 + 2,791 sits between liabilities and equity)
+TOTAL_ASSETS = 169_998e6
+TOTAL_LIABILITIES = 108_456e6
+EQUITY_INCL_NCI = 56_115e6
+
+[HD.FY2026]  # 2025 Form 10-K (fiscal year ended 2026-02-01, Home Depot's fiscal 2025): consolidated statements
+REVENUE = 164_683e6
+CURRENT_ASSETS = 34_391e6
+
+[TGT.FY2026]  # 2025 Form 10-K (fiscal year ended 2026-01-31): balance sheet; cash and equivalents include short-term investments
+CASH = 5_488e6
+INVENTORY = 12_304e6
+CURRENT_ASSETS = 20_005e6
+
+[MSFT.FY2026]  # fiscal 2026 Form 10-K: income statement (sales and marketing is its own line, 26,710)
+SGA = 7_956e6         # general and administrative only
+RND = 35_562e6
+
+[ORCL.FY2026]  # fiscal 2026 Form 10-K: property and equipment note
+PPE_LAND = 1_329e6
+
+[INTC.FY2025]  # Q4 2025 earnings release (2026-01-22): full-year EPS attributable to Intel $(0.06), non-GAAP $0.42; Q4 $(0.12) and $0.15
+EPS_DILUTED = -0.06

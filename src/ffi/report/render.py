@@ -45,6 +45,7 @@ def _findings_json(out) -> dict:
         "risk_index": sc.risk_index,
         "band": sc.band,
         "findings": [_finding_json(f) for f in sc.findings],
+        "set_aside": [{**_finding_json(f), "reason": f.set_aside} for f in getattr(sc, "set_aside", [])],
         "signals": [s.to_dict() for r in out.results for s in r.signals],
         "detectors": [{"id": r.id, "name": r.name, "family": r.family, "status": r.status, "reason": r.reason,
                        **({"what": ex.what, "why": ex.why, "how_to_read": ex.read} if (ex := explain(r.id)) else {})}
@@ -75,6 +76,7 @@ def _span_json(out) -> dict:
         "yearly": span.yearly,
         "area_by_year": span.area_by_year,
         "findings": [_finding_json(f) for f in span.findings],
+        "set_aside": [{**_finding_json(f), "reason": f.set_aside} for f in getattr(span, "set_aside", [])],
         "years": [{"period": y.ctx.focus_label, "risk_index": y.score.risk_index, "band": y.score.band,
                    "signals": [s.to_dict() for r in y.results for s in r.signals],
                    "detectors": [{"id": r.id, "status": r.status, "reason": r.reason} for r in y.results]} for y in out.years],

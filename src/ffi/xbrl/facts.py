@@ -28,6 +28,13 @@ CURRENCY_ANCHORS = ("REVENUE", "NET_INCOME", "TOTAL_ASSETS", "EQUITY")
 
 
 FOREIGN_INTERIM_FORMS = ("6-K", "6-K/A")
+
+
+def fiscal_year_of(end: pd.Timestamp) -> int:
+    """The fiscal year a year-end date closes, named by the calendar year of the end date. A 52/53-week year that ends in the
+    first days of January (Johnson & Johnson: 2023-01-01; Kellogg: 2021-01-02) closes the year before: it is the company's
+    fiscal 2022, and calling it FY2023 gave two different years the same label."""
+    return end.year - 1 if end.month == 1 and end.day <= 7 else end.year
 # item attributes as lookup tables: Series.map(dict) is many times faster than a Python lambda per row
 KIND = {i: it.kind for i, it in BY_ID.items()}
 STATEMENT = {i: it.statement for i, it in BY_ID.items()}
@@ -272,7 +279,7 @@ class FactStore:
         return ends
 
     def fiscal_label(self, end: pd.Timestamp) -> str:
-        return f"FY{end.year}"
+        return f"FY{fiscal_year_of(end)}"
 
     def quarter_label(self, end: pd.Timestamp) -> str:
         fyes = list(self.fiscal_year_ends()) or [end]
@@ -281,7 +288,7 @@ class FactStore:
         fy_end = next(f for f in fyes if f >= end - DATE_TOL)
         months_before = round((fy_end - end).days / 30.44)
         q = 4 - int(np.clip(round(months_before / 3), 0, 3))
-        return f"FY{fy_end.year}Q{q}"
+        return f"FY{fiscal_year_of(fy_end)}Q{q}"
 
     # ------------------------------------------------------------------ selection (vectorized)
     def _record(self, row) -> FactRecord:

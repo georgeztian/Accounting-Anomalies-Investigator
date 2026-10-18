@@ -20,7 +20,14 @@ from ffi.detectors.base import Area, EvidenceRef, Scheme, SkipDetector, detector
 from ffi.detectors.helpers import finite, mk
 from ffi.detectors.scores import V
 from ffi.detectors.stats import fmt_num, fmt_pct, safe_div
-from ffi.detectors.textnum import QUARTER_WORDS, YEAR_WORDS, qualified, statement_period
+from ffi.detectors.textnum import (
+    QUARTER_WORDS,
+    YEAR_WORDS,
+    qualified,
+    sentence_end,
+    sentence_start,
+    statement_period,
+)
 from ffi.llm import LLMError
 from ffi.text.document import TextDoc
 from ffi.text.search import count, search
@@ -117,6 +124,9 @@ def _rate(doc: TextDoc, pattern: str, section: str) -> float:
     return safe_div(count(doc, pattern, (section,)), max(words, 1)) * 1000
 
 
+MIN_MDNA_WORDS = 500
+
+
 @detector("E.05", "MD&A tone shift", F, Area.DISCLOSURE, needs_text=True)
 def e05(ctx: RunContext):
     """Uncertainty, weak-modal and negative word rates in MD&A (per 1,000 words) vs last year (Loughran-McDonald style lists)."""
@@ -128,6 +138,8 @@ def e05(ctx: RunContext):
     if all(r0 == 0 for _, _, r0, _ in rows):
         raise SkipDetector("MD&A not found")
     w1, w0 = len(cur.section_text("item7").split()), len(prior.section_text("item7").split())
+    if min(w1, w0) < MIN_MDNA_WORDS:
+        raise SkipDetector(f"MD&A text too short to measure ({w1:,} and {w0:,} words): the section was probably not located")
     biggest = max(rows, key=lambda r: r[3] if finite(r[3]) else -1)
     sev = float(np.clip((biggest[3] - 0.30) / 0.70, 0, 1)) * 0.5 if finite(biggest[3]) else 0.0
     return [mk("E.05", ctx, raw_value=biggest[3], severity=sev, unit="relative change",
@@ -233,23 +245,60 @@ def e10(ctx: RunContext):
     letters = [f for f in ctx.filings if f.form in ("CORRESP", "UPLOAD") and lo <= f.filing_date <= hi]
     topics: dict[str, int] = {}
     ev = []
-    read = [x for x in letters if x.form == "CORRESP" and x.primary_document.lower().endswith((".htm", ".html", ".txt"))][-6:]
+    read = [x for x in letters if x.form == "CORRESP" and x.primary_document.lower().endswith((".htm", ".html", ".txt"))][-12:]
     texts = map_concurrent(lambda f: ctx.client.get_text(document_url(ctx.company.cik, f)), read, workers=4) if ctx.client else []
+    other_months: set[str] = set()  # months of letters about registration statements or proxy materials
+    periodic_months: set[str] = set()
     for f, txt in zip(read, texts, strict=False):
         if not isinstance(txt, str):
             continue  # one unreadable letter shouldn't fail the detector
+        kind = letter_subject(txt)
+        month = f.filing_date.isoformat()[:7]
+        if kind == "other":
+            other_months.add(month)
+            continue
+        if kind == "periodic":
+            periodic_months.add(month)
         for name, pat in COMMENT_TOPICS.items():
             if re.search(pat, txt, re.I):
                 topics[name] = topics.get(name, 0) + 1
         ev.append(EvidenceRef(node_id=f"filing:{f.accession}", kind="event", label=f"SEC correspondence {f.filing_date}",
                               accession=f.accession, doc_url=document_url(ctx.company.cik, f), filed=str(f.filing_date), role="supporting"))
-    n_threads = len({f.filing_date.isoformat()[:7] for f in letters if f.form == "UPLOAD"})
+    # staff letters (PDF, not read) in a month whose correspondence concerns a registration statement or a proxy statement
+    # (Boeing 2024: the Spirit AeroSystems S-4; Disney 2024: the proxy contest) are not about the annual report
+    months = {f.filing_date.isoformat()[:7] for f in letters if f.form == "UPLOAD"}
+    near_other = {m for m in months if any(_month_gap(m, o) <= 1 for o in other_months) and not any(_month_gap(m, p) <= 1 for p in periodic_months)}
+    n_threads = len(months - near_other)
     sev = float(np.clip((n_threads - 1) / 4, 0, 1)) * 0.5 + (0.15 if "revenue recognition" in topics else 0)
     return [mk("E.10", ctx, raw_value=len(letters), severity=sev, unit="letters", tags=["pressure"],
                rationale=(f"{len(letters)} SEC comment-letter filings in the three years to the end of {ctx.focus_label} and the year after it, "
-                          f"when its annual report is reviewed ({n_threads} month(s) with staff letters)"
+                          f"when its annual report is reviewed ({n_threads} month(s) with staff letters"
+                          + (f"; {len(near_other)} more concern registration or proxy statements" if near_other else "") + ")"
                           + (f"; topics in company responses: {', '.join(f'{k} ({v})' for k, v in topics.items())}." if topics else ".")),
                evidence=ev[:3])]
+
+
+PERIODIC_FORM_RE = re.compile(r"(?i)\bForm\s+(?:10-K|10-Q|20-F|40-F|8-K)\b")
+OTHER_FORM_RE = re.compile(r"(?i)\b(?:Registration Statement|Form\s+(?:S-[1-8]|F-[1-4]|10-12[GB]|8-A|424B\d)|Schedule\s+(?:14[AC]|13[ED]\S*)|"
+                           r"(?:Preliminary|Definitive|Revised)\s+(?:Additional\s+)?(?:Proxy|Information)\s+Statement|Proxy Statement)\b")
+
+
+def letter_subject(raw: str) -> str | None:
+    """"periodic" when a company's reply to the SEC staff is about a Form 10-K, 10-Q, 20-F, 40-F or 8-K, "other" when it is about
+    a registration statement or a proxy or information statement, else None. Only the heading of the letter is read, where the
+    staff's "Re:" line is quoted."""
+    from ffi.text.document import html_to_lines
+
+    head = " ".join(line for line, _ in html_to_lines(raw))[:2500]
+    periodic, other = PERIODIC_FORM_RE.search(head), OTHER_FORM_RE.search(head)
+    if periodic and (not other or periodic.start() < other.start()):
+        return "periodic"
+    return "other" if other else None
+
+
+def _month_gap(a: str, b: str) -> int:
+    (ya, ma), (yb, mb) = (int(a[:4]), int(a[5:7])), (int(b[:4]), int(b[5:7]))
+    return abs((ya * 12 + ma) - (yb * 12 + mb))
 
 
 @detector("E.11", "Earnings-call evasiveness", F, Area.DISCLOSURE)
@@ -351,7 +400,20 @@ GAAP_EPS_RE = re.compile(r"(?<!non-)gaap\s+(?:diluted\s+)?(?:eps|earnings per (?
 
 EPS_LABEL_RE = re.compile(r"(?i)\beps\b|earnings per (?:common |diluted |basic )?share")
 ADJUSTED_RE = re.compile(r"(?i)non-gaap|adjusted|excluding|operating earnings|\bcore\b")
-MONEY2_RE = re.compile(r"\(?\$\s?(\d+\.\d{2})\)?")
+MONEY2_RE = re.compile(r"(\()?\$\s?(\()?(\d+\.\d{2})")
+
+
+def _money_values(s: str) -> list[float]:
+    """The per-share amounts in a string, in column order; "$(0.12)", "$ (0.12)" and "($0.12)" are losses. A loss that
+    is skipped would shift every later column."""
+    return [-float(m.group(3)) if m.group(1) or m.group(2) else float(m.group(3)) for m in MONEY2_RE.finditer(s)]
+
+
+def _is_prose(segment: str) -> bool:
+    """A row whose cells hold words is a sentence ("Fourth-quarter EPS was $(0.12); non-GAAP EPS was $0.15."), not a
+    table row: its amounts sit in different bases and periods and cannot be read as columns."""
+    parts = re.split(r"\$|\|", segment, maxsplit=1)
+    return len(re.findall(r"[A-Za-z]", parts[1] if len(parts) > 1 else "")) > 8
 
 
 @dataclass
@@ -374,10 +436,10 @@ def _eps_rows(text: str) -> list[tuple[str, list[float], int, int]]:
         label = re.split(r"\$|\|", line, maxsplit=1)[0]
         if len(label) > 160 or not EPS_LABEL_RE.search(label) or GUIDANCE_RE.search(label):
             continue
-        vals = [float(x) for x in MONEY2_RE.findall(line[len(label):])]
+        vals = _money_values(line[len(label):])
         j = i + 1
         while j < len(lines) and j <= i + 12 and not re.search(r"[A-Za-z]", lines[j]):
-            vals += [float(x) for x in MONEY2_RE.findall(lines[j])]
+            vals += _money_values(lines[j])
             j += 1
         if vals:
             rows.append((label.strip(), vals, offsets[i], offsets[j - 1] + len(lines[j - 1])))
@@ -421,6 +483,8 @@ def _row_figures(label: str, vals: list[float], start: int, end: int, q4: bool, 
     if YTD_RE.search(label):
         return []
     if header == {"FY"}:
+        if len(vals) >= 4:
+            return []  # four columns under a year header that was found alone: quarter, prior quarter, year, prior year (J&J 2025)
         return [EpsFigure(vals[0], "FY", start, end)]
     if header == {"Q"}:
         return [EpsFigure(vals[0], "Q", start, end)]
@@ -436,6 +500,40 @@ TABLE_BASIS_RE = re.compile(r"(?im)^[ \t|]*(non-gaap|gaap)(?:\s+(?:results|measu
 MIXED_BASIS_RE = re.compile(r"(?i)(?<!non-)\bgaap\b.*\bnon-gaap\b|\bnon-gaap\b.*(?<!non-)\bgaap\b")
 
 
+IMPACT_RE = re.compile(r"(?i)\bimpact(?:s|ed)?\b")  # "gains impacted GAAP diluted EPS by $0.81" states an effect, not the EPS
+LABEL_TAIL_RE = re.compile(r"(?i)\b(?:by|was|were|of|to|impacted)$")  # a sentence cut at its first amount, not a row label
+RANGE_RE = re.compile(r"(?i)\bat least\b|\bapproximately\b|~\s?\$|\$\s?[\d.,]+\s+(?:-|to)\s+\$")  # an amount the company expects
+PERIOD_HEAD_RE = re.compile(r"(?im)^[ \t|]*(?:three|six|nine|twelve) months ended\s+([A-Z][a-z]+ \d{1,2}), (\d{4})|"
+                            r"^[ \t|]*(?:fiscal )?year ended\s+([A-Z][a-z]+ \d{1,2}), (\d{4})")
+
+
+def _prior_period_table(text: str, start: int, q_end: pd.Timestamp) -> bool:
+    """True when the nearest period heading above the row names a period that ended more than two months before the quarter
+    the release announces: the release repeats the prior-year reconciliation (Walmart: "Three Months Ended April 30, 2024"
+    in the release for the quarter ended April 30, 2025), and its figures are last year's."""
+    heads = list(PERIOD_HEAD_RE.finditer(text, max(0, start - 1500), start))
+    if not heads:
+        return False
+    m = heads[-1]
+    day, year = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
+    try:
+        ended = pd.Timestamp(f"{day}, {year}")
+    except ValueError:
+        return False
+    return bool((q_end - ended).days > 60)
+
+
+GUIDANCE_HEAD_RE = re.compile(r"(?im)^[ \t|]*[\w ,&-]{0,40}\b(?:outlook|guidance)\b[^\n]{0,60}$")
+
+
+def _in_guidance_table(text: str, start: int) -> bool:
+    """True when the row sits under an "Outlook" or "Guidance" heading with no results-table header in between: the amounts
+    are ranges the company expects (UnitedHealth 2025: net earnings per share $14.65 to $16.00), not reported figures."""
+    window = text[max(0, start - 600): start]
+    heads = list(GUIDANCE_HEAD_RE.finditer(window))
+    return bool(heads) and not HEADER_RE.search(window, heads[-1].end())
+
+
 def _table_basis(text: str, start: int) -> str | None:
     """"adjusted" or "gaap" when the row sits under a table titled by its basis (NVIDIA: a "GAAP" table, then a
     "Non-GAAP" table with the same row labels), else None."""
@@ -449,12 +547,14 @@ def release_eps(ctx: RunContext, rel) -> tuple[list[EpsFigure], list[EpsFigure]]
     """(adjusted, GAAP) diluted EPS figures stated in a release, each tagged with its period. A row's basis comes from
     its label, else from the title of its table; a row stating both bases ("GAAP and non-GAAP EPS were $0.76 and
     $0.81") is skipped, since which value is which cannot be read from the row alone."""
-    q4 = abs((reported_quarter(ctx, pd.Timestamp(rel.period_end)) - ctx.focus).days) <= 8
+    q_end = reported_quarter(ctx, pd.Timestamp(rel.period_end))
+    q4 = abs((q_end - ctx.focus).days) <= 8
     adjusted, gaap = [], []
     for label, vals, s, e in _eps_rows(rel.text):
         if re.search(r"(?i)\bbasic\b", label) and not re.search(r"(?i)diluted", label):
             continue
-        if MIXED_BASIS_RE.search(label):
+        if (MIXED_BASIS_RE.search(label) or _is_prose(rel.text[s:e]) or len(label.split()) > 12 or _in_guidance_table(rel.text, s)
+                or LABEL_TAIL_RE.search(label.strip()) or RANGE_RE.search(rel.text[s:e]) or _prior_period_table(rel.text, s, q_end)):
             continue
         figs = _row_figures(label, vals, s, e, q4, _header_kinds(rel.text, s))
         is_adjusted = bool(ADJUSTED_RE.search(label)) or _table_basis(rel.text, s) == "adjusted"
@@ -462,9 +562,8 @@ def release_eps(ctx: RunContext, rel) -> tuple[list[EpsFigure], list[EpsFigure]]
     if not adjusted:  # prose: "adjusted EPS of $3.04 for the fourth quarter"
         for pattern, out in ((NG_EPS_RE, adjusted), (GAAP_EPS_RE, gaap)):
             for m in pattern.finditer(rel.text):
-                lo = max(0, rel.text.rfind(".", 0, m.start()) + 1)
-                sentence = rel.text[lo: m.end() + 80]
-                if GUIDANCE_RE.search(sentence) or YTD_RE.search(sentence):
+                sentence = rel.text[sentence_start(rel.text, m.start()): max(m.end(), sentence_end(rel.text, m.end(), 80))]
+                if GUIDANCE_RE.search(sentence) or YTD_RE.search(sentence) or IMPACT_RE.search(sentence):
                     continue
                 period = statement_period(sentence) or (None if q4 else "Q")  # unstated: only a quarter is possible
                 if period:
@@ -527,26 +626,51 @@ NG_CATEGORIES = {
 }
 
 
+def adjustment_rows(text: str) -> list[tuple[str, int, int]]:
+    """Table rows of a release: (label, start, end) for each line that has a label and figures, the figures on the same
+    line or on the following lines that hold only numbers. A category word inside a sentence (forward-looking-statement
+    boilerplate, a risk list, a narrative paragraph) is not a reconciliation line item and is never counted."""
+    lines, rows, pos, offsets = text.split("\n"), [], 0, []
+    for line in lines:
+        offsets.append(pos)
+        pos += len(line) + 1
+    for i, line in enumerate(lines):
+        label = re.split(r"\$|\|", line, maxsplit=1)[0].strip()
+        if not re.search(r"[A-Za-z]", label) or len(label) > 200:
+            continue
+        figures = bool(re.search(r"\d", line[len(label):]))
+        j = i + 1
+        while not figures and j < len(lines) and j <= i + 4 and not re.search(r"[A-Za-z]", lines[j]):
+            figures = bool(re.search(r"\d", lines[j]))
+            j += 1
+        if figures and not re.search(r"[.;:]\s+[A-Z]", label):  # a sentence with figures in it is prose, not a row
+            rows.append((label, offsets[i], offsets[min(j, len(lines)) - 1] + len(lines[min(j, len(lines)) - 1])))
+    return rows
+
+
 @detector("C.NG.02", "Recurring 'one-time' adjustments", "C", Area.NON_GAAP)
 def cng02(ctx: RunContext):
-    """Adjustment categories that appear in most recent earnings releases' non-GAAP reconciliations."""
+    """Adjustment categories that appear as line items (table rows with figures) in most recent earnings releases'
+    non-GAAP reconciliations."""
     rels = releases_in_year(ctx)[-4:]
     if len(rels) < 3:
         raise SkipDetector("fewer than 3 earnings releases")
     rec_rels = [r for r in rels if re.search(r"non-gaap|reconciliation", r.text, re.I)]
     if not rec_rels:
         return [mk("C.NG.02", ctx, raw_value=0, severity=0.0, rationale="Releases do not present non-GAAP reconciliations.")]
-    recurring = [name for name, pat in NG_CATEGORIES.items() if sum(1 for r in rec_rels if re.search(pat, r.text, re.I)) >= max(3, len(rec_rels))]
+    rows = {r.accession: adjustment_rows(r.text) for r in rec_rels}
+    recurring = [name for name, pat in NG_CATEGORIES.items()
+                 if sum(1 for r in rec_rels if any(re.search(pat, lab, re.I) for lab, _, _ in rows[r.accession])) >= max(3, len(rec_rels))]
     flagged = [n for n in recurring if n in ("restructuring", "one-time / non-recurring", "litigation", "impairment")]
     sev = min(0.7, 0.3 * len(flagged))
     ev = []
     latest = rec_rels[-1]
     for name in flagged[:3]:
-        hit = search(latest, NG_CATEGORIES[name])
+        hit = next(((s, e) for lab, s, e in rows[latest.accession] if re.search(NG_CATEGORIES[name], lab, re.I)), None)
         if hit:
-            ev.append(ctx.ev_span(latest, hit[0].start, hit[0].end, f"{name} adjustment in the {latest.period_end} release"))
+            ev.append(ctx.ev_span(latest, hit[0], hit[1], f"{name} adjustment in the {latest.period_end} release"))
     return [mk("C.NG.02", ctx, raw_value=len(flagged), severity=sev, unit="categories", scheme=Scheme.MISLEADING_METRICS, evidence=ev,
-               rationale=(f"Adjustment categories in every one of the last {len(rec_rels)} releases: {', '.join(recurring) or 'none'}."
+               rationale=(f"Adjustment line items in every one of the last {len(rec_rels)} releases: {', '.join(recurring) or 'none'}."
                           + (" Items labelled unusual that recur every quarter are operating costs." if flagged else "")))]
 
 

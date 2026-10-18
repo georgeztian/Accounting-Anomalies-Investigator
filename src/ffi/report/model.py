@@ -195,6 +195,22 @@ def run_notes(ctx) -> list[str]:
     return [P.plain(n) for n in ctx.notes if not n.startswith(INTERNAL_NOTES)]
 
 
+SET_ASIDE_NOTE = ("These results were set aside: the AI investigation found that the test compared figures that are not like for "
+                  "like, and the independent re-check confirmed it. They are not counted in the anomaly list or the risk index, "
+                  "and are listed so you can see what was checked and why it was dropped.")
+
+
+def set_aside_blocks(findings) -> list[dict[str, Any]]:
+    """The results the investigation showed to be test errors: title, the tests behind them, and the reason."""
+    out = []
+    for f in findings:
+        reason, _ = lint(f.set_aside)
+        out.append({"title": P.title(f.title), "tests": [P.name(d) for d in f.detectors],
+                    "years": P.plain(", ".join(getattr(f, "years", []) or []), expand=False),
+                    "reason": P.plain(reason, terms=False)})
+    return out
+
+
 def flag_level(ctx) -> float:
     return float(ctx.tuning.get("scoring", {}).get("flag_severity", 0.5)) if ctx.tuning else 0.5
 
@@ -251,7 +267,7 @@ def test_families(results, flag_at: float) -> tuple[list[dict[str, Any]], dict[s
                 continue
             if r.signals:
                 for s in r.signals:
-                    status = "flagged" if s.flagged else "suppressed" if s.suppressed_by else "normal"
+                    status = "flagged" if s.flagged else "held" if "implausible" in s.tags else "suppressed" if s.suppressed_by else "normal"
                     rows.append({"id": r.id, "name": P.name(r.id), "status": status, "status_label": P.STATUS_LABELS[status],
                                  "severity": round(s.severity, 2), "value": s.raw_value, "unit": s.unit,
                                  "period": P.plain(s.period, expand=False),
@@ -321,6 +337,7 @@ def build_model(out) -> dict[str, Any]:
         "key_numbers": key_numbers,
         "areas": [{"area": P.area(k), "score": round(v, 2)} for k, v in area_rows],
         "findings": findings,
+        "set_aside": set_aside_blocks(getattr(sc, "set_aside", [])), "set_aside_note": SET_ASIDE_NOTE,
         "audit_summary": {
             "verified": sum(1 for f in sc.findings[:12] if f.audit and f.audit.status == "verified"),
             "corrected": sum(1 for f in sc.findings[:12] if f.audit and f.audit.status == "verified_after_corrections"),

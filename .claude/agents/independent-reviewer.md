@@ -60,7 +60,9 @@ to guess.
 
 ## Pass 3: results against independent sources
 
-1. Run `.venv/Scripts/python tools/review/sweep.py --out <temp>/sweep.md` (a varied panel, no AI: industrial, card
+1. Run `.venv/Scripts/python tools/review/sweep.py --wide --out <temp>/sweep_wide.md` first (42 companies; about an hour on a cold
+   cache, so run it in the background and in two halves with `--tickers` if needed), then the default 10-company panel for a
+   quick re-check after fixes. The default panel (no AI: industrial, card
    issuer, bank, insurer, REIT, 52/53-week retailer, January year end, a company without total pre-tax income, 20-F, 40-F).
    It reports errors, implausible results, tests that flag most of the panel, EPS in each company's own release tables
    against the filed EPS for the same period, and the hand-checked figures in `tools/review/known_values.toml`.

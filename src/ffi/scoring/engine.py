@@ -138,6 +138,7 @@ class Finding:
     ledger: list[dict] = field(default_factory=list)  # agent evidence ledger (tool results)
     audit: Any = None  # AuditResult from the independent auditor
     client: dict | None = None  # plain-language explanation for the report (report/explain.py)
+    set_aside: str = ""  # why the investigation judged this result a test error (confirmed by the auditor); "" when it stands
     years: list[str] = field(default_factory=list)  # multi-year report: fiscal years in which it was flagged
     timeline: list[dict] = field(default_factory=list)  # multi-year report: one row per year reviewed (scoring/span.py)
     agent_text: list[str] = field(default_factory=list)  # alternatives / questions the investigation wrote (audited like its narrative)
@@ -159,6 +160,7 @@ class ScoreResult:
     pressure: list[Signal]
     explain_conditions: dict[str, str]
     contributions: list[tuple[str, float]] = field(default_factory=list)
+    set_aside: list[Finding] = field(default_factory=list)  # results the investigation showed to be test errors
 
 
 def template_narrative(f) -> str:
@@ -208,6 +210,35 @@ def apply_audit(sc: ScoreResult) -> None:
     sc.band = band_of(sc.risk_index)
     sc.contributions = sorted(contrib.items(), key=lambda kv: -kv[1])
     sc.findings.sort(key=lambda x: -x.priority)
+
+
+def index_of(contributions) -> float:
+    """The risk index for a set of contributions (a dict, or the list of pairs a ScoreResult keeps)."""
+    total = sum(dict(contributions).values())
+    return round(100 * (1 - math.exp(-total / INDEX_K)), 1)
+
+
+def contribution_keys(f: Finding) -> list[str]:
+    """The contributions a finding put into the risk index: its pattern, or its test when it stood alone."""
+    return [f"pattern:{f.id}"] if f.kind == "pattern" else sorted({s.detector_id for s in f.signals})
+
+
+def apply_set_aside(sc: ScoreResult) -> list[Finding]:
+    """Findings the investigation showed to be test errors (confirmed by the independent auditor) leave the list and the
+    risk index; they are kept in `sc.set_aside` and shown in their own section of the report."""
+    aside = [f for f in sc.findings if f.set_aside]
+    if not aside:
+        return []
+    contrib = dict(sc.contributions)
+    for f in aside:
+        for key in contribution_keys(f):
+            contrib.pop(key, None)
+    sc.findings = [f for f in sc.findings if not f.set_aside]
+    sc.set_aside += aside
+    sc.contributions = sorted(contrib.items(), key=lambda kv: -kv[1])
+    sc.risk_index = index_of(contrib)
+    sc.band = band_of(sc.risk_index)
+    return aside
 
 
 def band_of(index: float) -> str:

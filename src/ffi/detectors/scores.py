@@ -83,6 +83,23 @@ class V:
         return float(sum(parts.values())) if parts else NAN
 
 
+def depreciable_ppe(v: V, backs: tuple[int, ...]) -> Callable[[int], float]:
+    """Gross PP&E that carries depreciation, one measure for every year in `backs`: gross PP&E less construction in progress
+    and land when those are tagged in all of the years and the tagged gross figure includes them (gross less accumulated
+    depreciation reaches net PP&E; a gross tag that is a subtotal leaving them out, as at Alphabet, is not reduced again),
+    else gross PP&E as tagged. Construction in progress is not depreciated until it is put to use, so a build-out (Oracle
+    2026: $40B of $123B) lengthens the implied life of the whole asset base and cuts the depreciation rate without any
+    change in policy."""
+    def includes(b: int) -> bool:
+        g, ad, net, cip = v.g("PPE_GROSS", b), v.g("ACCUM_DEP", b), v.g("PPE_NET", b), v.g("PPE_CIP", b)
+        return bool(np.isfinite(g) and np.isfinite(ad) and np.isfinite(net) and np.isfinite(cip) and g - ad >= 0.98 * net)
+
+    if backs and all(includes(b) for b in backs):
+        land = all(np.isfinite(v.g("PPE_LAND", b)) for b in backs)
+        return lambda b: v.g("PPE_GROSS", b) - v.g("PPE_CIP", b) - (v.g("PPE_LAND", b) if land else 0.0)
+    return lambda b: v.g("PPE_GROSS", b)
+
+
 def debt_parts(v: V, back: int = 0) -> dict[str, float]:
     """The borrowings that make up total debt, by canonical item, with overlapping tags left out (see V.debt)."""
     lt, cur, st = v.g("LONG_TERM_DEBT", back), v.g("CURRENT_DEBT", back), v.g("ST_BORROWINGS", back)
@@ -149,7 +166,10 @@ def beneish(P: Panel, p: pd.Timestamp) -> dict[str, float]:
     ta = v.g("TOTAL_ASSETS")
 
     def aq(b: int) -> float:
-        return 1 - safe_div(v.g("CURRENT_ASSETS", b) + v.g("PPE_NET", b) + v.z("ST_INVESTMENTS", b), v.g("TOTAL_ASSETS", b))
+        # Short-term investments are already part of current assets: adding them again double-counts and, for a company
+        # holding large marketable securities (Alphabet: the sum reaches 98% of assets), sends the ratio towards zero and
+        # the index to meaningless values (-2.1 and 4.0 instead of about 1.0).
+        return 1 - safe_div(v.g("CURRENT_ASSETS", b) + v.g("PPE_NET", b), v.g("TOTAL_ASSETS", b))
 
     _, dep = dep_measure(v, (0, 1))  # the same measure in both years
 
@@ -256,11 +276,12 @@ def sloan_accruals(P: Panel, p: pd.Timestamp) -> float:
     avg_noa = (noa(0) + noa(1)) / 2
     if not np.isfinite(avg_noa) or avg_noa <= 0:
         avg_noa = v.avg("TOTAL_ASSETS")
-    # investing in the business only: buying marketable securities with surplus cash is part of investing cash flow
-    # but not an accrual (those securities are excluded from net operating assets above), and counting it made
-    # cash-rich companies look as if most of their profit were unbacked by cash
+    # organic investment only: buying marketable securities with surplus cash is part of investing cash flow but not an
+    # accrual (those securities are excluded from net operating assets above), and counting it made cash-rich companies
+    # look as if most of their profit were unbacked by cash. Cash paid for acquired businesses is left out too: it
+    # buys assets, it is not an accounting estimate (Johnson & Johnson 2025: $17.5B of acquisitions took the ratio to 25%)
     capex = v.g("CAPEX")
-    invest = -(capex + v.z("ACQUISITIONS")) if np.isfinite(capex) else v.g("CFI")
+    invest = -capex if np.isfinite(capex) else v.g("CFI")
     return safe_div(v.g("NET_INCOME") - v.g("CFO") - invest, avg_noa)
 
 
@@ -272,7 +293,8 @@ def montier_c(P: Panel, p: pd.Timestamp) -> dict[str, float]:
     dsi1, dsi0 = safe_div(v.g("INVENTORY"), v.g("COGS")), safe_div(v.g("INVENTORY", 1), v.g("COGS", 1))
     oca1, oca0 = safe_div(v.g("OTHER_CURRENT_ASSETS"), v.g("REVENUE")), safe_div(v.g("OTHER_CURRENT_ASSETS", 1), v.g("REVENUE", 1))
     _, dep = dep_measure(v, (0, 1))
-    dr1, dr0 = safe_div(dep(0), v.g("PPE_GROSS")), safe_div(dep(1), v.g("PPE_GROSS", 1))
+    base = depreciable_ppe(v, (0, 1))
+    dr1, dr0 = safe_div(dep(0), base(0)), safe_div(dep(1), base(1))
     ag = safe_div(v.g("TOTAL_ASSETS"), v.g("TOTAL_ASSETS", 1)) - 1
     tests = {
         "ni_cfo_gap_widening": gap1 > gap0 if np.isfinite(gap1) and np.isfinite(gap0) else None,

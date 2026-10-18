@@ -38,6 +38,12 @@ class ClaimVerdict(BaseModel):
 class AuditVerdicts(BaseModel):
     verdicts: list[ClaimVerdict]
     accusatory_language: list[str]
+    test_error_check: Literal["supported", "unsupported", "not_claimed"] = Field(
+        default="not_claimed",
+        description="If the conclusions say test_assessment is likely_test_error: 'supported' only if the cited evidence "
+                    "shows both compared figures and that they differ in period, scope, concept, basis, unit or sign "
+                    "(so the test, not the company, produced the result); otherwise 'unsupported'. 'not_claimed' when "
+                    "test_assessment is real_anomaly_possible")
 
 
 def evidence_pack(finding, ledger: list[dict[str, Any]], facts: list[dict[str, Any]] | None = None,
@@ -82,7 +88,9 @@ def review(llm, draft: dict[str, Any], finding, ledger: list[dict[str, Any]], no
     """Return (verdict dicts, accusatory phrases, spend record). `node_call(schema, system, prompt)` enforces budgets."""
     pack, ids = evidence_pack(finding, ledger, facts, periods)
     conclusions = {"summary": draft.get("summary", ""), "explanation": draft.get("explanation", ""),
-                   "alternatives": draft.get("alternatives", []), "questions": draft.get("questions", [])}
+                   "alternatives": draft.get("alternatives", []), "questions": draft.get("questions", []),
+                   "test_assessment": draft.get("test_assessment", "real_anomaly_possible"),
+                   "test_assessment_reason": draft.get("test_assessment_reason", "")}
     prompt = (f"<conclusions>\n{json.dumps(conclusions, indent=1)}\n</conclusions>\n<evidence_pack>\n{pack}\n</evidence_pack>\n"
               "Review every factual claim in the conclusions.")
     res, spend = node_call(AuditVerdicts, AUDITOR_SYSTEM, prompt)
@@ -95,4 +103,7 @@ def review(llm, draft: dict[str, Any], finding, ledger: list[dict[str, Any]], no
             d["correction"] = d["correction"] or "Cite the evidence that establishes this claim or remove it."
         d["evidence_ids"] = cited
         verdicts.append(d)
-    return verdicts, list(res.accusatory_language), spend
+    # a test-error claim stands only when the auditor, working from the evidence pack alone, confirms it
+    if draft.get("test_assessment") != "likely_test_error":
+        res.test_error_check = "not_claimed"
+    return verdicts, list(res.accusatory_language), spend, res.test_error_check

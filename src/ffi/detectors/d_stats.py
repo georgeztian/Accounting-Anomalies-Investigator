@@ -67,6 +67,20 @@ def ratio_vector(P, p) -> dict[str, float]:
 
 
 # ---------------------------------------------------------------------------- D.01
+def implausible_fourth_quarters(ctx: RunContext) -> set:
+    """Quarters whose figures are the fiscal year less the first three quarters and whose revenue is not near the first three
+    quarters' level. When the annual report is recast (a spin-off, discontinued operations) and the quarterly reports are not,
+    the difference is no quarter at all (General Electric 2015 and 2016: a fourth quarter of 1/20th the revenue, DSO 951 days)."""
+    rev = ctx.Q.series("REVENUE")
+    bad = set()
+    for p in rev.index:
+        if ("REVENUE", p) in ctx.Q.derived and np.isfinite(rev[p]):
+            prev = rev[rev.index < p].tail(3)
+            if len(prev) == 3 and prev.mean() > 0 and not 0.4 * prev.mean() <= rev[p] <= 2.5 * prev.mean():
+                bad.add(p)
+    return bad
+
+
 @detector("D.01", "Seasonal time-series residuals & change points", F, Area.EARNINGS_QUALITY)
 def d01(ctx: RunContext):
     """STL residual of the latest quarter per key ratio, plus PELT change points in the last 4 quarters."""
@@ -80,8 +94,10 @@ def d01(ctx: RunContext):
         "DSI": (ctx.qhist("INVENTORY", 24), ctx.qhist("COGS", 24), lambda i, c: i / c * 91),
     }
     out_bits, worst, cps = [], 0.0, []
+    skip = implausible_fourth_quarters(ctx)
     for name, (a, b, f) in series.items():
-        s = f(a, b.reindex(a.index)).replace([np.inf, -np.inf], np.nan).dropna()
+        s = f(a, b.reindex(a.index)).replace([np.inf, -np.inf], np.nan)
+        s = s.mask(s.index.isin(skip)).interpolate(limit_direction="both").dropna() if s.index.isin(skip).any() else s.dropna()
         if len(s) < 12:
             continue
         with warnings.catch_warnings():
@@ -173,7 +189,7 @@ def d03(ctx: RunContext):
         for per in ([q for q in p.annual.values.index if q <= al][-6:] if al is not None else []):
             pool.append(ratio_vector(p.annual, per))
             labels.append(f"peer:{p.cik}")
-    for per in ctx.periods[-6:-1]:
+    for per in ctx.comparable_periods[-6:-1]:
         pool.append(ratio_vector(ctx.A, per))
         labels.append("self-history")
     pool.append(ratio_vector(ctx.A, ctx.focus))

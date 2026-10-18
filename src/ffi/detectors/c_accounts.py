@@ -18,7 +18,7 @@ import pandas as pd
 from ffi.context import RunContext
 from ffi.detectors.base import Area, ImpactEstimate, Scheme, SkipDetector, detector
 from ffi.detectors.helpers import finite, mk, need
-from ffi.detectors.scores import V, debt_parts, dep_measure, same_basis
+from ffi.detectors.scores import V, debt_parts, dep_measure, depreciable_ppe, same_basis
 from ffi.detectors.stats import (
     fmt_money,
     fmt_num,
@@ -30,6 +30,7 @@ from ffi.detectors.stats import (
     z_to_p,
 )
 from ffi.text.search import count, new_mentions, search
+from ffi.xbrl.canonical import basis
 
 F = "C"
 Ratio = Callable[[V], float]
@@ -62,12 +63,15 @@ def ratio_hist(ctx: RunContext, fn: Ratio, n: int = 5, basis_of: dict | None = N
     see scores.V), a year whose inputs were reported on a different basis (general and administrative expense where the
     focus year has selling, general and administrative expense) is left out rather than compared."""
     vals = []
-    for p in ctx.periods[:-1][-n:]:
+    for p in ctx.comparable_periods[:-1][-n:]:
         track: dict = {}
         v = fn(V(ctx.A, p, track))
         if finite(v) and (basis_of is None or same_basis(basis_of, track)):
             vals.append(v)
     return vals
+
+
+SAME_AS_BASELINE = 0.10  # a ratio this close (relative) to the median of its own history and of its peers is not unusual
 
 
 def assess(ctx: RunContext, fn: Ratio, higher_is_bad: bool = True, z_start: float = 1.5, z_full: float = 4.0,
@@ -76,7 +80,14 @@ def assess(ctx: RunContext, fn: Ratio, higher_is_bad: bool = True, z_start: floa
     cur = fn(V(ctx.A, ctx.focus, focus_basis))
     need(cur)
     hist = ratio_hist(ctx, fn, basis_of=focus_basis)
-    peers = ctx.peer_values(lambda P, p, k: fn(V(P, p))) if use_peers else []
+    def peer_fn(P, p, k):
+        # a peer whose inputs are reported on another basis (payables with accrued liabilities, G&A without selling costs,
+        # cost of services only) is not compared, as the company's own earlier years are not
+        track: dict = {}
+        v = fn(V(P, p, track))
+        return v if same_basis(focus_basis, track) else float("nan")
+
+    peers = ctx.peer_values(peer_fn) if use_peers else []
     sign = 1 if higher_is_bad else -1
     zs = sign * robust_z(cur, hist) if len(hist) >= 3 else float("nan")
     zp = sign * robust_z(cur, peers) if len(peers) >= 5 else float("nan")
@@ -93,6 +104,9 @@ def assess(ctx: RunContext, fn: Ratio, higher_is_bad: bool = True, z_start: floa
     baseline = (max(meds) if higher_is_bad else min(meds)) if meds else float("nan")
     if min_abs and meds and all(abs(cur - m) < min_abs for m in meds):
         sev = 0.0  # statistically unusual but too small to matter (e.g. DSO 4 -> 5 days)
+    if meds and all(m != 0 and abs(cur - m) <= SAME_AS_BASELINE * abs(m) for m in meds):
+        sev = 0.0  # within a tenth of every baseline: a tight history makes any wobble a large z, but nothing moved (Caterpillar
+        # contract assets 0.439% of revenue against a 0.445% peer median)
     pz = [z for z in (zs, zp) if np.isfinite(z)]
     return Assessment(
         cur, hist, peers, zs, zp,
@@ -180,8 +194,8 @@ def crev02(ctx: RunContext):
                             "deferred revenue / revenue at prior-year ratio x revenue") if ratio_now < ratio_prev else None
     return [mk("C.REV.02", ctx, raw_value=gap, expected=0.0, severity=sev, unit="growth gap", impact=impact,
                scheme=Scheme.PREMATURE_REVENUE, direction="income_increasing",
-               rationale=(f"Revenue grew {fmt_pct(rg)} while billings grew {fmt_pct(bg)}; deferred revenue fell from "
-                          f"{fmt_pct(ratio_prev)} to {fmt_pct(ratio_now)} of revenue."),
+               rationale=(f"Revenue grew {fmt_pct(rg)} while billings grew {fmt_pct(bg)}; deferred revenue "
+                          f"{'fell' if ratio_now < ratio_prev else 'rose'} from {fmt_pct(ratio_prev)} to {fmt_pct(ratio_now)} of revenue."),
                evidence=ctx.evs(["DEFERRED_REV_CURRENT", "DEFERRED_REV_NONCURRENT", "REVENUE"], ks=(0, 1)))]
 
 
@@ -189,7 +203,7 @@ def crev02(ctx: RunContext):
 def crev03(ctx: RunContext):
     """Contract assets relative to revenue vs own history and peers (percentage-of-completion aggressiveness)."""
     fn = lambda v: safe_div(v.g("CONTRACT_ASSETS"), v.g("REVENUE"))  # noqa: E731
-    a = assess(ctx, fn)
+    a = assess(ctx, fn, min_abs=0.005)  # half a point of revenue: 0.44% against 0.35% is a wobble, not percentage-of-completion
     rev = ctx.a("REVENUE")
     return [mk("C.REV.03", ctx, raw_value=a.cur, expected=a.baseline, severity=a.severity, unit="share of revenue",
                percentile_peer=a.pct_peer, p_value=a.p_value, scheme=Scheme.PREMATURE_REVENUE, direction="income_increasing",
@@ -384,10 +398,11 @@ def car01(ctx: RunContext):
 @detector("C.AR.02", "Allowance coverage decline", F, Area.RECEIVABLES)
 def car02(ctx: RunContext):
     """Allowance / gross AR falling while DSO rises; impact = coverage gap x gross AR."""
-    al, ar = ctx.a("ALLOWANCE"), ctx.a("AR")
+    # some filers tag the allowance as the negative amount it is deducted at (Boeing 2019: -73 on receivables of 3,266)
+    al, ar = abs(ctx.a("ALLOWANCE")), ctx.a("AR")
     need(al, ar, reason="allowance not tagged")
     cov = safe_div(al, ar + al)
-    hist = [safe_div(ctx.a("ALLOWANCE", k), ctx.a("AR", k) + ctx.a("ALLOWANCE", k)) for k in range(1, 5)]
+    hist = [safe_div(abs(ctx.a("ALLOWANCE", k)), ctx.a("AR", k) + abs(ctx.a("ALLOWANCE", k))) for k in range(1, 5)]
     hist = [h for h in hist if finite(h)]
     if not hist:
         raise SkipDetector("no allowance history")
@@ -602,15 +617,27 @@ def cexp02(ctx: RunContext):
                evidence=ctx.evs(["OTHER_CURRENT_ASSETS", "OTHER_NONCURRENT_ASSETS", "REVENUE"], ks=(0, 1)))]
 
 
+def _overhead(v: V, item: str, b: int = 0) -> float:
+    """SG&A or R&D of year `b`. Where selling and administrative costs are reported on separate lines (Microsoft, Salesforce) the
+    SG&A tag found is general and administrative alone, and SG&A is that plus selling and marketing; a year without the
+    selling line is NaN rather than a partial figure (Microsoft's G&A + R&D read 13% of revenue, the whole 25%)."""
+    x = v.g(item, b)
+    if item == "SGA" and finite(x) and basis("SGA", v.concept("SGA", b)):
+        sm = v.g("SELLING_MARKETING", b)
+        return x + sm if basis("SGA", v.concept("SGA", b)) == "general and administrative only" and finite(sm) else float("nan")
+    return x
+
+
 def _spend_items(ctx: RunContext) -> tuple[str, ...]:
     """The overhead lines (SG&A, R&D) the focus year reports; every year compared must report the same ones."""
-    return tuple(i for i in ("SGA", "RND") if finite(ctx.a(i))) or ("SGA",)
+    v = V(ctx.A, ctx.focus)
+    return tuple(i for i in ("SGA", "RND") if finite(_overhead(v, i))) or ("SGA",)
 
 
 def _spend(v: V, items: tuple[str, ...]) -> float:
     """SG&A plus R&D from exactly `items`: a year that does not report one of them is not comparable (NaN), so a line
     that is simply not tagged that year is never read as a cut in spending."""
-    return float(sum(v.g(i) for i in items))
+    return float(sum(_overhead(v, i) for i in items))
 
 
 @detector("C.EXP.03", "Useful-life extension", F, Area.DEPRECIATION)
@@ -621,8 +648,10 @@ def cexp03(ctx: RunContext):
     v = V(ctx.A, ctx.focus)
     years = tuple(k for k in range(4) if finite(v.g("PPE_GROSS", k)))
     basis, dep = dep_measure(v, years or (0,))
-    life = safe_div(v.g("PPE_GROSS"), dep(0))
-    lives = [safe_div(v.g("PPE_GROSS", k), dep(k)) for k in range(1, 4)]
+    base = depreciable_ppe(v, years or (0,))  # without construction in progress and land, when they are tagged
+    adjusted = finite(base(0)) and base(0) != v.g("PPE_GROSS")
+    life = safe_div(base(0), dep(0))
+    lives = [safe_div(base(k), dep(k)) for k in range(1, 4)]
     lives = [x for x in lives if finite(x) and x > 0]
     need(life, reason="gross PP&E or depreciation not reported")
     if not lives:
@@ -630,14 +659,15 @@ def cexp03(ctx: RunContext):
     prior = float(np.median(lives))
     chg = safe_div(life - prior, prior)
     sev = float(np.clip((chg - 0.10) / 0.30, 0, 1))
-    imp = safe_div(v.g("PPE_GROSS"), prior) - dep(0)
+    imp = safe_div(base(0), prior) - dep(0)
     return [mk("C.EXP.03", ctx, raw_value=life, expected=prior, severity=sev, unit="years",
                scheme=Scheme.SHIFT_EXPENSES_LATER, direction="income_increasing",
                impact=ImpactEstimate(imp * 0.5, imp, imp * 1.2, "policy_counterfactual",
                                      f"gross PP&E / prior implied life - reported {basis}") if imp > 0 and chg > 0.05 else None,
-               rationale=(f"Implied average useful life (gross PP&E / {basis}) {life:.1f} years vs {prior:.1f}, the median of the "
+               rationale=(f"Implied average useful life (gross PP&E{' excluding construction in progress and land' if adjusted else ''} / {basis}) "
+                          f"{life:.1f} years vs {prior:.1f}, the median of the "
                           f"prior {len(lives)} years ({fmt_pct(chg)}). Mix shifts toward long-lived assets are a legitimate cause."),
-               evidence=ctx.evs(["PPE_GROSS", "DEPRECIATION", "DA", "AMORTIZATION_INTANGIBLES"], ks=(0, 1, 2, 3)))]
+               evidence=ctx.evs(["PPE_GROSS", "PPE_CIP", "DEPRECIATION", "DA", "AMORTIZATION_INTANGIBLES"], ks=(0, 1, 2, 3)))]
 
 
 @detector("C.EXP.04", "Depreciation rate drop", F, Area.DEPRECIATION, needs_peers=True)
@@ -683,11 +713,20 @@ def cexp06(ctx: RunContext):
     comps = _spend_items(ctx)
     fn = lambda v: safe_div(_spend(v, comps), v.g("REVENUE"))  # noqa: E731
     a = assess(ctx, fn, higher_is_bad=False, use_peers=False, z_start=2.0)
-    return [mk("C.EXP.06", ctx, raw_value=a.cur, expected=a.baseline, severity=a.severity * 0.8, unit="share of revenue",
+    sev, trend_note = a.severity, ""
+    h = a.self_hist
+    if len(h) >= 3:
+        slope = float(np.mean(np.diff(h)))
+        # a company growing faster than its overhead lowers the ratio every year (Snowflake, Shopify): the median of five
+        # earlier years then sits above this year without any cut. A fall no larger than 1.5 years of that trend is not one.
+        if slope < -0.005 and a.cur >= h[-1] + 1.5 * slope:
+            sev, trend_note = 0.0, (f" The ratio has been falling by {fmt_pct(-slope)} of revenue a year; this year's change "
+                                     "continues that trend.")
+    return [mk("C.EXP.06", ctx, raw_value=a.cur, expected=a.baseline, severity=sev * 0.8, unit="share of revenue",
                percentile_self=a.pct_self,
                impact=gap_impact(a, ctx.a("REVENUE"), "ratio_reversion", "(baseline - ratio) x revenue", higher_is_bad=False),
                scheme=Scheme.SHIFT_EXPENSES_LATER, direction="income_increasing",
-               rationale=f"SG&A + R&D as a share of revenue: {a.describe()}.",
+               rationale=f"SG&A + R&D as a share of revenue: {a.describe()}.{trend_note}",
                evidence=ctx.evs(["SGA", "RND", "REVENUE"], ks=(0, 1)))]
 
 
@@ -756,6 +795,8 @@ def cres01(ctx: RunContext):
         r1, b1, r0, b0 = ctx.a(res), ctx.a(base), ctx.a(res, 1), ctx.a(base, 1)
         if not finite(r1, b1, r0, b0) or b0 == 0:
             continue
+        if res == "ALLOWANCE":
+            r1, r0 = abs(r1), abs(r0)  # a deducted allowance is tagged as a negative amount by some filers, in some years only
         rel = (safe_div(r0, b0) - safe_div(r1, b1)) * b1
         if rel > 0:
             found.append((label, rel))
@@ -973,7 +1014,9 @@ def ccf06(ctx: RunContext):
     """(CFO - capex) / EBITDA below peers and falling."""
     def fn(v: V) -> float:  # without D&A or capex the ratio is not EBITDA-based free cash flow, so it is not computed
         ebitda = v.g("OPERATING_INCOME") + v.g("DA")
-        return safe_div(v.g("CFO") - v.g("CAPEX"), ebitda) if ebitda > 0 else float("nan")
+        # EBITDA under 3% of revenue is a denominator the ratio cannot stand on (Boeing 2019: $0.3B of EBITDA on $76.6B of
+        # revenue made free cash flow -$4.2B a ratio of -14.5x)
+        return safe_div(v.g("CFO") - v.g("CAPEX"), ebitda) if ebitda > 0.03 * v.g("REVENUE") else float("nan")
 
     a = assess(ctx, fn, higher_is_bad=False, z_start=1.5)
     return [mk("C.CF.06", ctx, raw_value=a.cur, expected=a.baseline, severity=a.severity * 0.8, unit="x",
@@ -1179,7 +1222,10 @@ def cgov02(ctx: RunContext):
     amendments do not and are routine."""
     nr = ctx.events_of("NON_RELIANCE", within_days=1095)
     am = ctx.events_of("AMENDED_10K", within_days=1095)
-    fin_accns = set(ctx.store.df["accn"]) if not ctx.store.df.empty else set()
+    # financial statements, not the cover-page data every amendment carries (public float, shares outstanding): a Part III
+    # amendment (Disney 2023, 2024) has XBRL facts too
+    d = ctx.store.df
+    fin_accns = set(d.loc[d["item"].isin(("REVENUE", "NET_INCOME", "TOTAL_ASSETS", "CFO", "EQUITY")), "accn"]) if not d.empty else set()
     fin_days = {e.date for e in am if e.accession in fin_accns}
     other_days = {e.date for e in am} - fin_days
     sev = min(1.0, 0.8 * len(nr) + 0.35 * len(fin_days) + 0.1 * len(other_days))

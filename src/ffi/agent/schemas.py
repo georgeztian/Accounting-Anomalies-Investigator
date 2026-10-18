@@ -59,3 +59,11 @@ class FindingNarrative(BaseModel):
     alternatives: list[AlternativeLine]
     questions: list[str]
     cited_ledger_ids: list[str]
+    test_assessment: Literal["real_anomaly_possible", "likely_test_error"] = Field(
+        default="real_anomaly_possible",
+        description="likely_test_error ONLY when the evidence shows the test compared figures that are not like-for-like "
+                    "(different periods, scopes, concepts, bases, units or signs) or read a part as the whole; an innocent "
+                    "business explanation (an acquisition, a disclosed change, a one-off) is NOT a test error")
+    test_assessment_reason: str = Field(
+        default="", description="If likely_test_error: name the two figures compared, what differs between them and the "
+                                "figure that should have been used, citing ledger ids. Empty otherwise")

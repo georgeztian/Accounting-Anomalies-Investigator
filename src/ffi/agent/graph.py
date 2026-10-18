@@ -257,7 +257,12 @@ def build_graph(ctx: RunContext, finding, llm: LLM):
                   "'the filing gives no explanation'; rate an alternative 'refuted' only when evidence contradicts it, 'supported' only "
                   "when evidence establishes it, otherwise 'plausible but untested'; a peer comparison covers one year and the peer "
                   "interquartile range, not 'all peers' or 'for years'; use no facts from outside the evidence (dates, events, rules); "
-                  "compare growth in percentages, not dollar amounts of different-sized items. Every number you write must appear in "
+                  "compare growth in percentages, not dollar amounts of different-sized items. Set test_assessment to "
+                  "'likely_test_error' only when the evidence shows the test itself compared figures that are not like-for-like "
+                  "(a quarter with a full year, a segment or one expense line with the company total, one concept or basis with "
+                  "another, different units or signs); then name both figures, what differs and the figure that should have been "
+                  "used, with ledger ids. An acquisition, a disclosed accounting change or a one-off is an innocent explanation, "
+                  "not a test error: keep 'real_anomaly_possible' for those. Every number you write must appear in "
                   "the facts table or the ledger: do not compute differences or ratios of your own."
                   + (f"\n<reviewer_feedback>\n{json.dumps(fb)}\n</reviewer_feedback>\nFix every point of feedback." if fb else "")]
         try:
@@ -281,7 +286,8 @@ def build_graph(ctx: RunContext, finding, llm: LLM):
         d = state["draft"] or {}
         # everything of the draft that reaches the report: the alternatives' names and the questions too
         text = " ".join([d.get("summary", ""), d.get("explanation", "")]
-                        + [f"{a['alternative']}: {a['assessment']}" for a in d.get("alternatives", [])] + list(d.get("questions", [])))
+                        + [f"{a['alternative']}: {a['assessment']}" for a in d.get("alternatives", [])] + list(d.get("questions", []))
+                        + [d.get("test_assessment_reason", "")])
         # numbers the draft may legitimately repeat: tool outputs, the detectors' own results, and amounts in quoted filing text
         ledger_nums = [n for e in state.get("ledger", []) for n in e.get("numbers", []) + grounding.numbers_in(e.get("text", ""))]
         signal_nums = [n for s in state["finding"].get("signals", []) for n in grounding.numbers_in(s.get("rationale", ""))]
@@ -309,7 +315,7 @@ def build_graph(ctx: RunContext, finding, llm: LLM):
             return res, {"node": "audit", "usd": round(llm.spend.usd - before, 5)}
 
         try:
-            verdicts, accusatory, sp = llm_auditor.review(llm, d, finding, state.get("ledger", []), node_call, facts=facts, periods=periods)
+            verdicts, accusatory, sp, test_error_check = llm_auditor.review(llm, d, finding, state.get("ledger", []), node_call, facts=facts, periods=periods)
         except BudgetExceeded as e:
             return over_budget("audit", e)
         except LLMRefusal:
@@ -329,6 +335,7 @@ def build_graph(ctx: RunContext, finding, llm: LLM):
             fb = [f"{v['verdict']}: '{v['claim']}' -> {v['correction'] or 'support with cited evidence or remove'}" for v in failing + context]
             return _round_failed(state, upd, fb or ["The auditor found no checkable claims; state the conclusion explicitly with evidence ids."])
         upd["verification"] = {**(state.get("verification") or {}), "lint": lint_hits, "audit": "passed",
+                               "test_error_check": test_error_check,
                                "context_notes": [f"{v['claim']} -> {v['correction']}" for v in context]}
         if lint_hits:
             return Command(update=upd, goto="review_sensitive")

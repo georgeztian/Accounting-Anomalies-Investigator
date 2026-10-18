@@ -135,13 +135,16 @@ interest income. Monetary items accept only facts in the
 currencies.
 
 **Same basis.** Some fallback concepts measure a narrower or broader amount than the item's main concepts: general and
-administrative expense for SG&A, net income including noncontrolling interests, cash including restricted cash, PP&E
-including finance-lease assets, pre-tax income before the share of equity-method income, long-term debt including its
+administrative expense for SG&A, payables together with accrued liabilities, net income including noncontrolling
+interests, cash including restricted cash, PP&E including finance-lease assets, pre-tax income before the share of equity-method income, long-term debt including its
 current maturities, current debt including short-term borrowings (`DIFFERENT_BASIS` in `canonical.py`). Two values
 of an item are compared only when both are on the same basis:
 
-- the standard assessment (section 3.5) leaves out a history year whose inputs were on another basis than the focus
-  year's;
+- the standard assessment (section 3.5) leaves out a history year, and a peer, whose inputs were on another basis than
+  the focus year's;
+- **SG&A** is general and administrative expense plus selling and marketing expense where a company reports them
+  apart (C.EXP.06); **depreciable PP&E** is gross PP&E less construction in progress and land where both are tagged and
+  the gross tag includes them (C.EXP.03, B.06);
 - **total debt** never counts a part twice: long-term debt tagged including current maturities is not added to a
   current-maturities tag, and a current-debt tag that includes short-term borrowings is not added to a
   short-term-borrowings tag (`V.debt`);
@@ -165,7 +168,9 @@ and only filings public by the `--as-of` date, makes the analysis reproduce what
 **How.**
 
 - **Fiscal years**: clustered end dates of facts covering 340-390 days in annual reports (10-K, 20-F, 40-F, and 6-K
-  for filers that file annual statements that way). End dates within 8 days are merged (52/53-week years).
+  for filers that file annual statements that way). End dates within 8 days are merged (52/53-week years). A fiscal
+  year is labelled by the calendar year of its end date, except that a year ending in the first week of January closes the
+  year before (Johnson & Johnson's year ended 2023-01-01 is FY2022, so two years never share a label).
 - **Quarters**: facts covering 80-100 days. Each fact is assigned to the nearest period end within 8 days.
 - **First vs latest**: for each item and period the highest-priority concept reported wins; the *first* panel then
   takes its value from the earliest filing that reported it, the *latest* panel from the most recent. Tests use the
@@ -246,6 +251,11 @@ a quarter of that year or earlier (a first-quarter release filed within 120 days
 files it, announces the next year and is not read), so a past year is tested against its own releases rather than
 later ones. This makes every piece of text evidence traceable to
 the filing.
+
+A 10-K that lists its Items only in an index table at the end (Intel, McDonald's, GE) is split by the titles of its
+sections. A title in the table of contents at the front is not the section: a heading followed within eight lines by three
+lines that end in page numbers is a contents row, and the next heading with the same title is the section (Intel 2025: the
+MD&A was read as 5 words).
 
 ### 2.6 Company profiles (`profiles.py`)
 
@@ -337,7 +347,11 @@ severity = 0.6 × S_p                                       peers only
 clipped to 0..1. Own history weighs slightly more because a change in the company's own behaviour is more telling
 than a level difference from peers; single-baseline results are scaled down because they are weaker evidence. A
 `min_abs` floor sets severity to 0 when the ratio differs from both medians by less than an economically trivial
-amount (for example 5 days of receivables): statistically unusual but too small to matter. The **baseline** used for
+amount (for example 5 days of receivables): statistically unusual but too small to matter. A ratio within a tenth of
+every available median (own history and peers) is not unusual either, however tight the history makes the z-score
+(Caterpillar's contract assets of 0.439% of revenue against a 0.445% peer median). A peer whose inputs were reported on
+another basis than the company's (payables with accrued liabilities, general and administrative expense without selling
+costs) is left out of P, as such years are left out of H. The **baseline** used for
 dollar impacts is the more conservative median (the higher one when higher is worse).
 
 ### 3.6 Dollar impact of a ratio gap (`gap_impact`)
@@ -384,20 +398,30 @@ tol is the tolerance for rounding and untagged minor items, f the size at which 
   `TA - liabilities and equity`; the larger residual counts. Base TA, tol 0.5%, full at 3%.
 - **Why it works**: assets must equal claims on them. A gap means the tagged balance sheet is internally
   inconsistent.
+  The second residual is not counted when the filed "liabilities and equity" total ties to assets (within 0.1%) and the
+  parts fall short of it: that is a line between liabilities and equity that is not tagged (BlackRock 2025: $5.43B of
+  redeemable interests, one a company extension that the SEC's data does not carry), not an unbalanced statement. Parts
+  that exceed the filed total are still a break.
 - **Innocent causes**: equity classes or redeemable (temporary) equity tagged under uncommon concepts.
 
 ### A.02 Subtotal integrity
 
 - **Computes**: `Rev - COGS - GP`; `PP&E gross - accumulated depreciation - PP&E net`; and the excess of
   (cash + short-term investments + receivables + inventory) over total current assets. The worst ratio counts. tol
-  0.5%, full at 3%.
+  0.5%, full at 3%. Gross profit below `Rev - COGS` by up to a quarter of revenue is not counted (gross profit on
+  product sales, with membership or other fees outside it: Costco, $3.35B of $152.7B); gross profit above it is. The
+  current-asset excess is the smaller of the two readings with and without short-term investments, which are often a part
+  of cash and equivalents (Target: "included short-term investments of $4,611 million").
 - **Why it works**: statements that do not add up point to manual edits or late changes, which reduce confidence in
   every ratio built on them.
 - **Innocent causes**: a subtotal that includes a line not tagged separately.
 
 ### A.03 Cash roll-forward
 
-- **Computes**: `e = (Cash_t - Cash_t-1) - (CFO + CFI + CFF + FX effect)`, with cash including restricted cash. Base
+- **Computes**: `e = (Cash_t - Cash_t-1) - (CFO + CFI + CFF + FX effect + net cash of discontinued operations)`, with cash
+  including restricted cash. The effect of exchange rates is read from the disposal-group variant of the concept too
+  (Goldman Sachs 2025), and the cash of discontinued operations is its own line when the three totals are those of
+  continuing operations (Disney 2019: $10.97B). Base
   `max(|Cash_t|, |CFO|)`, tol 1%, full at 5%. Skipped when cash includes restricted cash in one year and not the other.
 - **Why it works**: cash is the hardest figure to manipulate because it can be confirmed with banks. A cash-flow
   statement that does not reconcile to the balance sheet suggests the two were prepared inconsistently.
@@ -406,15 +430,18 @@ tol is the tolerance for rounding and untagged minor items, f the size at which 
 ### A.04 Equity roll-forward
 
 - **Computes**: `e = E_t - (E_t-1 + NI + OCI - dividends - buybacks + shares issued + stock compensation + convertible
-  equity components)`. Dividends are those declared; when only cash dividends paid are tagged they are adjusted by the
+  equity components - taxes withheld on net share settlement + shares issued for acquisitions + converted securities +
+  other tagged issuance)`. Shares issued is the larger of the cash proceeds and the statement of equity's total (dividend
+  reinvestment and forward sales settled later are in the second only: Realty Income 2019). Dividends are those declared; when only cash dividends paid are tagged they are adjusted by the
   change in dividends payable (Progressive declares an annual dividend in December and pays it in January), and used
   alone only when that change is not tagged. Buybacks are the cash paid, else the treasury stock acquired as the
   statement of equity reports it. Base `max(|E_t|, |E_t-1|)`, tol 4%, full at 15%, then × 0.7; halved again when noncontrolling
   interests are 20% or more of total equity.
 - **Why it works**: equity changes that bypass the income statement can hide losses charged directly to equity, or
   reflect transactions the statements do not explain.
-- **Innocent causes**: untagged items such as tax withheld when stock awards vest, warrant exercises, and in
-  partnership structures exchanges of noncontrolling units into common stock.
+- **Innocent causes**: untagged items such as warrant exercises, and in partnership structures exchanges of
+  noncontrolling units into common stock. Shares issued for an acquisition (Boeing 2025, Spirit: $4.7B), preferred stock
+  converted at an IPO (Uber 2019) and tax withheld on vesting awards (Snowflake FY2026: $0.67B) are tagged and counted.
 
 ### A.05 Retained-earnings roll-forward
 
@@ -424,7 +451,11 @@ tol is the tolerance for rounding and untagged minor items, f the size at which 
 - **Why it works**: retained earnings should move only through profit and distributions. Other movements can be
   direct charges to equity or restatement adjustments.
 - **Innocent causes**: companies often charge share repurchases and stock-award tax withholding partly to retained
-  earnings, and dividends above earnings to paid-in capital; both are recognized automatically.
+  earnings, and dividends above earnings to paid-in capital; both are recognized automatically. Two more move retained
+  earnings without income or dividends and appear only in the statement of equity: a cumulative-effect adjustment on adopting
+  a standard (Toyota 2019, ASU 2016-01: 1.27 trillion yen) and treasury shares retired against retained earnings (Disney
+  2019, $40B). When a residual remains and the annual report says either, the severity is multiplied by 0.4 and the sentence
+  is quoted.
 
 ### A.06 Quarterly-to-annual consistency
 
@@ -444,8 +475,10 @@ tol is the tolerance for rounding and untagged minor items, f the size at which 
 
 ### A.08 PP&E roll-forward
 
-- **Computes**: `unexplained = dPP&E gross - capex - 0.5 × acquisitions` (only positive gaps count). Base prior gross
-  PP&E, tol 3%, full at 15%.
+- **Computes**: `unexplained = dPP&E gross - capex - 0.5 × acquisitions - finance-lease additions - (unpaid capex_t -
+  unpaid capex_t-1)` (only positive gaps count). Base prior gross PP&E, tol 3%, full at 15%. Oracle 2026: gross PP&E
+  +$63.1B, cash capex $55.7B, and finance-lease additions of $4.9B and capex accrued but unpaid of $5.3B ($1.4B a year
+  earlier) explain the rest.
 - **Why it works**: fixed assets that grow faster than the cash spent on them can mean operating costs were
   capitalized (moved from expense to assets, raising profit), or assets were acquired through non-cash financing that
   deserves disclosure. Disposals would make the gap larger, so the test is conservative.
@@ -454,7 +487,9 @@ tol is the tolerance for rounding and untagged minor items, f the size at which 
 ### A.09 Allowance roll-forward
 
 - **Computes**: `e = allowance_t - (allowance_t-1 + provision - write-offs)`. Base the larger allowance, tol 10%, full
-  at 50%.
+  at 50%. A positive residual in a year when cash paid for acquisitions exceeds 10% of prior-year assets has its severity
+  halved, because allowance taken on with acquired receivables is a roll-forward item the provision and write-off tags
+  do not carry (Waste Management 2024: $7.49B for Stericycle, allowance $30M to $165M).
 - **Why it works**: the allowance for doubtful accounts is a judgment-based reserve. Movements its roll-forward cannot
   explain may be unexplained reserve adjustments that move profit.
 - **Innocent causes**: recoveries, acquisitions and currency effects, which are often untagged.
@@ -466,7 +501,9 @@ tol is the tolerance for rounding and untagged minor items, f the size at which 
 - **Why it works**: goodwill should change only through deals, impairments and currency. Unexplained changes can
   signal purchase-accounting adjustments or impairments that were delayed.
 - **Innocent causes**: roll-forwards reported only by segment, which makes the tagged roll-forward incomplete rather
-  than wrong (hence the cap).
+  than wrong (hence the cap). A positive residual in a year with cash or shares paid for acquisitions, and a negative one
+  in a year with divestiture proceeds (goodwill of a business sold or held for sale leaves without a line), have their
+  severity halved.
 
 ### A.11 Segment reconciliation
 
@@ -474,7 +511,8 @@ Needs segment-level (dimensional) XBRL, which the SEC's companyfacts data does n
 
 ### A.12 EPS consistency
 
-- **Computes**: `d = NI / diluted shares - diluted EPS`, tolerance `max(0.02, 0.02 × |EPS|)`;
+- **Computes**: `d = NI / diluted shares - diluted EPS` (NI is the income for diluted EPS, after preferred dividends,
+  when the company tags it: Boeing 2025, 2,235 - 345 = 1,890 over 762.3 = 2.48), tolerance `max(0.02, 0.02 × |EPS|)`;
   `severity = clip((|d| - tolerance) / (0.15 × |EPS| + 0.05))`; 0.8 if diluted EPS exceeds basic EPS while the
   company is profitable (dilution can only lower EPS).
 - **Why it works**: EPS is the most-watched number. Inconsistencies point to errors in share counts or in the income
@@ -505,7 +543,13 @@ Needs segment-level (dimensional) XBRL, which the SEC's companyfacts data does n
   never charged with a revision made in a later year's report.
 - **Why it works**: a prior year re-reported differently changes the history investors relied on. Without a formal
   restatement it may go unnoticed. Income items weigh more because they directly change reported performance.
-- **Innocent causes**: discontinued operations, segment recasts, new standards adopted retrospectively.
+- **Innocent causes**: discontinued operations, segment recasts, new standards adopted retrospectively. Two traces
+  cap the severity at 0.35, so the result is shown but not flagged: net income of the period is the same in both reports
+  while revenue, cost of sales, operating income or pre-tax income moved (General Electric's revenue after its spin-offs;
+  Johnson & Johnson's after Kenvue; pension cost moved out of operating income), or the later annual report says it
+  recast prior periods on adopting a standard or for discontinued operations. A paragraph about errors or a restatement is
+  not such a statement. The fiscal year of a 52/53-week year that ends in the first week of January is the year before
+  (Johnson & Johnson's year ended 2023-01-01 is fiscal 2022).
 
 ### A.15 MD&A text vs reported figures
 
@@ -513,7 +557,9 @@ Needs segment-level (dimensional) XBRL, which the SEC's companyfacts data does n
   the rules in section 8.4; `severity = min(1, 0.45 × mismatches)`. Earlier years are taken as this annual report
   presents them (its comparatives may be recast). A sentence that names a fiscal year before the figure is compared
   with that year; one that names none can match any of the three years, but is a mismatch only against the focus
-  year and only when it is nearer that year's total than any other.
+  year and only when it is nearer that year's total than any other. A year number can name two fiscal years when the
+  year ends in January or February (Home Depot's year ended 2026-02-01 is its fiscal 2025, Walmart's and NVIDIA's are named
+  after the year they end in); the stated total is checked against both.
 - **Why it works**: narrative that does not match the statements suggests numbers changed after the text was written.
 - **Innocent causes**: drafting errors; segment or non-GAAP figures (which are skipped).
 
@@ -553,7 +599,7 @@ M = -4.84 + 0.920 × DSRI + 0.528 × GMI + 0.404 × AQI + 0.892 × SGI
 |---|---|---|
 | DSRI, receivables index | `(AR_t/Rev_t) / (AR_t-1/Rev_t-1)` | Receivables growing faster than sales suggest revenue recorded before it is collected, or not collectible at all |
 | GMI, gross margin index | `GM_t-1 / GM_t` | Deteriorating margins create pressure to manipulate; values above 1 mean margins fell |
-| AQI, asset quality index | `(1 - (CA_t + PP&E_t + STI_t)/TA_t) / (1 - (CA_t-1 + PP&E_t-1 + STI_t-1)/TA_t-1)` | A rising share of "soft" assets (neither current assets nor PP&E) suggests costs are being deferred as assets |
+| AQI, asset quality index | `(1 - (CA_t + PP&E_t)/TA_t) / (1 - (CA_t-1 + PP&E_t-1)/TA_t-1)` (short-term investments are already inside current assets and are not added again) | A rising share of "soft" assets (neither current assets nor PP&E) suggests costs are being deferred as assets |
 | SGI, sales growth index | `Rev_t / Rev_t-1` | Growth is not manipulation, but fast growers face pressure to sustain growth and have weaker controls |
 | DEPI, depreciation index | `(Dep_t-1/(Dep_t-1 + PP&E_t-1)) / (Dep_t/(Dep_t + PP&E_t))`, with one depreciation measure in both years (section 2.1) | A slowing depreciation rate raises profit, possibly through longer useful lives |
 | SGAI, SG&A index | `(SGA_t/Rev_t) / (SGA_t-1/Rev_t-1)` | Rising overheads relative to sales signal weakening prospects (the coefficient is negative in the estimated model) |
@@ -660,7 +706,7 @@ and that investors overprice high-accrual companies. The ratio scales accruals b
 
 ```
 Sloan = (NI - CFO - operating investment) / average NOA
-operating investment = -(capex + acquisitions)
+operating investment = -capex
 NOA = (TA - cash - STI) - (TL - total debt)
 ```
 
@@ -668,7 +714,9 @@ NOA = (TA - cash - STI) - (TL - total debt)
 decile of accruals is more likely to report lower earnings later, whatever the cause. Purchases of marketable
 securities are deliberately left out: they are investing cash flow but not accruals (those securities are excluded
 from net operating assets too), and including them would make cash-rich companies look as if their profit were not
-backed by cash.
+backed by cash. Cash paid for acquired businesses is left out as well: it buys assets and is no accounting estimate, and
+counting it made an acquirer look like an aggressive accruer (Johnson & Johnson 2025: $17.5B of acquisitions took the
+ratio from 7% to 25%).
 
 **How.** Total investing cash flow is used when capex is not reported, and average total assets when NOA is not
 positive. Severity from the robust z against peers (5 or more) or else own history (1.0 to 3.5), × 0.4 when the ratio
@@ -686,6 +734,8 @@ is negative (low accruals are not a warning sign).
 | Other current assets / revenue rising | Costs parked as prepaid or deferred items |
 | Depreciation / gross PP&E falling (one depreciation measure in both years) | Profit raised by slower depreciation |
 | Total assets growing more than 10% | Acquisitive or fast growth, where accounting is most flexible |
+
+The depreciation rate uses depreciable gross PP&E (without construction in progress and land, as in C.EXP.03).
 
 **How.** At least 4 tests must be computable; `severity = clip((C - 2) / 3)`. The score is simple by design: each
 point is a separate, interpretable symptom.
@@ -830,7 +880,8 @@ collection pace. The latest quarter's DSO is also shown against the same quarter
 
 **C.AR.02 Allowance coverage decline.** Coverage `allowance / (AR + allowance)` against its prior four-year median;
 `severity = clip((drop - 0.10) / 0.40) × (1 if DSO rose, else 0.6)`. *Why*: reducing the reserve for bad debts while
-receivables age raises profit by under-reserving.
+receivables age raises profit by under-reserving. The allowance is read as its size: some filers tag it as the negative
+amount it is deducted at (Boeing 2019: -73).
 
 **C.AR.03 Provision below write-offs.** Consecutive years back from the focus year (a year not reported ends the run)
 in which the provision for credit losses was below write-offs; `severity = 0.8 × clip((years - 1) / 2)`. *Why*: the reserve is being drawn down into earnings.
@@ -877,14 +928,17 @@ overhead lines the focus year reports required in every year compared.
 and prepaid items are where expenses can be parked.
 
 **C.EXP.03 Useful-life extension.** Implied useful life `gross PP&E / depreciation` against its prior three-year
-median; `severity = clip((change - 0.10) / 0.30)`. *Why*: longer assumed lives cut depreciation and raise profit
+median, with gross PP&E taken without construction in progress and land when both are tagged in every year compared and
+the tagged gross figure includes them (Oracle 2026: $40.0B of $122.7B is construction in progress, which lifted the
+life from 10.7 to 16.1 years against 9.3 to 11.4); `severity = clip((change - 0.10) / 0.30)`. *Why*: longer assumed lives cut depreciation and raise profit
 without any change in the business. *Impact*: `gross PP&E / prior life - reported depreciation`, the depreciation at
 the old life less what was reported. All four years use the same depreciation measure (section 2.1), so a year that
 tags depreciation on its own is never compared with years that only report D&A.
 
 **C.EXP.04 Depreciation rate drop.** Depreciation / average gross PP&E (assess, lower is worse), with the measure the
 company reports in all of its last six years used for every year and every peer. *Why*: the same
-effect seen as a rate. *Innocent causes*: large construction in progress, not yet depreciated.
+effect seen as a rate. *Innocent causes*: large construction in progress, not yet depreciated (not removed here, unlike in
+C.EXP.03 and the Montier C-score).
 
 **C.EXP.05 Capex far above depreciation.** Years with capex / D&A above 2 while revenue is flat;
 `severity = clip((years - 1) / 2) × (1 if two-year revenue growth is under 5% a year, else 0.3)`. *Why*: heavy
@@ -892,7 +946,10 @@ investment that produces no growth can mean operating costs are being capitalize
 
 **C.EXP.06 Discretionary expense cut.** (SG&A + R&D) / revenue against own history only (assess, lower is worse,
 z from 2); a year that does not report a line the focus year reports is left out, so an untagged line is never read
-as a cut. *Why*: cutting discretionary spending to hit a target lifts this year's profit at the expense of future
+as a cut. Where selling and administrative expense are separate lines (Microsoft, Salesforce), SG&A is general and
+administrative plus selling and marketing, and a year without the selling line is left out. A fall that is no larger than
+1.5 years of a steady decline (a ratio that has fallen on average by more than 0.5 points of revenue a year) continues a
+trend of growth outpacing overhead and is not a cut (Snowflake, Shopify). *Why*: cutting discretionary spending to hit a target lifts this year's profit at the expense of future
 growth (real earnings management).
 
 **C.EXP.07 Recurring "non-recurring" charges.** Restructuring or impairment charges in 3 or more of the last 5 years;
@@ -1027,8 +1084,8 @@ from the numbers.
 | ID | Measures | Severity | Why it works |
 |---|---|---|---|
 | C.GOV.01 | Auditor change (8-K Item 4.01) within two years | 0.55 | Auditor changes, especially after disagreements, often precede restatements |
-| C.GOV.02 | Non-reliance notices (8-K Item 4.02) and annual-report amendments within three years; same-day amendments count once | `min(1, 0.8 × notices + 0.35 × financial amendments + 0.1 × other amendments)` | A non-reliance notice is the strongest public sign of a past error; amendments that re-file financial statements weigh more than exhibit-only ones |
-| C.GOV.03 | Officer changes (8-K Item 5.02) in the two years to the fiscal year end (plus the 120 days after it); the latest 8 are read to tell CFO, chief accounting officer and CEO changes apart (the item's own title, which mentions appointments, is ignored). Filings about the same role within nine months are one transition; filings about pay plans or directors (most Item 5.02 filings) do not count | `0.8 x min(1, 0.05 x filings that could not be read + 0.35 x CFO + 0.2 x CEO + 0.15 x CAO transitions)` | Turnover in finance leadership often accompanies accounting problems; an announced succession reported twice is still one change |
+| C.GOV.02 | Non-reliance notices (8-K Item 4.02) and annual-report amendments within three years; same-day amendments count once; an amendment re-files financial statements only if the SEC data holds revenue, net income, assets, cash flow or equity facts from it (the cover-page data every amendment carries does not count: Disney's Part III amendments) | `min(1, 0.8 × notices + 0.35 × financial amendments + 0.1 × other amendments)` | A non-reliance notice is the strongest public sign of a past error; amendments that re-file financial statements weigh more than exhibit-only ones |
+| C.GOV.03 | Officer changes (8-K Item 5.02) in the two years to the fiscal year end (plus the 120 days after it); the latest 30 are read to tell CFO, chief accounting officer and CEO changes apart (the item's own title, which mentions appointments, is ignored, and so are a new director's present post at another company and the next job of a leaving officer). Filings about the same role within nine months are one transition; filings about pay plans or directors (most Item 5.02 filings) do not count | `0.8 x min(1, 0.05 x filings that could not be read + 0.35 x CFO + 0.2 x CEO + 0.15 x CAO transitions)` | Turnover in finance leadership often accompanies accounting problems; an announced succession reported twice is still one change |
 | C.GOV.04 | Late-filing notices (NT 10-K, NT 10-Q, NT 20-F) | `min(1, 0.45 × notices)` | A missed deadline often signals unresolved accounting or audit issues |
 | C.GOV.05 | Material weakness or ineffective controls in Item 9A | 0.85 (0.25 for weaker wording) | A control weakness means misstatements could go undetected |
 | C.GOV.06 | Going-concern doubt | 0.8 | Severe distress is the strongest pressure to manage results |
@@ -1041,7 +1098,7 @@ accounting standards, so their definition is a choice, and the choice can manufa
 | ID | Measures | Severity | Why it works |
 |---|---|---|---|
 | C.NG.01 | (Adjusted EPS - GAAP EPS) / GAAP EPS for the same period (quarter with quarter, full year with full year) in the year's latest release; GAAP EPS from the release's own table, else the filings for that period, else no comparison. The result states the period, the release date and whether adjusted EPS is above or below GAAP EPS | `clip((gap - 0.20) / 0.60)` | A large gap steers investors towards a flattering measure |
-| C.NG.02 | Adjustment categories present in every recent release | `min(0.7, 0.3 × categories)` | Items labelled unusual that recur every quarter are operating costs |
+| C.NG.02 | Adjustment categories present in every recent release, counted only as line items: table rows with figures, never a word inside a sentence (forward-looking-statement boilerplate mentions litigation and impairment in every release) | `min(0.7, 0.3 × categories)` | Items labelled unusual that recur every quarter are operating costs |
 | C.NG.03 | New add-back categories and renamed measures vs the release for the same quarter a year earlier (AI extraction; skipped when there is none) | `min(0.7, 0.2 × new + 0.1 × renamed + 0.3 × asymmetric)` | Changing what is excluded can manufacture growth |
 | C.NG.04 | Losses excluded while gains are kept | from C.NG.03 | One-sided adjustments bias adjusted earnings upwards |
 
@@ -1072,7 +1129,10 @@ days (up to 24 quarters, at least 12):
 
 - **STL** (Cleveland et al. 1990, seasonal-trend decomposition using LOESS, robust version, period 4) splits each
   series into a trend, a repeating seasonal pattern and a residual. The latest quarter's residual is scored by robust
-  z against earlier residuals; |z| of 2.5 or more is reported, severity from |z| 2.5 to 5.0.
+  z against earlier residuals; |z| of 2.5 or more is reported, severity from |z| 2.5 to 5.0. A fourth quarter that is the
+  fiscal year less the first three quarters, and whose revenue is under 0.4 or over 2.5 times theirs, is no quarter (the
+  annual report was recast and the quarterly reports were not: General Electric 2015 and 2016, DSO 951 days); it is replaced
+  by interpolation before the series is decomposed.
 - **PELT** (Killick, Fearnhead and Eckley 2012, pruned exact linear time, via the `ruptures` library, kernel cost,
   minimum segment 3 quarters, penalty `3 × ln(n)`) finds the points where the series' level shifts. A shift in the
   last four quarters is reported with the means before and after, severity 0.45.
@@ -1225,11 +1285,11 @@ lot, so similarity reflects substance rather than boilerplate.
 | ID | Test | Method and severity | Why it works |
 |---|---|---|---|
 | E.03 | Risk-factor changes | Each Item 1A paragraph (over 80 characters) is matched with its most similar paragraph last year; similarity under 0.35 means added (or, the other way, removed). `severity = min(0.8, 0.2 × added paragraphs)` that mention material weakness, restatement, investigation, subpoena, going concern, covenants, liquidity, customer concentration, impairment, the SEC, whistleblowers or internal control | New risk factors on these topics are often the first public hint of a problem, because companies add them when they become aware of a risk |
-| E.05 | MD&A tone | Uncertainty, weak-modal ("may", "could") and negative words per 1,000 words, this year against last (lists in the style of Loughran and McDonald 2011); `severity = 0.5 × clip((largest relative change - 0.30) / 0.70)` | A sharp change in tone often precedes bad news or reflects uncertainty management does not quantify |
+| E.05 | MD&A tone (skipped when either year's MD&A has fewer than 500 words: the section was not located) | Uncertainty, weak-modal ("may", "could") and negative words per 1,000 words, this year against last (lists in the style of Loughran and McDonald 2011); `severity = 0.5 × clip((largest relative change - 0.30) / 0.70)` | A sharp change in tone often precedes bad news or reflects uncertainty management does not quantify |
 | E.06 | Boilerplate and rewrites | Year-over-year cosine similarity of MD&A, notes and risk factors: 0.4 if MD&A similarity is under 0.6; 0.35 if over 0.97 while revenue moved more than 20% | A sudden rewrite can frame a change management wants to present; unchanged text despite a changed business is stale disclosure |
 | E.07 | Hedging near key accounts | Density of hedge words in paragraphs about revenue, receivables, reserves, inventory and impairment; `severity = 0.4 × clip((change - 0.25) / 0.75)` | Vague language around the accounts that drive earnings can signal uncertainty about the numbers |
 | E.08 | Critical audit matters | Count and topics in the auditor's report; `min(0.4, 0.15 × new matters)` | They show where the auditor found the most judgment |
-| E.10 | SEC comment letters | Correspondence filings in the three years to the fiscal year end and the year after it (when its annual report is reviewed; the one exception to the point-in-time rule of section 2.2), the latest 6 company responses read for topics; `0.5 × clip((letter threads - 1) / 4) + 0.15` if revenue recognition is a topic | Repeated SEC questions on revenue or non-GAAP measures can precede accounting changes |
+| E.10 | SEC comment letters | Correspondence filings in the three years to the fiscal year end and the year after it (when its annual report is reviewed; the one exception to the point-in-time rule of section 2.2), the latest 12 company responses read for topics and subject (a reply about a registration statement or a proxy statement is not about the annual report, and a month of staff letters next to such replies and to no reply about a periodic report is not counted: Boeing 2024, the Spirit S-4; Disney 2024, the proxy contest); `0.5 × clip((letter threads - 1) / 4) + 0.15` if revenue recognition is a topic | Repeated SEC questions on revenue or non-GAAP measures can precede accounting changes |
 | E.13 | Missing companion disclosures | A checklist, e.g. receivables over 10% of assets but no allowance reported; `min(0.6, 0.2 × gaps)` | Material balances without their standard disclosures are hard to assess |
 
 E.11 (earnings-call evasiveness) needs licensed transcripts and is skipped.
@@ -1270,7 +1330,10 @@ the totals later filed: the quarter each release announces and, in the fourth-qu
   words inside a sentence are not a header). A year-only table holds full-year figures and a quarter-only table
   quarterly ones; under a quarter-and-year header a row of four values reads quarter, prior quarter, year, prior
   year. In prose, the words of the sentence decide ("fourth quarter", "full year"). Nine- and six-month figures and
-  guidance are never used.
+  guidance are never used. A sentence ends at a full stop followed by white space, never at a decimal point ("$(0.12);
+  non-GAAP EPS was $0.15." is one sentence about the fourth quarter, and the next sentence is about the year), and a line
+  of prose that lists amounts in different bases and periods is not read as a table row. A loss written "$(0.12)" or
+  "$ (0.12)" keeps its column.
 - A figure is compared only with a figure for the same period: from the release's own table, else from the filed
   statements for that period. A figure whose period cannot be told where both are possible (two values under a
   quarter-and-year header, an unlabelled row in a fourth-quarter release) is skipped rather than guessed, and when
@@ -1314,7 +1377,7 @@ year's point in time (section 2.2).
 | F.01 | Sales to a major customer vs that customer's spending | For customers that file with the SEC: sales = the disclosed amount, or the revenue share × company revenue only when the share is of the whole company's revenue. The customer's spending = (its revenue - its operating income) + its capex, from its own filings for the fiscal year closest to the company's (within 183 days) and in the same currency. Sales over 50% of that spending are implausible; `severity = min(1, 0.6 × cases)` | A customer cannot buy more than it spends. Sales a customer could not plausibly have made are a red flag for fictitious revenue |
 | F.02 | Circular flows | Directed cycles of up to 4 steps over sales, related-party, guarantee and side-agreement edges; `min(1, 0.5 × cycles)` | Money that flows from the company back to itself through counterparties can create revenue or cash that does not exist (round-tripping) |
 | F.03 | Auditor profile | 0.45 for a large company audited by a small firm, + 0.2 per auditor change (at most 2) | A small firm may lack the resources for a complex audit; context only |
-| F.04 | Unexplained movements | Material line-item movements with no passage of this year's MD&A or notes linked to them (earlier years' reports discussed earlier changes); `0.7 × clip(score / 10)` | Large changes management does not explain are disclosure gaps worth asking about |
+| F.04 | Unexplained movements | Material line-item movements with no passage of this year's MD&A or notes linked to them (earlier years' reports discussed earlier changes; a line goes by several captions: operating earnings, income from operations, marketing, general and administrative, unearned revenue, additions to property and equipment); `0.7 × clip(score / 10)` | Large changes management does not explain are disclosure gaps worth asking about |
 | F.05 | Contradiction density | The number of text-vs-number tests (A.15, E.04, E.12) that found a contradiction; `min(1, 0.35 × tests)`; derived, so it does not add to the index on its own | Several independent contradictions are stronger evidence than one |
 | F.06 | Customers under stress | Major customers with late-filing (NT 10-K / NT 10-Q) or non-reliance (8-K Item 4.02) filings; `min(0.8, 0.4 × customers)` | Revenue from distressed customers may not be collectible |
 | F.07 | New relationships | New related-party, guarantee, VIE or side-agreement edges this year; `min(0.8, 0.3 × new)` | New arrangements with related or off-balance-sheet entities are where risks are often moved |
@@ -1332,6 +1395,21 @@ explained away where appropriate, and controlled for multiple testing.
 If a calibration map has been trained for a test, its severity is remapped by piecewise-linear interpolation
 through the map's points, and the remapped severity decides whether the result is flagged. This replaces the judgment-based ramps (section 1.3) with mappings learned from outcomes.
 Without a map, severities are used as computed.
+
+### 10.1a Plausibility gate (`detectors/plausibility.py`)
+
+Applied to every result as it is built, so no test can bypass it. A result whose value or inputs are physically impossible
+is **held back**: not flagged, no weight in the risk index, its reason shown in the report ("Held back").
+
+- **Values:** days 0 to 1,500; years 0 to 100; a change or relative gap within +/-100 (10,000%); an amount in the reporting
+  currency at most 5 times the larger of total assets and revenue (otherwise a unit or scale error).
+- **Inputs:** a part cannot exceed its whole. If current assets, net PP&E, cash, receivables, inventory or goodwill is more
+  than 1% above total assets, every test that reads that input (from its default inputs or its cited evidence) is held back
+  for that year.
+- **Exempt:** the integrity tests (family A), whose job is to find relationships that do not hold.
+
+*Why*: the false findings seen in practice were mostly tests fed a wrong figure (a scale error, the wrong concept, a part
+mistaken for the whole); a number that cannot be right should never reach the anomaly list, whatever formula uses it.
 
 ### 10.2 Explained-away discounts
 
@@ -1502,7 +1580,11 @@ intake -> hypothesize -> plan evidence -> [plan review] -> gather (parallel, per
    nor the auditor has to guess how a figure was built. The writer is told to claim only what the evidence shows: a search that found nothing is "not found in the
    text searched", an alternative is "refuted" or "supported" only when evidence says so (otherwise "plausible but
    untested"), and a peer comparison covers one year.
-6. **Verify**: the grounding gate (section 13) and the neutral-language linter.
+6. **Verify**: the grounding gate (section 13) and the neutral-language linter. The draft also states a
+   `test_assessment`: `real_anomaly_possible` (the default; an acquisition, a disclosed change or a one-off is an innocent
+   explanation, not a test error) or `likely_test_error`, which must name the two figures compared, what differs between
+   them (period, scope, concept, basis, unit or sign) and the figure that should have been used, with ledger ids. That
+   reason passes the grounding gate like the rest of the text.
 7. **Audit**: an independent AI auditor sees only the conclusions and an evidence pack built by code, and rules on
    each claim (supported, overstated, needs context, unsupported). A claim that is unsupported or overstated sends the
    draft back with the auditor's corrections. A "needs context" note asks for a finer qualification of a claim the
@@ -1510,6 +1592,13 @@ intake -> hypothesize -> plan evidence -> [plan review] -> gather (parallel, per
    publication on its own (otherwise the loop chases ever-finer caveats until its rounds run out). The auditor's
    evidence pack contains the same figures table and fiscal-year dates the writer was allowed to use, so sourced
    statements can be checked.
+8. **Set aside test errors**: if the draft says `likely_test_error`, the auditor separately rules on that claim from the
+   evidence pack alone (`test_error_check`: supported, unsupported or not claimed). Only a *supported* claim on a finished
+   investigation sets the result aside: it leaves the anomaly list, its contribution leaves the risk index (and, in a
+   multi-year review, the index of every year it was flagged in and the period index), and it is listed with its reason
+   in the report section "Results set aside as probable test errors". An unsupported claim changes nothing. Each result
+   set aside is replaced by the next candidate, so the report still gets its full number of investigated anomalies when
+   enough exist.
 
 Each failed check is one round; after 3 rounds the case is *degraded* and the report says the investigation did not
 finish. Budgets cap each step's prompt size, output, time and cost (`agent/budget.py`); the whole run has a cost cap

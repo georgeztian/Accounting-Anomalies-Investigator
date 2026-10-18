@@ -14,12 +14,14 @@ from ffi.report import plain as P
 from ffi.report.model import (
     DISCLAIMER,
     NONE_TEXT,
+    SET_ASIDE_NOTE,
     _ev_dict,
     _resolution,
     finding_block,
     flag_level,
     peer_text,
     run_notes,
+    set_aside_blocks,
     test_families,
 )
 from ffi.scoring.span import years_text
@@ -77,7 +79,7 @@ def build_span_model(out) -> dict[str, Any]:
     tests = []
     for y in years:
         families, statuses = test_families(y.results, flag_at)
-        notable = [r for fam in families for r in fam["rows"] if r["status"] in ("flagged", "suppressed")]
+        notable = [r for fam in families for r in fam["rows"] if r["status"] in ("flagged", "suppressed", "held")]
         tests.append({"period": y.ctx.focus_label, "families": families, "statuses": statuses, "notable": notable,
                       "flagged": sum(1 for r in notable if r["status"] == "flagged")})
 
@@ -144,6 +146,7 @@ def build_span_model(out) -> dict[str, Any]:
         "key_numbers": key_numbers,
         "areas": area_rows,
         "findings": findings,
+        "set_aside": set_aside_blocks(getattr(span, "set_aside", [])), "set_aside_note": SET_ASIDE_NOTE,
         "audit_summary": {
             "verified": sum(1 for f in reported if f.audit and f.audit.status == "verified"),
             "corrected": sum(1 for f in reported if f.audit and f.audit.status == "verified_after_corrections"),

@@ -144,7 +144,12 @@ def resolve(text: str, client: EdgarClient, choose=None) -> CompanyRef:
         # Look for the operating predecessor by name among EDGAR registrants that file annual reports.
         new_name = endpoints.submissions(client, cik).get("name", "")
         for query in [q for q in (parsed.name, new_name) if q]:
-            for alt_cik, alt_name in endpoints.company_search(client, normalize_name(query) or query):
+            # EDGAR's name search matches words: "ExxonMobil Holdings Corp" finds nothing, "Exxon Mobil" finds the predecessor
+            spaced = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", query)
+            found = endpoints.company_search(client, normalize_name(query) or query)
+            if spaced != query:
+                found = found or endpoints.company_search(client, normalize_name(spaced) or spaced)
+            for alt_cik, alt_name in found:
                 if alt_cik == cik or name_score(query, alt_name) < 80:
                     continue
                 try:

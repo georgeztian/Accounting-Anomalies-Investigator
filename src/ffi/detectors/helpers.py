@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 
 from ffi.detectors.base import REGISTRY, Signal, SkipDetector
+from ffi.detectors.plausibility import hold_back
 
 # Inputs cited by default when a detector emits a signal without explicit evidence: the facts it was computed
 # from, or (text detectors) the filing section it analysed. Every flaggable conclusion is then traceable.
@@ -57,7 +58,7 @@ def mk(detector_id: str, ctx: Any, *, period: str | None = None, **kw: Any) -> S
         flagged = sev >= flag_at
     if not kw.get("evidence") and sev > 0:
         kw["evidence"] = default_evidence(detector_id, ctx)
-    return Signal(
+    return hold_back(Signal(
         detector_id=detector_id,
         name=spec.name,
         family=spec.family,
@@ -70,7 +71,7 @@ def mk(detector_id: str, ctx: Any, *, period: str | None = None, **kw: Any) -> S
         rationale=kw.pop("rationale", ""),
         flag_at=float(flag_at),
         **kw,
-    )
+    ), ctx)
 
 
 def _f(v: Any) -> float | None:

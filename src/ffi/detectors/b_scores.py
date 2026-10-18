@@ -179,16 +179,16 @@ def b05(ctx: RunContext):
     if not finite(v):
         raise SkipDetector("inputs unavailable")
     peers = ctx.peer_values(lambda P, p, k: S.sloan_accruals(P, p))
-    hist = [S.sloan_accruals(ctx.A, p) for p in ctx.periods[-6:-1]]
+    hist = [S.sloan_accruals(ctx.A, p) for p in ctx.comparable_periods[-6:-1]]
     pct = percentile_of(v, peers) if len(peers) >= 3 else None
     z = robust_z(v, peers) if len(peers) >= 5 else robust_z(v, hist)
     sev = severity_from_z(z, 1.0, 3.5) * (1.0 if v > 0 else 0.4)
     return [mk("B.05", ctx, raw_value=v, expected=float(np.median(peers)) if peers else None, severity=sev,
                unit="ratio", percentile_peer=pct, direction="income_increasing" if v > 0 else "neutral",
                rationale=f"Sloan accrual ratio {fmt_pct(v)} (peer median {fmt_pct(float(np.median(peers)) if peers else np.nan)}).",
-               # the inputs the ratio was computed from: investment is capex and acquisitions (investing cash flow only
+               # the inputs the ratio was computed from: investment is capex (investing cash flow only
                # when capex is not reported); net operating assets are averaged over two years
-               evidence=ctx.evs(["NET_INCOME", "CFO"] + (["CAPEX", "ACQUISITIONS"] if finite(ctx.a("CAPEX")) else ["CFI"]), ks=(0,))
+               evidence=ctx.evs(["NET_INCOME", "CFO"] + (["CAPEX"] if finite(ctx.a("CAPEX")) else ["CFI"]), ks=(0,))
                + ctx.evs(["TOTAL_ASSETS", "CASH", "ST_INVESTMENTS", "TOTAL_LIABILITIES", "LONG_TERM_DEBT", "CURRENT_DEBT",
                           "ST_BORROWINGS"], ks=(0, 1), role="supporting"))]
 

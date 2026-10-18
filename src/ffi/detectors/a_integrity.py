@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pandas as pd
 
@@ -10,8 +12,9 @@ from ffi.detectors.base import Area, EvidenceRef, ImpactEstimate, Scheme, SkipDe
 from ffi.detectors.helpers import finite, mk, need
 from ffi.detectors.scores import V
 from ffi.detectors.stats import fmt_money, fmt_pct, safe_div
+from ffi.text.search import search
 from ffi.xbrl.canonical import BY_ID, basis
-from ffi.xbrl.facts import ANNUAL_DAYS, FactRecord
+from ffi.xbrl.facts import ANNUAL_DAYS, FactRecord, fiscal_year_of
 
 F = "A"
 
@@ -39,7 +42,13 @@ def a01(ctx: RunContext):
         temp = ctx.a("TEMPORARY_EQUITY")  # redeemable interests sit between liabilities and equity
         temp = temp if finite(temp) else 0.0
         label = "Assets vs Liabilities + redeemable interests + Equity" if temp else "Assets vs Liabilities + Equity"
-        checks.append((label, ta - (tl + temp + eq), ["TOTAL_ASSETS", "TOTAL_LIABILITIES", "TEMPORARY_EQUITY", "EQUITY"]))
+        gap = ta - (tl + temp + eq)
+        # When the filed total "liabilities and equity" ties to assets, parts that fall short of it are a line between
+        # liabilities and equity that is not tagged (BlackRock 2025: $5.43B of redeemable interests, one of them a company
+        # extension that companyfacts does not carry), not a statement that fails to balance
+        ties = finite(le) and abs(ta - le) <= 0.001 * abs(ta)
+        if not (ties and gap > 0):
+            checks.append((label, gap, ["TOTAL_ASSETS", "TOTAL_LIABILITIES", "TEMPORARY_EQUITY", "EQUITY"]))
     if not checks:
         raise SkipDetector("total liabilities and liabilities-and-equity not reported")
     worst = max(checks, key=lambda c: abs(c[1]))
@@ -56,15 +65,28 @@ def a02(ctx: RunContext):
     rows = []
     rev, cogs, gp = ctx.a("REVENUE"), ctx.a("COGS"), ctx.a("GROSS_PROFIT")
     if finite(rev, cogs, gp):
-        rows.append(("Revenue - COGS = Gross profit", rev - cogs - gp, rev, ["REVENUE", "COGS", "GROSS_PROFIT"]))
+        # tagged gross profit below revenue less cost of sales is usually gross profit on product sales, with revenue from fees
+        # or other sources outside it (Costco FY2019: $3.35B of membership fees on $152.7B of revenue); gross profit above
+        # it is not explained that way and is tested
+        short = rev - cogs - gp
+        if not 0 < short <= 0.25 * abs(rev):
+            rows.append(("Revenue - COGS = Gross profit", short, rev, ["REVENUE", "COGS", "GROSS_PROFIT"]))
     g, ad, n = ctx.a("PPE_GROSS"), ctx.a("ACCUM_DEP"), ctx.a("PPE_NET")
-    if finite(g, ad, n):
+    if finite(g, ad, n) and g - ad - n >= 0:
+        # Net PP&E above gross less depreciation is not a break: the tagged gross figure is often a subtotal that leaves out
+        # land and construction in progress, which the balance sheet includes (Alphabet 2024: $199.8B gross excluding
+        # $50.6B of construction in progress). Net below the implied figure cannot be explained that way and is tested.
         rows.append(("Gross PP&E - accumulated depreciation = Net PP&E", g - ad - n, g, ["PPE_GROSS", "ACCUM_DEP", "PPE_NET"]))
     ca = ctx.a("CURRENT_ASSETS")
     parts = [ctx.a(i) for i in ("CASH", "ST_INVESTMENTS", "AR", "INVENTORY")]
     if finite(ca) and sum(1 for p in parts if finite(p)) >= 2:
         s = sum(p for p in parts if finite(p))
         excess = max(0.0, s - ca)
+        sti = ctx.a("ST_INVESTMENTS")
+        if finite(sti) and excess > 0:
+            # short-term investments are often a part of cash and equivalents, not a further line (Target: "cash and cash
+            # equivalents included short-term investments of $4,611M"); the parts only break the total if they do so without them
+            excess = min(excess, max(0.0, s - sti - ca))
         rows.append(("Current-asset components <= total current assets", excess, ca, ["CURRENT_ASSETS", "CASH", "AR", "INVENTORY"]))
     if not rows:
         raise SkipDetector("no subtotal pairs reported")
@@ -85,7 +107,10 @@ def a03(ctx: RunContext):
     v = V(ctx.A, ctx.focus)
     if basis("CASH_RESTRICTED_TOTAL", v.concept("CASH_RESTRICTED_TOTAL")) != basis("CASH_RESTRICTED_TOTAL", v.concept("CASH_RESTRICTED_TOTAL", 1)):
         raise SkipDetector("cash is reported including restricted cash in one year and excluding it in the other")
-    flows = cfo + cfi + cff + (fx if finite(fx) else 0.0)
+    # cash flows of discontinued operations are a line of their own when the three totals are those of continuing operations
+    # (Disney FY2019: 5,984 - 15,096 - 464 - 98 plus 10,974 from discontinued operations = the 1,300 change)
+    disc = ctx.a("CASH_DISCONTINUED")
+    flows = cfo + cfi + cff + (fx if finite(fx) else 0.0) + (disc if finite(disc) else 0.0)
     resid = (end - beg) - flows
     base = max(abs(end), abs(cfo), 1.0)
     sev = _residual_severity(resid, base, 0.01, 0.05)
@@ -93,7 +118,7 @@ def a03(ctx: RunContext):
                rationale=(f"Change in cash {fmt_money(end - beg)} vs operating, investing and financing cash flows plus the "
                           f"currency effect {fmt_money(flows)}; "
                           f"unexplained {fmt_money(resid)}."),
-               evidence=ctx.evs(["CASH_RESTRICTED_TOTAL"], ks=(0, 1)) + ctx.evs(["CFO", "CFI", "CFF"], ks=(0,)))]
+               evidence=ctx.evs(["CASH_RESTRICTED_TOTAL"], ks=(0, 1)) + ctx.evs(["CFO", "CFI", "CFF", "CASH_DISCONTINUED"], ks=(0,)))]
 
 
 def dividends_declared(ctx: RunContext) -> tuple[float, str]:
@@ -113,17 +138,33 @@ def dividends_declared(ctx: RunContext) -> tuple[float, str]:
     return paid, "paid (declared not reported)"
 
 
+STOCK_ISSUED_NONCASH_RE = (r"issued[^.]{0,120}shares[^.]{0,200}(?:as consideration|in exchange for)"
+                           r"|(?:issued|issuance of)[^.]{0,80}shares[^.]{0,160}(?:in (?:connection|exchange) with|as consideration|to (?:acquire|fund the|pay for))"
+                           r"[^.]{0,80}(?:acquisition|merger|business combination|acquire)"
+                           r"|(?:acquisition|merger)[^.]{0,160}(?:consideration|purchase price)[^.]{0,120}(?:in|with|of) (?:shares|common stock|our stock)"
+                           r"|(?:convertible )?preferred stock[^.]{0,120}(?:converted|conversion)[^.]{0,120}(?:common stock|shares)"
+                           r"|(?:converted|conversion)[^.]{0,120}preferred[^.]{0,120}(?:initial public offering|IPO)")
+
+
 @detector("A.04", "Equity roll-forward", F, Area.INTEGRITY)
 def a04(ctx: RunContext):
     """Begin equity + NI + OCI - dividends - buybacks + issuance + SBC = end equity."""
     e1, e0 = ctx.a("EQUITY"), ctx.a("EQUITY", 1)
     ni = ctx.a("NET_INCOME")
     need(e1, e0, ni)
-    add = {i: ctx.a(i) for i in ("OCI", "BUYBACKS", "EQUITY_ISSUED", "SBC", "CONVERTIBLE_EQUITY_COMPONENT")}
+    add = {i: ctx.a(i) for i in ("OCI", "BUYBACKS", "EQUITY_ISSUED", "EQUITY_ISSUED_STMT", "SBC", "CONVERTIBLE_EQUITY_COMPONENT", "SHARE_TAX_WITHHELD",
+                                 "EQUITY_ISSUED_ACQ", "EQUITY_CONVERTED", "EQUITY_ISSUED_OTHER")}
     g = {k: (v if finite(v) else 0.0) for k, v in add.items()}
     div, div_how = dividends_declared(ctx)
-    expected_end = (e0 + ni + g["OCI"] - div - g["BUYBACKS"] + g["EQUITY_ISSUED"] + g["SBC"]
-                    + g["CONVERTIBLE_EQUITY_COMPONENT"])
+    # shares issued to pay for acquisitions (Boeing 2025: Spirit AeroSystems, $4.7B; Disney 2019: 21st Century Fox), converted
+    # securities (Uber's IPO: $14B of preferred stock) and taxes paid on net share settlement (Snowflake: $0.7B) are
+    # tagged lines of the statement of equity and the cash flow statement, not unexplained movements
+    # shares issued as the statement of equity shows them include what cash proceeds miss (dividend reinvestment, forward sales
+    # settled later: Realty Income 2019, $2.1B against $0.8B of proceeds)
+    issued = max(g["EQUITY_ISSUED"], g["EQUITY_ISSUED_STMT"])
+    expected_end = (e0 + ni + g["OCI"] - div - g["BUYBACKS"] + issued + g["SBC"]
+                    + g["CONVERTIBLE_EQUITY_COMPONENT"] - abs(g["SHARE_TAX_WITHHELD"]) + g["EQUITY_ISSUED_ACQ"]
+                    + g["EQUITY_CONVERTED"] + g["EQUITY_ISSUED_OTHER"])
     resid = e1 - expected_end
     base = max(abs(e1), abs(e0), 1.0)
     # employee tax withholding on vesting and other items routinely leave a few percent unexplained
@@ -137,13 +178,28 @@ def a04(ctx: RunContext):
         sev *= 0.5
         nci_note = (f" Noncontrolling interests are {fmt_pct(nci / incl)} of total equity; exchanges of their units "
                     "into common stock move equity to the parent without any cash flow.")
+    if sev > 0 and resid > 0 and ctx.doc is not None:
+        # equity that rose without cash or income: shares issued as the price of an acquisition (Disney 2019, 21st Century Fox:
+        # $35.7B) or preferred stock converted at an IPO (Uber 2019) are in the statement of equity, whose lines the SEC's data
+        # does not carry when the company breaks them out by class of equity
+        hit = next(iter(search(ctx.doc, STOCK_ISSUED_NONCASH_RE, ("item7", "item8"))), None)
+        if hit is not None:
+            sev *= 0.4
+            nci_note += f" The annual report describes shares issued without cash: \"{hit.quote[:200]}\"."
     return [mk("A.04", ctx, raw_value=resid, expected=0.0, severity=sev, unit="USD", scheme=Scheme.REPORTING_INTEGRITY,
-               rationale=(f"Equity moved {fmt_money(e1 - e0)}; NI, OCI, dividends ({div_how}), buybacks, issuance and SBC explain "
+               rationale=(f"Equity moved {fmt_money(e1 - e0)}; NI, OCI, dividends ({div_how}), buybacks, issuance (including shares issued for "
+                          f"acquisitions and conversions), tax withheld on stock awards and SBC explain "
                           f"{fmt_money(expected_end - e0)}. Unexplained {fmt_money(resid)} "
                           f"({fmt_pct(safe_div(resid, base))} of equity). Untagged equity offerings, convertible-note "
                           "components, warrant exercises and tax withholding on vesting are common causes." + nci_note),
                evidence=ctx.evs(["EQUITY", "DIVIDENDS_PAYABLE"], ks=(0, 1))
                + ctx.evs(["NET_INCOME", "BUYBACKS", "DIVIDENDS_DECLARED", "DIVIDENDS_PAID"], ks=(0,)))]
+
+
+RE_RECLASS_RE = (r"cumulative[- ]effect (?:adjustment|of (?:the )?(?:adoption|change in accounting|initial application))"
+                 r"|cumulative adjustment to (?:the )?(?:opening|beginning)? ?retained earnings"
+                 r"|(?:retire|retired|retirement|cancel|cancell?ed|cancellation)\w*\s+(?:of\s+)?(?:its\s+|our\s+|all\s+)?.{0,40}?treasury (?:stock|shares)"
+                 r"|treasury (?:stock|shares)[^.]{0,60}(?:were |was )?(?:retired|cancell?ed)")
 
 
 @detector("A.05", "Retained-earnings roll-forward", F, Area.INTEGRITY)
@@ -174,6 +230,14 @@ def a05(ctx: RunContext):
         resid_eff = resid
     base = max(abs(ni), abs(r1) * 0.1, 1.0)
     sev = _residual_severity(resid_eff, base, 0.05, 0.30)
+    if sev > 0 and ctx.doc is not None:
+        # equity moves between its parts without touching income or dividends: a cumulative-effect adjustment on adopting a
+        # standard (Toyota 2019: ASU 2016-01, 1.27T yen; Salesforce: ASC 606) and treasury shares retired against retained
+        # earnings (Disney 2019: $40B; ASML) show only in the statement of equity, whose lines companyfacts leaves out
+        hit = next(iter(search(ctx.doc, RE_RECLASS_RE, ("item7", "item8"))), None)
+        if hit is not None:
+            sev *= 0.4
+            explained += f" The annual report describes a change in retained earnings that is not income or dividends: \"{hit.quote[:200]}\"."
     return [mk("A.05", ctx, raw_value=resid, expected=0.0, severity=sev, unit="USD", scheme=Scheme.REPORTING_INTEGRITY,
                rationale=(f"Retained earnings moved {fmt_money(r1 - r0)} vs NI less dividends ({div_how}) {fmt_money(ni - div)}; "
                           f"residual {fmt_money(resid)}.{explained}"),
@@ -248,26 +312,40 @@ def a08(ctx: RunContext):
     need(g1, g0, capex)
     acq = ctx.a("ACQUISITIONS")
     acq = acq if finite(acq) else 0.0
-    unexplained = (g1 - g0) - capex - 0.5 * acq
+    # additions that are not cash capex of the year: assets acquired under finance leases, and capital expenditure accrued
+    # but unpaid at the year end net of what was accrued a year earlier (Oracle 2026: 4.9B + 5.3B - 1.4B of the 7.4B gap)
+    lease, up1, up0 = ctx.a("FINANCE_LEASE_ASSETS_ADDED"), ctx.a("CAPEX_UNPAID"), ctx.a("CAPEX_UNPAID", 1)
+    noncash = (lease if finite(lease) else 0.0) + (up1 - up0 if finite(up1, up0) else 0.0)
+    unexplained = (g1 - g0) - capex - 0.5 * acq - noncash
     sev = _residual_severity(max(unexplained, 0.0), g0, 0.03, 0.15)
     return [mk("A.08", ctx, raw_value=unexplained, expected=0.0, severity=sev, unit="USD",
                scheme=Scheme.SHIFT_EXPENSES_LATER, area=Area.CAPITALIZATION, direction="income_increasing",
                rationale=(f"Gross PP&E grew {fmt_money(g1 - g0)} with capex {fmt_money(capex)}"
                           f"{' and acquisitions ' + fmt_money(acq) if acq else ''}; "
-                          f"{fmt_money(unexplained)} of additions are not explained by cash spending (disposals would make the gap larger)."),
-               evidence=ctx.evs(["PPE_GROSS"], ks=(0, 1)) + ctx.evs(["CAPEX"], ks=(0,)))]
+                          f"{fmt_money(unexplained)} of additions are not explained by cash spending"
+                          f"{' and by ' + fmt_money(noncash) + ' of finance-lease additions and unpaid capex' if noncash else ''} "
+                          "(disposals would make the gap larger; asset-retirement additions and capitalized interest also add to "
+                          "PP&E without cash capex)."),
+               evidence=ctx.evs(["PPE_GROSS"], ks=(0, 1)) + ctx.evs(["CAPEX", "FINANCE_LEASE_ASSETS_ADDED", "CAPEX_UNPAID"], ks=(0,)))]
 
 
 @detector("A.09", "Allowance roll-forward", F, Area.INTEGRITY)
 def a09(ctx: RunContext):
     """Allowance(t) = Allowance(t-1) + provision - write-offs."""
-    a1, a0, prov, wo = ctx.a("ALLOWANCE"), ctx.a("ALLOWANCE", 1), ctx.a("PROVISION_DOUBTFUL"), ctx.a("WRITE_OFFS")
+    a1, a0, prov, wo = abs(ctx.a("ALLOWANCE")), abs(ctx.a("ALLOWANCE", 1)), ctx.a("PROVISION_DOUBTFUL"), ctx.a("WRITE_OFFS")
     need(a1, a0, prov, wo, reason="allowance roll-forward components not tagged")
     resid = a1 - (a0 + prov - wo)
     sev = _residual_severity(resid, max(a1, a0, 1.0), 0.10, 0.50)
+    note = ""
+    acq, ta0 = ctx.a("ACQUISITIONS"), ctx.a("TOTAL_ASSETS", 1)
+    if resid > 0 and finite(acq, ta0) and ta0 > 0 and acq / ta0 > 0.10:
+        # allowance taken on with acquired receivables is a roll-forward item the provision and write-off tags do not carry
+        sev *= 0.5
+        note = (f" Discounted: {fmt_money(acq)} was paid for acquisitions ({fmt_pct(acq / ta0)} of prior-year assets), and "
+                f"allowance acquired with the receivables is not part of the tagged provision or write-offs.")
     return [mk("A.09", ctx, raw_value=resid, expected=0.0, severity=sev, unit="USD", area=Area.RECEIVABLES,
                scheme=Scheme.REPORTING_INTEGRITY,
-               rationale=f"Allowance roll-forward residual {fmt_money(resid)} (recoveries and FX can explain small gaps).",
+               rationale=f"Allowance roll-forward residual {fmt_money(resid)} (recoveries and FX can explain small gaps)." + note,
                evidence=ctx.evs(["ALLOWANCE"], ks=(0, 1)) + ctx.evs(["PROVISION_DOUBTFUL", "WRITE_OFFS"], ks=(0,)))]
 
 
@@ -291,6 +369,16 @@ def a10(ctx: RunContext):
         sev = min(sev, 0.3)
         note = (" Goodwill from acquisitions and disposals is not tagged (often reported only by segment), so the "
                 "roll-forward is incomplete rather than inconsistent.")
+    acq = sum(x for x in (ctx.a("ACQUISITIONS"), ctx.a("EQUITY_ISSUED_ACQ")) if finite(x))
+    div = ctx.a("DIVESTITURES")
+    if resid > 0 and acq > 0 and sev > 0:
+        # goodwill of acquired businesses is usually tagged by segment only (Coca-Cola 2019: Costa), where companyfacts has none
+        sev *= 0.5
+        note += f" Discounted: {fmt_money(acq)} was paid for acquisitions in the year, and the goodwill acquired is often tagged by segment only."
+    elif resid < 0 and finite(div) and div > 0 and sev > 0:
+        # goodwill of a business sold or moved to held for sale leaves the balance sheet without a roll-forward line (GE 2019)
+        sev *= 0.5
+        note += f" Discounted: {fmt_money(div)} was received from divestitures in the year, whose goodwill leaves the balance."
     return [mk("A.10", ctx, raw_value=resid, expected=0.0, severity=sev, unit="USD", area=Area.MA,
                scheme=Scheme.REPORTING_INTEGRITY,
                rationale=f"Goodwill moved {fmt_money(g1 - g0)}; tagged roll-forward components explain {fmt_money(expected - g0)}; residual {fmt_money(resid)}.{note}",
@@ -308,11 +396,15 @@ def a12(ctx: RunContext):
     """Net income / diluted shares ~= diluted EPS; diluted <= basic when profitable."""
     ni, sh, eps, epsb = ctx.a("NET_INCOME"), ctx.a("SHARES_DILUTED"), ctx.a("EPS_DILUTED"), ctx.a("EPS_BASIC")
     need(ni, sh, eps)
-    implied = safe_div(ni, sh)
+    # EPS divides the income left for common shareholders (after preferred dividends) by the shares: Boeing 2025 net income
+    # 2,235 / 762.3 = 2.93, but (2,235 - 345 of preferred dividends) / 762.3 = 2.48, the reported figure
+    ni_eps = ctx.a("NI_COMMON_DILUTED")
+    num = ni_eps if finite(ni_eps) and abs(ni_eps) > 0 else ni
+    implied = safe_div(num, sh)
     diff = implied - eps
     tol = max(0.02, abs(eps) * 0.02)  # preferred dividends / participating securities create small gaps
     sev = float(np.clip((abs(diff) - tol) / (abs(eps) * 0.15 + 0.05), 0, 1)) if abs(diff) > tol else 0.0
-    msgs = [f"NI / diluted shares = {implied:.2f} vs reported diluted EPS {eps:.2f}"]
+    msgs = [f"{'Net income for diluted EPS' if num is not ni else 'NI'} / diluted shares = {implied:.2f} vs reported diluted EPS {eps:.2f}"]
     factor = ctx.A.rescaled.get(("SHARES_DILUTED", ctx.focus))
     if factor:
         msgs.append(f"diluted shares are tagged in {'millions' if factor == 1e6 else 'thousands'} in the XBRL "
@@ -321,7 +413,7 @@ def a12(ctx: RunContext):
         sev = max(sev, 0.8)
         msgs.append(f"diluted EPS {eps:.2f} exceeds basic {epsb:.2f}")
     return [mk("A.12", ctx, raw_value=diff, expected=0.0, severity=sev, unit="USD/share", scheme=Scheme.REPORTING_INTEGRITY,
-               rationale="; ".join(msgs) + ".", evidence=ctx.evs(["NET_INCOME", "SHARES_DILUTED", "EPS_DILUTED"], ks=(0,)))]
+               rationale="; ".join(msgs) + ".", evidence=ctx.evs(["NET_INCOME", "NI_COMMON_DILUTED", "SHARES_DILUTED", "EPS_DILUTED"], ks=(0,)))]
 
 
 @detector("A.13", "Current tax vs cash taxes", F, Area.INTEGRITY)
@@ -359,12 +451,48 @@ SIGNIFICANT_ITEMS = ("REVENUE", "NET_INCOME", "PRETAX_INCOME", "OPERATING_INCOME
                      "AR", "INVENTORY", "COGS", "TOTAL_LIABILITIES", "RETAINED_EARNINGS")
 
 
+RECAST_CAUSE_RE = re.compile(
+    r"(?i)\b(?:adopt\w*|ASU|accounting standards update|ASC \d{3}|new (?:accounting )?(?:standard|guidance)|discontinued operations?"
+    r"|spin-?off|separation|divestitures?|long-duration targeted improvements"
+    r"|chang\w+ (?:its |our |the |in )?(?:accounting )?(?:methods?|principles?|polic\w+)|accounting changes?)\b")
+RECAST_WORD_RE = re.compile(
+    r"(?i)\b(?:retrospective(?:ly)?|recast|re-cast|as adjusted|have been (?:revised|reclassified|adjusted)"
+    r"|(?:revised|reclassified|adjusted|recast)[^.]{0,80}\bto (?:conform|reflect))\b")
+NOT_A_RECAST_RE = re.compile(r"(?i)\brestate\w*|material weakness|misstatement|\berrors?\b")
+
+
+def disclosed_recast(doc) -> str | None:
+    """The sentence in which an annual report says it recast earlier periods on adopting a standard or for discontinued
+    operations ("the amounts for prior periods have been recast"), or None. A paragraph about errors or a restatement is not
+    one. The comparatives of such a report differ from the first-reported figures by the company's own, disclosed choice."""
+    if doc is None:
+        return None
+    cache = doc.__dict__.setdefault("_recast_sentence", [])
+    if cache:
+        return cache[0]
+    found = None
+    for p in doc.paragraphs:
+        if p.is_table_row or not 60 <= len(p.text) <= 2500:
+            continue
+        w = RECAST_WORD_RE.search(p.text)
+        if w and RECAST_CAUSE_RE.search(p.text) and not NOT_A_RECAST_RE.search(p.text):
+            from ffi.text.search import sentence_bounds
+
+            lo, hi = sentence_bounds(doc.text, p.start + w.start())
+            found = doc.text[lo:hi].strip()
+            break
+    cache.append(found)
+    return found
+
+
 @detector("A.14", "Silent restatement (revised comparatives)", F, Area.INTEGRITY)
 def a14(ctx: RunContext):
     """A prior-period value re-reported differently in a later 10-K, with or without a restatement label."""
     v = ctx.store.versions("A")
     if v.empty:
         raise SkipDetector("no versioned annual facts")
+    all_versions = v
+    docs = {d.accession: d for d in ctx.docs}
     v = v[v["item"].isin(SIGNIFICANT_ITEMS) & (v["end"] <= ctx.focus + pd.Timedelta(days=8))]
     v = v[v["end"] >= ctx.focus - pd.Timedelta(days=3 * 366)]
     v = v[v.groupby(["item", "end"])["val"].transform("nunique") > 1]  # only values that were re-reported differently
@@ -388,8 +516,26 @@ def a14(ctx: RunContext):
         sev = float(np.clip(0.3 + 4 * mat if income_item else 0.15 + 2 * mat, 0, 1))
         # labelled: re-reported in an amendment, or within a year after a non-reliance notice
         is_labeled = last["accn"] in amended or any(0 <= (pd.Timestamp(last["filed"]) - d).days <= 366 for d in non_reliance)
-        period_label = ctx.A.label(pd.Timestamp(end)) if pd.Timestamp(end) in ctx.A.labels else f"FY{pd.Timestamp(end).year}"
+        period_label = ctx.A.label(pd.Timestamp(end)) if pd.Timestamp(end) in ctx.A.labels else f"FY{fiscal_year_of(pd.Timestamp(end))}"
         tags = ["labeled_restatement" if is_labeled else "unlabeled_revision"]
+        recast_note = ""
+        if not is_labeled:
+            # a recast leaves a trace: net income of the period is the same in both reports while revenue, operating income or
+            # pre-tax income moved (discontinued operations, a reclassification), or the later report says it recast prior
+            # periods on adopting a standard. Neither is a correction of earnings, so it cannot reach the flag line.
+            ni = all_versions[(all_versions["item"] == "NET_INCOME") & (all_versions["end"] == end)]
+            ni_first = ni[ni["accn"] == first["accn"]]["val"]
+            ni_last = ni[ni["accn"] == last["accn"]]["val"]
+            if (item in ("REVENUE", "COGS", "OPERATING_INCOME", "PRETAX_INCOME") and not ni_first.empty and not ni_last.empty
+                    and abs(float(ni_last.iloc[0]) - float(ni_first.iloc[0])) <= 0.005 * max(abs(float(ni_first.iloc[0])), 1.0)):
+                tags[0] = "presentation_recast"
+                recast_note = (" Net income for the period is the same in both reports, so this is a reclassification or a recast "
+                               "(discontinued operations, a change in presentation), not a change in earnings.")
+            elif (quote := disclosed_recast(docs.get(last["accn"]))):
+                tags[0] = "disclosed_recast"
+                recast_note = f" The later report discloses a recast: \"{quote[:200]}\"."
+            if recast_note:
+                sev = min(sev, 0.35)
         direction = "income_increasing" if (income_item and first["val"] > last["val"] and item != "COGS") else "neutral"
         ev = [
             EvidenceRef(node_id=f"fact:{_fact_id(first)}", kind="fact",
@@ -408,7 +554,8 @@ def a14(ctx: RunContext):
                       rationale=(f"{BY_ID[item].label} for {period_label} was reported as {fmt_money(first['val'])} "
                                  f"(filed {pd.Timestamp(first['filed']).date()}) and later as {fmt_money(last['val'])} "
                                  f"(filed {pd.Timestamp(last['filed']).date()}), a change of {fmt_pct(delta / first['val'] if first['val'] else np.nan)}"
-                                 f"{'' if is_labeled else ', without a 10-K/A or non-reliance filing'}. Reclassifications and recasts are common legitimate causes."),
+                                 f"{'' if is_labeled else ', without a 10-K/A or non-reliance filing'}. Reclassifications and recasts are common legitimate causes."
+                                 + recast_note),
                       evidence=ev))
     if not out:
         return [mk("A.14", ctx, raw_value=0.0, expected=0.0, severity=0.0,
@@ -433,7 +580,7 @@ def _as_presented(ctx: RunContext, item: str, period: pd.Timestamp) -> float:
 @detector("A.15", "Text-number consistency (MD&A vs XBRL)", F, Area.INTEGRITY, needs_text=True)
 def a15(ctx: RunContext):
     """Company-wide revenue / net income totals stated in MD&A match the tagged financial statements."""
-    from ffi.detectors.textnum import check_amounts
+    from ffi.detectors.textnum import check_amounts, totals_by_year
 
     doc = ctx.doc
     if doc is None:
@@ -445,8 +592,8 @@ def a15(ctx: RunContext):
     # an earlier year's total still counts as checked, but only the focus year's total can make it a mismatch)
     # earlier years as this annual report presents them (its comparatives), which is what its MD&A describes
     years = [ctx.period_at(k) for k in range(3)]
-    known = {item: {"years": {p.year: _as_presented(ctx, item, p) for p in years if p is not None}, "focus": ctx.focus.year}
-             for item in ("REVENUE", "NET_INCOME")}
+    known = {item: {"years": totals_by_year([(p, _as_presented(ctx, item, p)) for p in years if p is not None]),
+                    "focus": ctx.focus.year} for item in ("REVENUE", "NET_INCOME")}
     checked, bad = check_amounts(text, known)
     if checked == 0:
         raise SkipDetector("no company-wide revenue / net income totals stated in MD&A in a recognisable form")

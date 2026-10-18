@@ -404,6 +404,17 @@ intake → hypothesize → plan_evidence → [review_plan] → gather (parallel 
 - **The supervised misstatement model is a ranking signal, not a probability.** It is trained on weak labels: 8-K Item 4.02 non-reliance filings.
 - **Market value** is approximated by the public float on the 10-K cover page.
 
+## Guarding against false findings
+
+Three layers keep a test's mistake from reaching a client:
+1. **A plausibility gate** on every result: impossible values (1,500+ days, a part larger than its whole, an amount many
+   times the company's size) are held back and shown as "Held back".
+2. **The AI investigation checks the test itself.** When it concludes that a test compared figures that are not like for like
+   (a quarter with a year, a segment with the company, one concept with another), the independent auditor must confirm that
+   from the evidence. A confirmed test error is removed from the anomaly list and the risk index and shown in its own section,
+   "Results set aside as probable test errors", with the reason. The next candidate is investigated in its place.
+3. **The review procedure** (below) with its sweep over a wide panel of companies, which finds new test errors before a client does.
+
 ## Reviewing the project
 
 A full review is defined in `.claude/agents/independent-reviewer.md`. In Claude Code, ask for the *independent-reviewer*

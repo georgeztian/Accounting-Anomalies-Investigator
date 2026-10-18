@@ -15,7 +15,7 @@
   <div class="muted">Industry: {{ m.company.sic_description or 'not stated' }} · Auditor: {{ m.company.auditor or 'not identified' }} · Prepared {{ m.generated }}</div>
   <p class="muted">Company type: <strong>{{ m.profile.label }}</strong> · amounts in {{ m.currency }} · {{ m.profile.excluded }} tests do not apply to this type of company</p>
   <p class="muted"><strong>Caveats:</strong> {% if m.company.warnings %}{{ m.company.warnings|join(' ') }}{% else %}{{ m.none_text }}{% endif %}</p>
-  <nav class="toc" aria-label="Sections"><a href="#summary">Summary</a><a href="#dashboard">Overview</a><a href="#findings">Suspicious anomalies</a><a href="#tests">All tests</a><a href="#text">Disclosure changes</a><a href="#method">How this review works</a><a href="#glossary">Glossary</a></nav>
+  <nav class="toc" aria-label="Sections"><a href="#summary">Summary</a><a href="#dashboard">Overview</a><a href="#findings">Suspicious anomalies</a><a href="#setaside">Set aside</a><a href="#tests">All tests</a><a href="#text">Disclosure changes</a><a href="#method">How this review works</a><a href="#glossary">Glossary</a></nav>
 </header>
 
 <section id="summary">
@@ -104,9 +104,15 @@
 {% endfor %}
 </section>
 
+<section id="setaside">
+<h2>Results set aside as probable test errors</h2>
+<p class="muted">{{ m.set_aside_note }}</p>
+{% for s in m.set_aside %}<div class="card"><h3>{{ s.title }}{% if s.years %} <span class="muted">· {{ s.years }}</span>{% endif %}</h3><p class="muted">Based on: {{ s.tests|join('; ') }}</p><p><strong>Why it was set aside:</strong> {{ s.reason }}</p></div>{% else %}<p>{{ m.none_text }}</p>{% endfor %}
+</section>
+
 <section id="tests">
 <h2>All tests performed</h2>
-<p class="muted">{{ m.statuses.ok }} tests ran; {{ m.statuses.skipped }} could not run because data was missing; {{ m.statuses['n/a'] }} do not apply to this type of company; {{ m.statuses.error }} failed. Severity runs from 0 (nothing unusual) to 1 (strongest); a result is flagged at {{ "%.1f"|format(m.flag_at) }}. "Explained" means the result was unusual but a known legitimate cause was found. Open "About this test" for what each test checks, why it matters and how to read it.</p>
+<p class="muted">{{ m.statuses.ok }} tests ran; {{ m.statuses.skipped }} could not run because data was missing; {{ m.statuses['n/a'] }} do not apply to this type of company; {{ m.statuses.error }} failed. Severity runs from 0 (nothing unusual) to 1 (strongest); a result is flagged at {{ "%.1f"|format(m.flag_at) }}. "Explained" means the result was unusual but a known legitimate cause was found. "Held back" means the result or one of its inputs was physically impossible (for example a part larger than its whole), so it was not counted. Open "About this test" for what each test checks, why it matters and how to read it.</p>
 {% for fam in m.families %}
 <details class="card"><summary><strong>{{ fam.name }}</strong> - {{ fam.flagged }} flagged of {{ fam.ran }} that ran</summary>
 <div class="tablewrap"><table><thead><tr><th>Test</th><th>Result</th><th class="num">Severity</th><th class="num">Peer percentile</th><th>What was found</th></tr></thead><tbody>

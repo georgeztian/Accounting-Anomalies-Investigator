@@ -97,7 +97,8 @@ class Step:
         return _Ctx()
 
 
-OFFICER_TEXTS = 8  # Item 5.02 filings read to tell which officer changed (the latest in the officer-turnover window)
+OFFICER_TEXTS = 30  # Item 5.02 filings read to tell which officer changed (the latest in the officer-turnover window; a company with
+# more than eight pay-plan and director filings in two years was scored on the unread ones)
 
 
 def load_events(client: EdgarClient, cik: int, filings, as_of: date, focus: pd.Timestamp) -> list[Event]:
@@ -141,12 +142,22 @@ ITEM_502_TITLE_RE = re.compile(r"(?i)departure of directors or (?:certain|princi
                                r"(?:\s*appointment of (?:certain|principal) officers;?)?(?:\s*compensatory arrangements of certain officers\.?)?")
 
 
+# a present-tense biography of a person's other post ("Mr. Martha is chairman and chief executive officer of Medtronic plc"):
+# the title of a new director at another company is no change of this company's officers
+OTHER_POST_RE = re.compile(
+    r"(?i)[^.]*\b(?:is|was|serves as|served as|has served as)\s+(?:the\s+)?(?:[\w&-]+,?\s+){0,4}?"
+    r"(?:chief executive officer|chief financial officer|chief accounting officer)\s+of\s+(?!the Company\b|the Registrant\b|our\b)[A-Z][^.]*\.")
+# a departing officer's next job ("to accept a chief financial officer position with another company")
+NEXT_JOB_RE = re.compile(r"(?i)\b(?:in order )?to (?:accept|become|assume|join|take)[^.]{0,120}\b(?:with|at)\s+(?:another|a different|an?)\s+(?:company|organization|firm)[^.]*")
+
+
 def _officer_change_kind(raw_html: str) -> str:
     """Describe which senior officer an Item 5.02 8-K changes (compensation-only 5.02s mention none)."""
     from ffi.text.document import html_to_lines
 
     text = " ".join(line for line, _ in html_to_lines(raw_html))[:20000]
     text = ITEM_502_TITLE_RE.sub(" ", text)  # the item's own title says "Appointment of Certain Officers" in every 5.02
+    text = NEXT_JOB_RE.sub(" ", OTHER_POST_RE.sub(" ", text))
     roles = set()
     for m in OFFICER_RE.finditer(text):
         role = (m.group(1) or m.group(4) or "").lower()

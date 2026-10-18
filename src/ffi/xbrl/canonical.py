@@ -42,6 +42,8 @@ ITEMS: tuple[CanonicalItem, ...] = (
     _i("GROSS_PROFIT", "Gross profit", "D", USD, "IS", "GrossProfit"),
     _i("SGA", "SG&A expense", "D", USD, "IS",
        "SellingGeneralAndAdministrativeExpense", "GeneralAndAdministrativeExpense"),
+    # selling expense reported apart from general and administrative expense (Microsoft, Salesforce): SG&A is the sum
+    _i("SELLING_MARKETING", "Selling and marketing expense", "D", USD, "IS", "SellingAndMarketingExpense"),
     _i("RND", "R&D expense", "D", USD, "IS",
        "ResearchAndDevelopmentExpense", "ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost"),
     _i("OPERATING_INCOME", "Operating income", "D", USD, "IS", "OperatingIncomeLoss"),
@@ -57,6 +59,9 @@ ITEMS: tuple[CanonicalItem, ...] = (
     _i("NET_INCOME", "Net income", "D", USD, "IS", "NetIncomeLoss", "ProfitLoss",
        "NetIncomeLossAvailableToCommonStockholdersBasic"),
     _i("NET_INCOME_TO_COMMON", "Net income available to common shareholders", "D", USD, "IS",
+       "NetIncomeLossAvailableToCommonStockholdersBasic"),
+    # the numerator of diluted EPS: net income less preferred dividends (Boeing 2025: 2,235 - 345 = 1,890)
+    _i("NI_COMMON_DILUTED", "Net income for diluted EPS", "D", USD, "IS", "NetIncomeLossAvailableToCommonStockholdersDiluted",
        "NetIncomeLossAvailableToCommonStockholdersBasic"),
     _i("NET_INCOME_INCL_NCI", "Net income incl. noncontrolling interests", "D", USD, "IS", "ProfitLoss",
        "IncomeLossFromContinuingOperationsIncludingPortionAttributableToNoncontrollingInterest"),
@@ -96,6 +101,8 @@ ITEMS: tuple[CanonicalItem, ...] = (
     _i("CAPEX", "Capital expenditures", "D", USD, "CF",
        "PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsToAcquireProductiveAssets"),
     _i("ACQUISITIONS", "Cash paid for acquisitions", "D", USD, "CF", "PaymentsToAcquireBusinessesNetOfCashAcquired"),
+    _i("DIVESTITURES", "Proceeds from divestitures", "D", USD, "CF",
+       "ProceedsFromDivestitureOfBusinesses", "ProceedsFromDivestitureOfBusinessesNetOfCashDivested"),
     _i("DIVIDENDS_PAID", "Dividends paid", "D", USD, "CF", "PaymentsOfDividends", "PaymentsOfDividendsCommonStock"),
     _i("DIVIDENDS_DECLARED", "Dividends declared", "D", USD, "NOTE",
        "DividendsCommonStockCash", "DividendsCommonStock", "Dividends", "DividendsCash"),
@@ -110,14 +117,29 @@ ITEMS: tuple[CanonicalItem, ...] = (
     # option exercises are only part of the shares issued, so they rank last
     _i("EQUITY_ISSUED", "Equity issued", "D", USD, "CF", "ProceedsFromIssuanceOfCommonStock",
        "ProceedsFromIssuanceOrSaleOfEquity", "StockIssuedDuringPeriodValueNewIssues", "ProceedsFromStockOptionsExercised"),
+    # other lines of the statement of equity that move equity without cash in the same line (totals, no dimensions)
+    _i("EQUITY_ISSUED_ACQ", "Stock issued for acquisitions", "D", USD, "NOTE", "StockIssuedDuringPeriodValueAcquisitions"),
+    _i("EQUITY_ISSUED_STMT", "Stock issued (statement of equity)", "D", USD, "NOTE", "StockIssuedDuringPeriodValueNewIssues"),
+    _i("EQUITY_CONVERTED", "Convertible securities converted to stock", "D", USD, "NOTE",
+       "StockIssuedDuringPeriodValueConversionOfConvertibleSecurities", "ConversionOfStockAmountConverted1"),
+    _i("EQUITY_ISSUED_OTHER", "Other stock issued", "D", USD, "NOTE",
+       "StockIssuedDuringPeriodValueOther", "StockIssuedDuringPeriodValueEmployeeStockPurchasePlan"),
     _i("CONVERTIBLE_EQUITY_COMPONENT", "Equity component of convertible debt", "D", USD, "NOTE",
        "AdjustmentsToAdditionalPaidInCapitalEquityComponentOfConvertibleDebt"),
     _i("CASH_CHANGE", "Net change in cash", "D", USD, "CF",
        "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalentsPeriodIncreaseDecreaseIncludingExchangeRateEffect",
        "CashAndCashEquivalentsPeriodIncreaseDecrease"),
+    _i("CASH_DISCONTINUED", "Net cash of discontinued operations", "D", USD, "CF", "NetCashProvidedByUsedInDiscontinuedOperations"),
     _i("FX_EFFECT_CASH", "FX effect on cash", "D", USD, "CF",
        "EffectOfExchangeRateOnCashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
-       "EffectOfExchangeRateOnCashAndCashEquivalents"),
+       "EffectOfExchangeRateOnCashAndCashEquivalents",
+       # Goldman Sachs 2025 tags its $5.4B effect of exchange rates with the disposal-group variant
+       "EffectOfExchangeRateOnCashCashEquivalentsRestrictedCashAndRestrictedCashEquivalentsIncludingDisposalGroupAndDiscontinuedOperations",
+       "EffectOfExchangeRateOnCashAndCashEquivalentsIncludingDisposalGroupAndDiscontinuedOperations"),
+    # additions to PP&E that are not cash capex: capital expenditures accrued but unpaid, assets acquired under finance leases
+    _i("CAPEX_UNPAID", "Capital expenditures incurred but not yet paid", "D", USD, "NOTE", "CapitalExpendituresIncurredButNotYetPaid"),
+    _i("FINANCE_LEASE_ASSETS_ADDED", "Assets obtained under finance leases", "D", USD, "NOTE",
+       "RightOfUseAssetObtainedInExchangeForFinanceLeaseLiability"),
     _i("CHANGE_AR", "Change in receivables (CF)", "D", USD, "CF", "IncreaseDecreaseInAccountsReceivable"),
     _i("CHANGE_INVENTORY", "Change in inventory (CF)", "D", USD, "CF", "IncreaseDecreaseInInventories"),
     _i("CHANGE_AP", "Change in payables (CF)", "D", USD, "CF", "IncreaseDecreaseInAccountsPayable"),
@@ -174,6 +196,9 @@ ITEMS: tuple[CanonicalItem, ...] = (
     _i("PPE_GROSS", "PP&E, gross", "I", USD, "NOTE",
        "PropertyPlantAndEquipmentGross",
        "PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetBeforeAccumulatedDepreciationAndAmortization"),
+    # parts of gross PP&E that carry no depreciation yet
+    _i("PPE_CIP", "Construction in progress", "I", USD, "NOTE", "ConstructionInProgressGross"),
+    _i("PPE_LAND", "Land", "I", USD, "NOTE", "Land"),
     _i("ACCUM_DEP", "Accumulated depreciation", "I", USD, "NOTE",
        "AccumulatedDepreciationDepletionAndAmortizationPropertyPlantAndEquipment"),
     _i("GOODWILL", "Goodwill", "I", USD, "BS", "Goodwill"),
@@ -324,6 +349,8 @@ DIFFERENT_BASIS: dict[str, dict[str, str]] = {
     "PPE_GROSS": {"PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetBeforeAccumulatedDepreciationAndAmortization":
                   "including finance-lease assets"},
     "AR": {"ReceivablesNetCurrent": "all current receivables", "AccountsNotesAndLoansReceivableNetCurrent": "including notes and loans"},
+    # payables together with accrued liabilities (Coca-Cola: DPO 294 days against a peer median of 62): not comparable with trade payables
+    "AP": {"AccountsPayableAndAccruedLiabilitiesCurrent": "payables and accrued liabilities"},
     "COGS": {"CostOfServices": "services only",
              "CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization": "excluding depreciation"},
     # pre-tax income before the share of equity-method investees' results (Toyota), which sits below income tax

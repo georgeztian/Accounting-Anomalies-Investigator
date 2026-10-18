@@ -218,15 +218,21 @@ def _is_cross_reference_index(sections: dict[str, tuple[int, int]], n_lines: int
     return sum(b - a for a, b in spans[:-1]) <= 0.05 * n_lines
 
 
+PAGE_CELL_RE = re.compile(r"(?:\||\s)\s*\d{1,3}\s*$")
+
+
+def _starts_contents_list(lines: list[tuple[str, bool]], i: int) -> bool:
+    """A heading followed by lines that end in page numbers is a row of the table of contents, not a section start."""
+    return sum(bool(PAGE_CELL_RE.search(ln)) and len(ln) < 90 for ln, _ in lines[i + 1: i + 9]) >= 3
+
+
 def _title_sections(lines: list[tuple[str, bool]], end: int) -> dict[str, tuple[int, int]]:
+    hits = _title_hits(lines[:end])
     starts: dict[str, int] = {}
-    for i, (line, _) in enumerate(lines[:end]):
-        clean = line.replace("|", " ").strip()
-        if len(clean) > 130:
-            continue
-        for key, pat in SECTION_TITLES.items():
-            if key not in starts and re.fullmatch(rf"(?i)(?:{pat})\.?", clean):
-                starts[key] = i  # first body heading (table-of-contents rows end in a page number and don't match)
+    for key, cands in hits.items():
+        # the first body heading. Contents rows that end in a page number do not match the title, but a contents list whose
+        # page number sits in another cell does (Intel: "Management's Discussion and Analysis |"): a later heading is the section
+        starts[key] = next((c for c in cands if not _starts_contents_list(lines, c)), cands[0])
     ordered = sorted((i, k) for k, i in starts.items())
     return {k: (i, ordered[n + 1][0] if n + 1 < len(ordered) else end) for n, (i, k) in enumerate(ordered)}
 

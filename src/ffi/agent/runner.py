@@ -14,6 +14,7 @@ from langgraph.types import Command
 from ffi.agent.graph import build_graph
 from ffi.agent.ui import PauseRun, TerminalUI, stdin_interactive
 from ffi.detectors.base import EvidenceRef
+from ffi.scoring.engine import apply_set_aside
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +35,16 @@ def _apply(f, result: dict, case: dict) -> None:
                 usd=round(sum(s.get("usd", 0) for s in result.get("spend", [])), 4),
                 ledger=len(result.get("ledger", [])), verification=result.get("verification"))
     f.ledger = result.get("ledger", [])
+    verification = result.get("verification") or {}
+    if (status == "published" and draft and draft.get("test_assessment") == "likely_test_error"
+            and verification.get("test_error_check") == "supported" and draft.get("test_assessment_reason")):
+        # the investigation concluded the test, not the company, produced this result, and the auditor confirmed it from the evidence
+        f.set_aside = draft["test_assessment_reason"]
+        f.narrative = draft["summary"] + "\n\n" + draft["explanation"]
+        f.narrative_source = "agent: set aside as probable test error"
+        f.ledger = result.get("ledger", [])
+        case["set_aside"] = True
+        return
     if status in ("published", "degraded") and draft:
         f.narrative = draft["summary"] + "\n\n" + draft["explanation"]
         f.narrative_source = "agent" if status == "published" else "agent-degraded"
@@ -90,9 +101,25 @@ def _run_case(ctx, f, saver, run_id: str, ui: TerminalUI) -> dict[str, Any]:
 def investigate(ctx, score, run_dir: Path, run_id: str, opts, ui: TerminalUI | None = None) -> list[dict[str, Any]]:
     """Investigate the top findings. Unattended runs investigate cases in parallel; interactive runs one at a time
     (so prompts never interleave) and stop at the first pause."""
-    targets = [f for f in score.findings if f.kind == "pattern"][: opts.max_cases] or score.findings[: opts.max_cases]
-    cases = investigate_cases([(ctx, f) for f in targets], run_dir, run_id, ui)
+    candidates = [f for f in score.findings if f.kind == "pattern"] or list(score.findings)
+    cases = investigate_with_backfill([(ctx, f) for f in candidates], opts.max_cases, run_dir, run_id, ui)
+    apply_set_aside(score)
     score.findings.sort(key=lambda x: -x.priority)
+    return cases
+
+
+def investigate_with_backfill(candidates: list[tuple[Any, Any]], max_cases: int, run_dir: Path, run_id: str,
+                              ui: TerminalUI | None = None) -> list[dict[str, Any]]:
+    """Investigate the first `max_cases` candidates; each one the investigation sets aside as a test error is replaced by the
+    next candidate, so the report still gets `max_cases` investigated anomalies when enough exist."""
+    cases: list[dict[str, Any]] = []
+    todo, rest = candidates[:max_cases], candidates[max_cases:]
+    while todo:
+        cases += investigate_cases(todo, run_dir, run_id, ui)
+        if any(c.get("status") == "paused" for c in cases):
+            break
+        replaced = sum(1 for _, f in todo if f.set_aside)
+        todo, rest = rest[:replaced], rest[replaced:]
     return cases
 
 

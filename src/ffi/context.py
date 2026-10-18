@@ -21,6 +21,7 @@ from ffi.xbrl.canonical import BY_ID
 from ffi.xbrl.facts import FactStore, Panel
 
 STATUTORY_TAX = 0.21
+PERIMETER_CHANGE = 0.15  # a later report moves a year's revenue by more than this: the company changed shape
 OFFICER_ROLE_TAGS = ("CFO change", "CEO change", "CAO change")  # written by pipeline.run._officer_change_kind
 
 
@@ -71,8 +72,34 @@ class RunContext:
     def periods(self) -> list[pd.Timestamp]:
         return [p for p in self.A.periods if p <= self.focus]
 
+    @property
+    def perimeter_break(self) -> pd.Timestamp | None:
+        """The latest fiscal year before the focus year whose revenue, as first reported, was later re-reported more than 15%
+        different (a spin-off, a divestiture presented as discontinued operations: General Electric's FY2023 revenue was
+        $67.95B and became $35.35B). Figures of that year and earlier describe another company than the focus year's, so no
+        comparison with them is made (`period_at`, `hist`, `comparable_periods`). None when there is no such year."""
+        if "_perimeter_break" not in self.__dict__:
+            found = None
+            try:
+                v = self.store.versions("A")
+                v = v[(v["item"] == "REVENUE") & (v["end"] < self.focus - pd.Timedelta(days=300))]
+                for end, g in v.groupby("end"):
+                    first, last = g.sort_values("filed")["val"].iloc[0], g.sort_values("filed")["val"].iloc[-1]
+                    if first > 0 and abs(last - first) / first > PERIMETER_CHANGE and (found is None or end > found):
+                        found = pd.Timestamp(end)
+            except (AttributeError, KeyError, TypeError):  # a store without versions (tests with stand-in contexts)
+                found = None
+            self.__dict__["_perimeter_break"] = found
+        return self.__dict__["_perimeter_break"]
+
+    @property
+    def comparable_periods(self) -> list[pd.Timestamp]:
+        """The fiscal years up to the focus year that are on the focus year's perimeter (see `perimeter_break`)."""
+        b = self.perimeter_break
+        return [p for p in self.periods if b is None or p > b]
+
     def period_at(self, k: int = 0) -> pd.Timestamp | None:
-        ps = self.periods
+        ps = self.comparable_periods
         return ps[-1 - k] if len(ps) > k else None
 
     @property
@@ -96,7 +123,8 @@ class RunContext:
 
     def hist(self, item: str, n: int = 6) -> pd.Series:
         s = self.A.series(item)
-        return s[s.index <= self.focus].tail(n)
+        b = self.perimeter_break
+        return s[(s.index <= self.focus) & ((s.index > b) if b is not None else True)].tail(n)
 
     def q_periods(self) -> list[pd.Timestamp]:
         return [p for p in self.Q.periods if p <= self.focus + pd.Timedelta(days=8)]

@@ -23,7 +23,7 @@ from typing import Any
 
 import numpy as np
 
-from ffi.scoring.engine import TEMPLATES, Finding, _matches, band_of
+from ffi.scoring.engine import TEMPLATES, Finding, _matches, band_of, index_of
 
 RECENT_YEARS = 3
 OLD_FACTOR = 0.85
@@ -39,6 +39,7 @@ class SpanResult:
     findings: list[Finding]  # merged anomalies, most important first
     rep_year: dict[str, int] = field(default_factory=dict)  # merged finding id -> index of the year that represents it
     area_by_year: dict[str, list[float]] = field(default_factory=dict)  # accounting area -> strength in each year
+    set_aside: list[Finding] = field(default_factory=list)  # anomalies the investigation showed to be test errors
 
 
 def _key(f: Finding, present_patterns: set[str]) -> str:
@@ -146,6 +147,35 @@ def merge(years: list[Any]) -> SpanResult:
     area_by_year = {a: [round(y.score.area_scores.get(a, 0.0), 2) for y in years] for a in areas}
     index = period_index([y.score.risk_index for y in years])
     return SpanResult(labels, yearly, index, band_of(index), merged, rep_year, area_by_year)
+
+
+def apply_set_aside(span: SpanResult, years: list[Any]) -> list[Finding]:
+    """Anomalies the investigation showed to be test errors (confirmed by the independent auditor) leave the list, and each
+    year they were flagged in loses their contribution to its risk index; the period index is recomputed."""
+    aside = [f for f in span.findings if f.set_aside]
+    if not aside:
+        return []
+    for f in aside:
+        detectors = {s.detector_id for s in f.signals}
+        for y in years:
+            label = y.ctx.focus_label
+            if label not in f.years:
+                continue
+            contrib = dict(y.score.contributions)
+            for key in [f"pattern:{f.id}", *detectors]:
+                contrib.pop(key, None)
+            y.score.contributions = sorted(contrib.items(), key=lambda kv: -kv[1])
+            y.score.risk_index = index_of(contrib)
+            y.score.band = band_of(y.score.risk_index)
+            y.score.findings = [g for g in y.score.findings if g.id != f.id and not (g.kind == "signal" and g.signals[0].detector_id in detectors)]
+    span.findings = [f for f in span.findings if not f.set_aside]
+    span.set_aside += aside
+    for row, y in zip(span.yearly, years, strict=True):
+        row.update(risk_index=y.score.risk_index, band=y.score.band, findings=len(y.score.findings),
+                   top=y.score.findings[0].title if y.score.findings else "")
+    span.risk_index = period_index([y.score.risk_index for y in years])
+    span.band = band_of(span.risk_index)
+    return aside
 
 
 def apply_audit(span: SpanResult) -> None:
