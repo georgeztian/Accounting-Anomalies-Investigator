@@ -5,7 +5,8 @@ figures from different periods", "the extractor filed a line item under total op
 still lists the finding. This script reads every saved run (reports/*/run.pkl.gz, no downloads, no AI calls) and
 lists, per test:
 
-- investigation conclusions and innocent explanations that blame the test, the data or the parsing;
+- results set aside as test errors, and investigation conclusions and innocent explanations that blame the test, the
+  data or the parsing;
 - auditor corrections that point at a gap in what the pipeline gives the AI (missing evidence, missing definitions);
 - investigations that did not finish, with the objections that kept them from finishing;
 - test results that are implausible on their face (NaN, out-of-range values, a flag with no evidence).
@@ -26,14 +27,15 @@ from pathlib import Path
 
 # wording that blames the test or the data rather than the company
 BLAME_RE = re.compile(
-    r"(?i)\b(?:the )?(?:detector|test|check|extractor|parser|tool)\b[^.]{0,80}?\b(?:most likely|likely|probably|may have|appears to|seems to|"
+    r"(?i)\b(?:the )?(?:detector|test|check|extractor|parser|tool)\b[^.]{0,80}?\b(?:most likely|likely|probably|may have|may not|appears to|seems to|"
     r"mis(?:read|label|classif|match)\w*|paired|compared figures|confus\w*|picked|labels?|labell?ed|filed|assigned|wrong|error)|artifact|different periods|"
     r"quarter\w*[^.]{0,40}\b(?:full[- ]year|annual)\b[^.]{0,30}\b(?:compar|pair|mix)|not comparable|mixed denominators?|"
     r"(?:line item|segment|subsidiary|product line)s?[^.]{0,40}\b(?:as|under|for) (?:the )?(?:total|company-wide|whole company)|"
     r"pars(?:ing|er) (?:error|problem|mismatch)|tagging (?:change|error)|scale error|units? (?:mismatch|error)|sign convention")
 # auditor corrections that point at a pipeline gap rather than at the writer
-GAP_RE = re.compile(r"(?i)evidence pack (?:has|contains|gives) no|no evidence (?:item|in the pack)|not in the (?:evidence )?pack|"
-                    r"does not (?:state|define|show) (?:how|which|what)|no definition|cannot be checked")
+GAP_RE = re.compile(r"(?i)evidence(?: pack)? (?:has|contains|gives|shows) no|no evidence (?:item|in the pack)|not in the (?:evidence )?pack|"
+                    r"does not (?:state|define|show) (?:how|which|what)|no definition|cannot be checked|truncated|cut off|"
+                    r"only available for")
 
 
 def _finite(x) -> bool:
@@ -73,11 +75,15 @@ def mine(root: Path) -> str:
             continue
         run = path.parent.name
         span = getattr(out, "kind", "") == "span"
-        findings = out.span.findings if span else out.score.findings
+        sc = out.span if span else out.score
+        aside = list(getattr(sc, "set_aside", []))  # results the investigation showed to be test errors: the strongest leads
+        findings = list(sc.findings) + aside
         results = [r for y in out.years for r in y.results] if span else out.results
         by_id = {f.id: f for f in findings}
         for f in findings:
             test = f.detectors[0] if f.detectors else f.id
+            if f in aside:
+                blame[test].append(f"{run} · {f.title}: set aside as a test error: {f.set_aside[:300]}")
             texts = [f.narrative or ""] + list(f.alternatives) + list((getattr(f, "client", None) or {}).values())
             for t in texts:
                 for sentence in re.split(r"(?<=[.!?])\s+", t):

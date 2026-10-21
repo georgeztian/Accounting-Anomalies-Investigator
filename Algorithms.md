@@ -120,7 +120,7 @@ replaced by calibrated mappings.
 ### 2.1 Canonical line items (`xbrl/canonical.py`)
 
 **What it is.** Companies tag the same item with different XBRL concepts (for example `Revenues`,
-`RevenueFromContractWithCustomerExcludingAssessedTax` or `SalesRevenueNet` for revenue). Each of about 110 canonical
+`RevenueFromContractWithCustomerExcludingAssessedTax` or `SalesRevenueNet` for revenue). Each of about 125 canonical
 items has a priority-ordered list of us-gaap concepts, followed by ifrs-full concepts for foreign filers.
 
 **Why it matters.** Every test compares the same item across years and across companies. A ratio built from
@@ -718,8 +718,9 @@ backed by cash. Cash paid for acquired businesses is left out as well: it buys a
 counting it made an acquirer look like an aggressive accruer (Johnson & Johnson 2025: $17.5B of acquisitions took the
 ratio from 7% to 25%).
 
-**How.** Total investing cash flow is used when capex is not reported, and average total assets when NOA is not
-positive. Severity from the robust z against peers (5 or more) or else own history (1.0 to 3.5), × 0.4 when the ratio
+**How.** Without capex, or with average NOA that is not positive, the ratio is not defined and is not computed (for the
+company, a history year or a peer): investing cash flow or total assets in their place would be another measure compared
+with this one. Severity from the robust z against peers (5 or more) or else own history (1.0 to 3.5), × 0.4 when the ratio
 is negative (low accruals are not a warning sign).
 
 ### 5.6 Montier C-score, B.06
@@ -728,7 +729,7 @@ is negative (low accruals are not a warning sign).
 
 | Test | Why it is a footprint |
 |---|---|
-| NI - CFO gap widening | Profit increasingly running ahead of cash |
+| Accruals (NI - CFO) rising | More of profit resting on accruals; shown as "accruals rising", since NI is often below CFO and does not "run ahead" of it |
 | Receivable days (`AR / Rev`) rising | Sales recorded but not collected |
 | Inventory days (`Inv / COGS`) rising | Inventory overstated, or costs left in inventory |
 | Other current assets / revenue rising | Costs parked as prepaid or deferred items |
@@ -772,7 +773,8 @@ refinancing and survival all depend on reported results. These scores are not an
    far less often. Over 12 quarters:
    `rate = (quarters with ROA between 0 and 0.5% + quarters with EPS up by 0 to 1 cent vs the same quarter a year
    earlier) / quarters`; `severity = 0.8 × clip((rate - 0.10) / 0.25)`. The ROA part is used for industrial
-   companies only.
+   companies only. The quarter a year earlier is found by its date (within 10 days), never by counting back four
+   rows, so a quarter that was not filed cannot pair two quarters a year and a quarter apart.
 2. **Real earnings management** (Roychowdhury 2006). Managers can also hit targets with real decisions: discounting
    to pull sales forward, overproducing to spread fixed costs, or cutting R&D and advertising. Three industry-year
    regressions estimate normal levels, with A = lagged assets and S = revenue:
@@ -860,7 +862,7 @@ falls as a result.
 if rising. *Why*: sales to related parties may not be at arm's length and can be used to round-trip cash.
 
 **C.REV.10 Revenue vs remaining performance obligations.** The number of consecutive years in which revenue growth
-exceeded backlog growth by more than 3 points, each growth rate measured between adjacent years; `severity = clip(years / 3) × (0.9 if backlog exceeds 30% of revenue, else 0.5)`. *Why*:
+exceeded backlog growth by more than 3 points, each growth rate measured between adjacent years; `severity = clip(years / 3) × (0.9 if backlog exceeds 30% of revenue, else 0.5)`; skipped when backlog is under 5% of the same year's revenue (it is not where the revenue comes from). *Why*:
 revenue that outgrows backlog year after year may be borrowing from future periods.
 
 **C.REV.11 Aggressive revenue-arrangement language.** New bill-and-hold, consignment, extended-payment-terms or
@@ -999,7 +1001,7 @@ growth in the accrual may mean losses are under-recognized.
 Operating cash flow is harder to manipulate than earnings, which is why so many tests compare earnings with cash.
 But cash flow can be flattered too, by timing and by classification.
 
-**C.CF.01 Cash flow vs net income.** `r = sum3(CFO) / sum3(NI)` (three years of positive net income);
+**C.CF.01 Cash flow vs net income.** `r = sum3(CFO) / sum3(NI)` (all three years reported, their net income positive in sum);
 `severity = clip((0.9 - r) / 0.5)`, + 0.15 if r fell more than 0.1 from the previous window. *Why*: earnings that do
 not turn into cash over several years are the single most common footprint of aggressive accruals; three years
 smooth timing. *Impact*: mid `(0.9 - r) × average NI × 0.5`.
@@ -1097,8 +1099,8 @@ accounting standards, so their definition is a choice, and the choice can manufa
 
 | ID | Measures | Severity | Why it works |
 |---|---|---|---|
-| C.NG.01 | (Adjusted EPS - GAAP EPS) / GAAP EPS for the same period (quarter with quarter, full year with full year) in the year's latest release; GAAP EPS from the release's own table, else the filings for that period, else no comparison. The result states the period, the release date and whether adjusted EPS is above or below GAAP EPS | `clip((gap - 0.20) / 0.60)` | A large gap steers investors towards a flattering measure |
-| C.NG.02 | Adjustment categories present in every recent release, counted only as line items: table rows with figures, never a word inside a sentence (forward-looking-statement boilerplate mentions litigation and impairment in every release) | `min(0.7, 0.3 × categories)` | Items labelled unusual that recur every quarter are operating costs |
+| C.NG.01 | (Adjusted EPS - GAAP EPS) / GAAP EPS for the same period (quarter with quarter, full year with full year) in the year's latest release; GAAP EPS from the release's own table, else the filings for that period (from continuing operations when filed, as adjusted EPS is reconciled from it), else no comparison. The result states the period, the release date and whether adjusted EPS is above or below GAAP EPS | `clip((gap - 0.20) / 0.60)` | A large gap steers investors towards a flattering measure |
+| C.NG.02 | Adjustment categories present in every recent release, counted only as line items: table rows with figures, never a word inside a sentence (forward-looking-statement boilerplate mentions litigation and impairment in every release) | `min(0.7, 0.3 × categories)`, counting restructuring, one-time, litigation and impairment (stock pay and acquisition-related amortization recur by nature and are listed only) | Items labelled unusual that recur every quarter are operating costs |
 | C.NG.03 | New add-back categories and renamed measures vs the release for the same quarter a year earlier (AI extraction; skipped when there is none) | `min(0.7, 0.2 × new + 0.1 × renamed + 0.3 × asymmetric)` | Changing what is excluded can manufacture growth |
 | C.NG.04 | Losses excluded while gains are kept | from C.NG.03 | One-sided adjustments bias adjusted earnings upwards |
 
@@ -1125,7 +1127,8 @@ deferred revenue / revenue; interest / total debt. Ratios the profile marks mean
 ### 7.2 Seasonal decomposition and change points, D.01
 
 **What it is.** Two time-series methods applied to quarterly gross margin, receivable days, SG&A ratio and inventory
-days (up to 24 quarters, at least 12):
+days (up to 24 quarters, at least 12, all consecutive: only the run after the latest missing quarter is used, because
+a period-4 model reads every quarter after a gap as the wrong season):
 
 - **STL** (Cleveland et al. 1990, seasonal-trend decomposition using LOESS, robust version, period 4) splits each
   series into a trend, a repeating seasonal pattern and a residual. The latest quarter's residual is scored by robust
@@ -1306,7 +1309,7 @@ evidence.
 |---|---|---|
 | E.01 | Changes between this year's and last year's accounting-policy notes, each with direction and whether it comes from a new standard | 0.6 for an income-increasing voluntary change, 0.25 for one required by a new standard, 0.1 otherwise. Voluntary changes that raise income are discretion; required ones are not |
 | E.02 | Critical estimates and their values (useful lives, rates, assumptions) in both years | Changes of 5% or more are reported, 0.5 if income-increasing else 0.15. Changing an estimate is the quietest way to move earnings |
-| E.04 | Full-year, company-wide claims in MD&A (metric, direction, stated %) | Duplicate claims are merged; each claim is checked against the reported figures, measured as the claim's own words state them: "operating expenses" as revenue less cost of sales less operating income, "costs and expenses" as revenue less operating income, "gross margin" as a percentage only when the claim speaks of a percentage or basis points and as gross profit in dollars when it names gross profit or a dollar amount (a claim that says neither is skipped). A contradiction is a wrong direction, or a stated size off by more than `2% + 10% × |actual|`; `severity = min(1, 0.45 × contradictions)`. Management's description should match the results |
+| E.04 | Full-year, company-wide claims in MD&A (metric, direction, stated %) | Claims about a part of the business are skipped, then duplicates are merged (a skipped segment claim never hides the company-wide claim with the same metric and direction); each claim is checked against the reported figures, measured as the claim's own words state them: "operating expenses" as revenue less cost of sales less operating income, "costs and expenses" as revenue less operating income, "gross margin" as a percentage only when the claim speaks of a percentage or basis points and as gross profit in dollars when it names gross profit or a dollar amount (a claim that says neither is skipped). A contradiction is a wrong direction, or a stated size off by more than `2% + 10% × |actual|`; `severity = min(1, 0.45 × contradictions)`. Management's description should match the results |
 | E.09 | Customers, suppliers, related parties, guarantees, factoring and variable-interest entities, with amounts or revenue shares and whose revenue a share refers to (the whole company or one segment or subsidiary) | Verified relationships become graph edges (section 9). New related-party, guarantee, VIE or side-agreement edges score `min(0.8, 0.25 × new)` |
 | C.BS.03 | Numeric covenant thresholds | Compared with actual leverage and coverage |
 | C.NG.03 | Non-GAAP reconciliation lines in the latest release and one a year earlier | New categories, renamed measures and asymmetric treatment are counted; a measure counts as renamed only if its core name (without qualifiers such as TTM, Y/Y growth or excluding F/X) appears nowhere in the earlier release |
@@ -1325,11 +1328,17 @@ the totals later filed: the quarter each release announces and, in the fourth-qu
 - The quarter a release announces is the latest quarter end on the company's fiscal calendar at least a week before
   the release date. A fiscal year's analysis reads only the releases announcing its own four quarters, so the next
   year's first-quarter release, filed weeks after the year end, is never read as this year's.
-- Each stated figure is tagged with its period: first by its row label ("Full Year Adjusted EPS", "Q4 EPS"), then
-  by the column header of its table (a header line such as "Years Ended December 31" or "Quarters Ended"; the same
-  words inside a sentence are not a header). A year-only table holds full-year figures and a quarter-only table
+- Each stated figure is tagged with its period **only from explicit evidence**: first its row label ("Full Year Adjusted
+  EPS", "Q4 EPS"), then the column header of its table (a header line such as "Years Ended December 31" or "Quarters
+  Ended", a compact summary-box header alone on its line such as "3Q 2025", "YTD 2025" or "FY 2025", or a row of header
+  cells naming periods, "| Q4 FY26 | Q3 FY26 | Q4 FY25" or "| FY26 | FY25"; the same words inside a sentence are not a
+  header). A header whose columns put the prior year first ("| 2024 | 2025") or a full-year column before the quarter
+  is not read: its first value is not the current period. There is no default: a figure with no stated period is skipped, never assumed to
+  be the quarter (Moody's 2025 summary box put the nine-month GAAP EPS of $10.26 under the label "Adjusted Diluted EPS").
+  Table rows whose amounts carry no currency sign ("Adjusted Diluted EPS | 3.64 | 2.62 | 14.94 | 12.47") are read too. A year-only table holds full-year figures and a quarter-only table
   quarterly ones; under a quarter-and-year header a row of four values reads quarter, prior quarter, year, prior
-  year. In prose, the words of the sentence decide ("fourth quarter", "full year"). Nine- and six-month figures and
+  year. In prose, the words of the sentence decide ("fourth quarter", "full year"); a clause that names both bases ("GAAP and
+  non-GAAP earnings per diluted share were $4.90 and $4.77") is skipped, because its first amount is the GAAP figure. Nine- and six-month figures and
   guidance are never used. A sentence ends at a full stop followed by white space, never at a decimal point ("$(0.12);
   non-GAAP EPS was $0.15." is one sentence about the fourth quarter, and the next sentence is about the year), and a line
   of prose that lists amounts in different bases and periods is not read as a table row. A loss written "$(0.12)" or
@@ -1339,6 +1348,19 @@ the totals later filed: the quarter each release announces and, in the fourth-qu
   quarter-and-year header, an unlabelled row in a fourth-quarter release) is skipped rather than guessed, and when
   no same-period figure exists nothing is compared. A quarterly figure is never checked against a full-year figure,
   or the reverse.
+- **Hard check against the filed statements, whatever the layout.** Before any adjusted-vs-GAAP comparison, the
+  adjusted figure is compared with the filed GAAP EPS of the other periods it could have come from: the fiscal year to
+  date (the sum of this year's filed quarters, before the fourth quarter, where it is the full year), the current and prior full years, the quarter, and the same quarter a
+  year earlier (releases repeat last year's columns). The comparison is
+  refused when the adjusted figure equals one of them within 2%, or when the adjusted-to-GAAP gap is over 100% and the
+  figure is less than half as far from another period's EPS as from the same-period GAAP EPS. It was then read from the
+  wrong column or row; the release before it is tried instead. A genuine same-period gap does not land on another
+  period's filed figure, so real anomalies are still compared.
+- **The release's own GAAP figures anchor its parsing.** Every GAAP EPS figure read from a release, with the period the
+  parser gave it, must equal the filed GAAP EPS for that period within 2% (when that period's EPS is filed; a figure
+  labelled "continuing" is compared with the filed continuing-operations EPS when there is one). If one does
+  not, the parser misread that release's columns or rows, and none of its figures, adjusted ones included, is used. (A
+  genuine revision between a release and the filing is the subject of E.12, which compares revenue and net income.)
 
 **Why it works.** The market reacts to the press release. Numbers that change between the release and the filing
 mean adjustments were made after investors were told, usually because the closing process was not finished or a
@@ -1350,9 +1372,10 @@ A pattern finds statements such as "total revenue was $X billion" or "net income
 statement is **skipped** when:
 
 - its sentence mentions segments, products, regions, guidance, non-GAAP or adjusted figures, per-share amounts,
-  excluded items or (in MD&A) a quarter;
+  excluded items or (in MD&A) a quarter; every such word counts, so "Fourth quarter adjusted revenue" in a release is
+  skipped although the quarter alone is allowed there;
 - a name stands right before the metric, as in "Data Center revenue" (a segment or product line), unless it is a
-  word that can precede a company total (Record, Total, Quarterly, Fiscal and similar), or a noun that names a part
+  word that can precede a company total (Record, Total, Quarterly, Fiscal, a period such as Q4 or FY2025, and similar), or a noun that names a part
   of the company does ("GPU business revenue", "segment revenue", "services revenue");
 - it is far from every reported total.
 
@@ -1374,7 +1397,7 @@ year's point in time (section 2.2).
 
 | ID | Test | Method and severity | Why it works |
 |---|---|---|---|
-| F.01 | Sales to a major customer vs that customer's spending | For customers that file with the SEC: sales = the disclosed amount, or the revenue share × company revenue only when the share is of the whole company's revenue. The customer's spending = (its revenue - its operating income) + its capex, from its own filings for the fiscal year closest to the company's (within 183 days) and in the same currency. Sales over 50% of that spending are implausible; `severity = min(1, 0.6 × cases)` | A customer cannot buy more than it spends. Sales a customer could not plausibly have made are a red flag for fictitious revenue |
+| F.01 | Sales to a major customer vs that customer's spending | For customers that file with the SEC: sales = the disclosed amount, or the revenue share × company revenue only when the share is of the whole company's revenue. The customer's spending = (its revenue - its operating income) + its capex, from its own filings as they stood at the year's cutoff, for the fiscal year closest to the company's (within 183 days) and in the same currency; a customer without revenue and operating income is not compared (a sum of cost lines would miss costs under other headings and make ordinary sales look impossible). Sales over 50% of that spending are implausible; `severity = min(1, 0.6 × cases)` | A customer cannot buy more than it spends. Sales a customer could not plausibly have made are a red flag for fictitious revenue |
 | F.02 | Circular flows | Directed cycles of up to 4 steps over sales, related-party, guarantee and side-agreement edges; `min(1, 0.5 × cycles)` | Money that flows from the company back to itself through counterparties can create revenue or cash that does not exist (round-tripping) |
 | F.03 | Auditor profile | 0.45 for a large company audited by a small firm, + 0.2 per auditor change (at most 2) | A small firm may lack the resources for a complex audit; context only |
 | F.04 | Unexplained movements | Material line-item movements with no passage of this year's MD&A or notes linked to them (earlier years' reports discussed earlier changes; a line goes by several captions: operating earnings, income from operations, marketing, general and administrative, unearned revenue, additions to property and equipment); `0.7 × clip(score / 10)` | Large changes management does not explain are disclosure gaps worth asking about |
@@ -1417,7 +1440,7 @@ mistaken for the whole); a number that cannot be right should never reach the an
 
 | Condition | Detected as | Tests discounted | Factor |
 |---|---|---|---|
-| Large acquisition | Acquisitions over 10% of prior-year assets | C.AR.01, C.INV.01, C.EXP.02, C.REV.05, D.04, B.01, A.08, C.REV.01, C.CF.02, D.02, D.03 | × 0.5 |
+| Large acquisition | Acquisitions over 10% of prior-year assets | C.AR.01, C.INV.01, C.EXP.02, C.REV.05, D.04, B.01, A.08, C.REV.01, C.CF.02, D.02, D.03, F.04 (the balances a deal brings move without MD&A naming each line) | × 0.5 |
 | New accounting standard | E.01 finds an adoption | C.REV.01, C.REV.02, C.REV.03, E.01, A.14 | × 0.6 |
 | Stock split | Diluted shares up 1.8 times or more | A.12 | × 0.2 |
 
@@ -1659,7 +1682,7 @@ which can bring the next finding into the 12 reported; that finding is audited t
 | Check | Passes when |
 |---|---|
 | Evidence present | At least one primary XBRL fact or filing quote supports the finding |
-| Fact values | Every cited fact is re-read from the filing's XBRL for the same concept and period, and matches within the larger of 0.05% and 0.5 |
+| Fact values | Every cited fact is re-read from the filing's XBRL for the same concept and period, and matches within 0.05% (at least 0.5 for an amount or a share count; per-share amounts and rates get no such floor) |
 | Quotes | Every quote is found verbatim at its position in the filing |
 | Impact | low ≤ mid ≤ high, mid is positive, and materiality recomputes to the same values |
 | Corroboration | Patterns still have 2 or more live signals from 2 or more families (or 3 or more) |

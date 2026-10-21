@@ -16,14 +16,12 @@ works in six passes, and passes 2-4 check **meaning and results**, not only code
 
 ## Ground rules
 
-- Use the project venv: `.venv/Scripts/python`, `.venv/Scripts/ruff check src tests tools`, `.venv/Scripts/python -m pytest -q`.
-  Lint and all tests must pass when you finish.
-- Never touch `.env`. Never commit or push. Never delete or overwrite anything in `reports/`, except re-rendering an existing
-  folder with `anomaly-report render <folder>` to diff its output (copy the originals somewhere temporary first).
+- Follow CLAUDE.md (venv commands, lint and tests passing at the end, the control-character check after editing Python,
+  never `.env`, no commit or push).
+- Never delete or overwrite anything in `reports/`, except re-rendering a folder with `anomaly-report render <folder>` to
+  diff its output (copy the originals somewhere temporary first).
 - No AI-mode runs unless one is needed to confirm a fix that only shows in AI output; never more than one, and say so.
   Everything else runs with `--mode deterministic` into a temporary `--out` folder.
-- Bash heredocs in this environment can turn `\b` and `\n` inside Python source into control characters. Edit Python with
-  the Edit/Write tools, then check: `grep -rlP "[\x00-\x08\x0b\x0c\x0e-\x1f]" src tests tools --include=*.py` prints nothing.
 - Every fix gets a focused regression test in `tests/unit` that fails before the fix and passes after it, using the real
   layout or wording that exposed the bug where possible.
 - Report output must not change except where a fix intends it: re-render saved runs before and after and diff `report.md`
@@ -60,13 +58,14 @@ to guess.
 
 ## Pass 3: results against independent sources
 
-1. Run `.venv/Scripts/python tools/review/sweep.py --wide --out <temp>/sweep_wide.md` first (42 companies; about an hour on a cold
-   cache, so run it in the background and in two halves with `--tickers` if needed), then the default 10-company panel for a
-   quick re-check after fixes. The default panel (no AI: industrial, card
-   issuer, bank, insurer, REIT, 52/53-week retailer, January year end, a company without total pre-tax income, 20-F, 40-F).
-   It reports errors, implausible results, tests that flag most of the panel, EPS in each company's own release tables
-   against the filed EPS for the same period, and the hand-checked figures in `tools/review/known_values.toml`.
-   Run it a second time with `--period` set to an earlier year (for example FY2019) to exercise point-in-time behaviour.
+1. Run `.venv/Scripts/python tools/review/sweep.py --wide --out <temp>/sweep_wide.md` first (42 companies; about an hour on
+   a cold cache, so run it in the background, in two halves with `--tickers` if needed), then the default 10-company panel
+   (industrial, card issuer, bank, insurer, REIT, 52/53-week retailer, January year end, a company without total pre-tax
+   income, 20-F, 40-F) for a quick re-check after fixes, and once more with `--period` set to an earlier year (for example
+   FY2019) to exercise point-in-time behaviour. No AI is used. It reports errors, implausible results, tests that flag
+   most of the panel, EPS in each company's own release tables against the filed EPS for the same period, and the
+   hand-checked figures in `tools/review/known_values.toml`. It does not list flagged results: dump them per company
+   (`res.results`) to check them in step 2.
 2. For every flagged result in the sweep, and for every finding in the saved reports, open the source document (the
    filing or release the evidence links to; documents are cached by `EdgarClient`, use `offline=True`) and confirm the
    figures the test used are the figures the document states for that period and scope. A finding is only a real
@@ -75,8 +74,8 @@ to guess.
 
 ## Pass 4: what the AI already noticed
 
-Run `.venv/Scripts/python tools/review/mine_runs.py --out <temp>/leads.md` over `reports/`. The investigation and the
-auditor often state that a test, the data or the parsing is wrong ("the detector most likely compared figures from
+Run `.venv/Scripts/python tools/review/mine_runs.py --out <temp>/leads.md` over `reports/`. Results set aside as test
+errors are the strongest leads: the same test may be wrong for other companies. The investigation and the auditor often state that a test, the data or the parsing is wrong ("the detector most likely compared figures from
 different periods"), and that a pipeline input is missing ("the evidence pack has no ..."); investigations that did not
 finish show which objections kept recurring. Treat each lead as a hypothesis: reproduce it from the code and the
 document, then fix the root cause in the test or the pipeline, not in the wording.

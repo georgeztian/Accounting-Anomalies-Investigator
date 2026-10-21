@@ -12,7 +12,7 @@ from ffi.detectors.base import Area, EvidenceRef, ImpactEstimate, Scheme, SkipDe
 from ffi.detectors.helpers import finite, mk, need
 from ffi.detectors.scores import V
 from ffi.detectors.stats import fmt_money, fmt_pct, safe_div
-from ffi.text.search import search
+from ffi.text.search import search, sentence_bounds
 from ffi.xbrl.canonical import BY_ID, basis
 from ffi.xbrl.facts import ANNUAL_DAYS, FactRecord, fiscal_year_of
 
@@ -476,8 +476,6 @@ def disclosed_recast(doc) -> str | None:
             continue
         w = RECAST_WORD_RE.search(p.text)
         if w and RECAST_CAUSE_RE.search(p.text) and not NOT_A_RECAST_RE.search(p.text):
-            from ffi.text.search import sentence_bounds
-
             lo, hi = sentence_bounds(doc.text, p.start + w.start())
             found = doc.text[lo:hi].strip()
             break

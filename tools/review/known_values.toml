@@ -56,3 +56,22 @@ PPE_LAND = 1_329e6
 
 [INTC.FY2025]  # Q4 2025 earnings release (2026-01-22): full-year EPS attributable to Intel $(0.06), non-GAAP $0.42; Q4 $(0.12) and $0.15
 EPS_DILUTED = -0.06
+
+[SHOP.FY2025]  # 2025 Form 10-K, note 10 (property and equipment) and the depreciation-by-line table (5 + 9 + 4)
+PPE_GROSS = 228e6
+PPE_NET = 53e6
+DEPRECIATION = 18e6
+
+[COST.FY2026]  # fiscal 2026 Form 10-K (year ended 2026-08-30): balance sheet and liquidity table
+CFO = 15_817e6
+AP = 22_591e6
+
+[NVDA.FY2026]  # Q4 fiscal 2026 earnings release (2026-02-25), Fiscal 2026 Summary: GAAP $4.90, non-GAAP $4.77
+EPS_DILUTED = 4.90
+
+[UBER.FY2025]  # Q4 2025 earnings release (2026-01-30): full-year table, columns 2024 | 2025
+EPS_DILUTED = 4.73
+NET_INCOME = 10_053e6
+
+[MET.FY2025]  # Q4 2025 earnings release (2026-02-04), full-year column: net income per share $4.71
+EPS_DILUTED = 4.71

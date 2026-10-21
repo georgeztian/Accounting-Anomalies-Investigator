@@ -35,7 +35,7 @@ from ffi.pipeline.detect import DetectorResult, run_detectors
 from ffi.profiles import for_company
 from ffi.report import snapshot
 from ffi.resolve.resolver import CompanyRef, resolve
-from ffi.scoring.engine import ScoreResult, score
+from ffi.scoring.engine import REPORTED, ScoreResult, score
 from ffi.text.document import TextDoc, build_doc, find_auditor
 from ffi.xbrl.facts import FactStore, load_companyfacts
 
@@ -454,7 +454,7 @@ def run(opts: RunOptions, choose=None, progress: Callable[[str], None] | None = 
     with step("Explaining findings in plain language"):
         from ffi.report.explain import explain_findings
 
-        explain_findings(ctx, sc)
+        explain_findings(sc.findings[:REPORTED], lambda f: ctx)
 
     manifest = build_manifest(ctx, results, sc, run_id, opts, timings, year.kg_counts, prep.cf)
     out = RunOutput(ctx, results, sc, run_dir, manifest, timings, agent_cases)

@@ -42,7 +42,6 @@ def _apply(f, result: dict, case: dict) -> None:
         f.set_aside = draft["test_assessment_reason"]
         f.narrative = draft["summary"] + "\n\n" + draft["explanation"]
         f.narrative_source = "agent: set aside as probable test error"
-        f.ledger = result.get("ledger", [])
         case["set_aside"] = True
         return
     if status in ("published", "degraded") and draft:

@@ -290,12 +290,12 @@ def render_cmd(
     if folder is None or not (folder / snapshot.SNAPSHOT).exists():
         console.print(f"[red]No saved run found{' at ' + str(folder) if folder else ''}.[/red] Runs made before this "
                       "feature, or with an older version, need a fresh `anomaly-report` run.")
-        raise typer.Exit(2)
+        raise typer.Exit(6)
     try:
         res = snapshot.load(folder)
     except (ValueError, OSError, EOFError) as e:
         console.print(f"[red]Could not load the saved run:[/red] {e}")
-        raise typer.Exit(2) from e
+        raise typer.Exit(6) from e
     from ffi.detectors.stats import CURRENCY
 
     CURRENCY.set(res.ctx.currency)

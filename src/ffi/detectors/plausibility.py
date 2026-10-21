@@ -56,13 +56,16 @@ def incoherent_inputs(ctx: Any) -> dict[str, str]:
     cached = getattr(ctx, "_incoherent_inputs", None)
     if cached is not None:
         return cached
+    from ffi.detectors.stats import fmt_money
+    from ffi.xbrl.canonical import BY_ID
+
     out: dict[str, str] = {}
     ta = ctx.a("TOTAL_ASSETS")
     if _fin(ta) and ta > 0:
         for item in PARTS_OF_ASSETS:
             v = ctx.a(item)
             if _fin(v) and v > 1.01 * ta:
-                out[item] = f"{item.replace('_', ' ').lower()} ({v / 1e9:,.2f}B) is larger than total assets ({ta / 1e9:,.2f}B)"
+                out[item] = f"{BY_ID[item].label} ({fmt_money(v)}) is larger than total assets ({fmt_money(ta)})"
     with contextlib.suppress(AttributeError):  # a frozen or slotted context: recomputed on the next call
         ctx._incoherent_inputs = out
     return out
@@ -81,9 +84,7 @@ def input_problem(s: Signal, ctx: Any) -> str | None:
     labels = {it.label: it.id for it in ITEMS}
     names = {e.label.rsplit(", ", 1)[0] for e in s.evidence if e.kind == "fact"}  # "PP&E, net, FY2024" -> "PP&E, net"
     used |= {labels[n] for n in names if n in labels}
-    for item in sorted(used & set(bad)):
-        return bad[item]
-    return None
+    return next((bad[item] for item in sorted(used & set(bad))), None)
 
 
 def problem(s: Signal, ctx: Any) -> str | None:

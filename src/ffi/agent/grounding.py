@@ -68,16 +68,15 @@ class GroundingReport:
     unverified_quotes: list[str] = field(default_factory=list)
 
 
+SCALE = {"billion": 1e9, "b": 1e9, "million": 1e6, "m": 1e6, "thousand": 1e3, "k": 1e3}
+
+
 def _candidates(m: re.Match) -> list[float]:
     raw = float(m.group("num").replace(",", ""))
     suf = (m.group("suf") or "").lower()
     sign = -1 if m.group("neg") else 1
-    if suf in ("billion", "b"):
-        return [sign * raw * 1e9]
-    if suf in ("million", "m"):
-        return [sign * raw * 1e6]
-    if suf in ("thousand", "k"):
-        return [sign * raw * 1e3]
+    if suf in SCALE:
+        return [sign * raw * SCALE[suf]]
     if suf in ("%", "percent"):
         return [sign * raw / 100, sign * raw]
     if suf == "bps":
@@ -108,24 +107,11 @@ def check(text: str, allowed: list[float], docs: list, rel_tol: float = 0.015, k
         if re.search(r"(?:FY|Q|\[L)$", before, re.I) or text[m.end(): m.end() + 1] == "]":
             continue  # fiscal labels and ledger ids
         rep.numbers_checked += 1
-        cands = _candidates(m)
-        found = False
-        for c in (abs(x) for x in cands):
-            for a in allowed_abs:
-                for scale in (1, 100, 0.01):
-                    v = a * scale
-                    tol = max(abs(v) * rel_tol, 0.006 if abs(v) < 10 else 0.5)
-                    # displayed values are rounded: allow rounding at the shown precision
-                    shown = num.split(".")[1] if "." in num else ""
-                    unit = {"billion": 1e9, "b": 1e9, "million": 1e6, "m": 1e6, "thousand": 1e3, "k": 1e3}.get((m.group("suf") or "").lower(), 1)
-                    tol = max(tol, 0.5 * unit / (10 ** len(shown)))
-                    if abs(c - v) <= tol:
-                        found = True
-                        break
-                if found:
-                    break
-            if found:
-                break
+        # displayed values are rounded: allow rounding at the shown precision
+        shown = len(num.split(".")[1]) if "." in num else 0
+        rounding = 0.5 * SCALE.get((m.group("suf") or "").lower(), 1) / 10 ** shown
+        found = any(abs(c - v) <= max(abs(v) * rel_tol, 0.006 if abs(v) < 10 else 0.5, rounding)
+                    for c in (abs(x) for x in _candidates(m)) for a in allowed_abs for v in (a, a * 100, a * 0.01))
         if not found:
             rep.unsupported_numbers.append(token)
     known = [_norm(k) for k in known_text or []]

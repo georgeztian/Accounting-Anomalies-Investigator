@@ -77,15 +77,19 @@ def evidence_pack(finding, ledger: list[dict[str, Any]], facts: list[dict[str, A
     if periods:
         ids.add("P")
         lines.append(f"[P] fiscal years: {'; '.join(periods)}")
+    # each tool result whole, as the drafter saw it: cut at 600 characters, a search result's third quote (Moody's 2025:
+    # "Current market, economic and government factors could ...") reached the auditor as "Current market," and a
+    # sourced claim was marked unsupported
     for e in ledger:
         ids.add(e["id"])
-        lines.append(f"[{e['id']}] tool {e['tool']}: {e['text'][:600]}")
+        lines.append(f"[{e['id']}] tool {e['tool']}: {e['text']}")
     return "\n".join(lines), ids
 
 
 def review(llm, draft: dict[str, Any], finding, ledger: list[dict[str, Any]], node_call,
-           facts: list[dict[str, Any]] | None = None, periods: list[str] | None = None) -> tuple[list[dict], list[str], Any]:
-    """Return (verdict dicts, accusatory phrases, spend record). `node_call(schema, system, prompt)` enforces budgets."""
+           facts: list[dict[str, Any]] | None = None, periods: list[str] | None = None) -> tuple[list[dict], list[str], Any, str]:
+    """Return (verdict dicts, accusatory phrases, spend record, test-error check: "supported", "unsupported" or
+    "not_claimed"). `node_call(schema, system, prompt)` enforces budgets."""
     pack, ids = evidence_pack(finding, ledger, facts, periods)
     conclusions = {"summary": draft.get("summary", ""), "explanation": draft.get("explanation", ""),
                    "alternatives": draft.get("alternatives", []), "questions": draft.get("questions", []),

@@ -13,9 +13,9 @@
   <div class="sub">Accounting review · {{ m.period }} (fiscal year ended {{ m.period_end }}) · based on filings available on {{ m.as_of }}</div>
   <h1>{{ m.company.name }}{% if m.company.ticker %} ({{ m.company.ticker }}){% endif %}</h1>
   <div class="muted">Industry: {{ m.company.sic_description or 'not stated' }} · Auditor: {{ m.company.auditor or 'not identified' }} · Prepared {{ m.generated }}</div>
-  <p class="muted">Company type: <strong>{{ m.profile.label }}</strong> · amounts in {{ m.currency }} · {{ m.profile.excluded }} tests do not apply to this type of company</p>
+  <p class="muted">Company type: <strong>{{ m.profile.label }}</strong> · amounts in {{ m.currency }}{% if m.profile.excluded %} · {{ m.profile.excluded }} tests do not apply to this type of company{% endif %}</p>
   <p class="muted"><strong>Caveats:</strong> {% if m.company.warnings %}{{ m.company.warnings|join(' ') }}{% else %}{{ m.none_text }}{% endif %}</p>
-  <nav class="toc" aria-label="Sections"><a href="#summary">Summary</a><a href="#dashboard">Overview</a><a href="#findings">Suspicious anomalies</a><a href="#setaside">Set aside</a><a href="#tests">All tests</a><a href="#text">Disclosure changes</a><a href="#method">How this review works</a><a href="#glossary">Glossary</a></nav>
+  <nav class="toc" aria-label="Sections"><a href="#summary">Summary</a><a href="#dashboard">Overview</a><a href="#findings">Suspicious anomalies</a>{% if m.set_aside %}<a href="#setaside">Set aside</a>{% endif %}<a href="#tests">All tests</a><a href="#text">Disclosure changes</a><a href="#method">How this review works</a><a href="#glossary">Glossary</a></nav>
 </header>
 
 <section id="summary">
@@ -67,7 +67,7 @@
   <p><strong>What it could mean financially:</strong> {{ f.what_it_means }}</p>
   <p><strong>Investigation ({{ f.investigation_status }}):</strong> {{ f.investigation }}</p>
   <dl class="kv">
-    <dt>Estimated effect on profit</dt><dd>{{ f.impact_text }}{% if f.impact_basis %} <span class="muted">(how it was estimated: {{ f.impact_basis }})</span>{% endif %}</dd>
+    <dt>Estimated effect on pre-tax profit</dt><dd>{{ f.impact_text }}{% if f.impact_basis %} <span class="muted">(how it was estimated: {{ f.impact_basis }})</span>{% endif %}</dd>
     <dt>Is it material?</dt><dd>{{ f.materiality_text }}</dd>
     <dt>Other reasons it could matter</dt><dd>{{ f.sab99_text }}</dd>
   </dl>
@@ -104,11 +104,11 @@
 {% endfor %}
 </section>
 
-<section id="setaside">
+{% if m.set_aside %}<section id="setaside">
 <h2>Results set aside as probable test errors</h2>
 <p class="muted">{{ m.set_aside_note }}</p>
-{% for s in m.set_aside %}<div class="card"><h3>{{ s.title }}{% if s.years %} <span class="muted">· {{ s.years }}</span>{% endif %}</h3><p class="muted">Based on: {{ s.tests|join('; ') }}</p><p><strong>Why it was set aside:</strong> {{ s.reason }}</p></div>{% else %}<p>{{ m.none_text }}</p>{% endfor %}
-</section>
+{% for s in m.set_aside %}<div class="card"><h3>{{ s.title }}{% if s.years %} <span class="muted">· {{ s.years }}</span>{% endif %}</h3><p class="muted">Based on: {{ s.tests|join('; ') }}</p><p><strong>Why it was set aside:</strong> {{ s.reason }}</p></div>{% endfor %}
+</section>{% endif %}
 
 <section id="tests">
 <h2>All tests performed</h2>

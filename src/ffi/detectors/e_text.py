@@ -30,7 +30,7 @@ from ffi.detectors.textnum import (
 )
 from ffi.llm import LLMError
 from ffi.text.document import TextDoc
-from ffi.text.search import count, search
+from ffi.text.search import count, search, sentence_bounds
 from ffi.text.verify import locate
 
 F = "E"
@@ -83,8 +83,7 @@ def _tfidf_match(cur: list[str], prior: list[str]) -> np.ndarray:
 
     vec = TfidfVectorizer(stop_words="english", min_df=1, ngram_range=(1, 2), max_features=30000)
     m = vec.fit_transform(cur + prior)
-    sim = cosine_similarity(m[: len(cur)], m[len(cur):])
-    return sim
+    return cosine_similarity(m[: len(cur)], m[len(cur):])
 
 
 @detector("E.03", "Risk-factor changes", F, Area.DISCLOSURE, needs_text=True)
@@ -103,10 +102,7 @@ def e03(ctx: RunContext):
     ev = []
     for p in hot[:3]:
         m = re.search(RISK_KEYWORDS, p.text, re.I)
-        s = p.start + (m.start() if m else 0)
-        from ffi.text.search import sentence_bounds
-
-        lo, hi = sentence_bounds(cur.text, s)
+        lo, hi = sentence_bounds(cur.text, p.start + (m.start() if m else 0))
         ev.append(ctx.ev_span(cur, lo, min(hi, p.end), "New risk-factor language"))
     return [mk("E.03", ctx, raw_value=len(added), severity=sev, unit="added paragraphs",
                rationale=(f"{len(added)} risk-factor paragraphs added and {len(removed)} removed vs last year; "
@@ -401,19 +397,22 @@ GAAP_EPS_RE = re.compile(r"(?<!non-)gaap\s+(?:diluted\s+)?(?:eps|earnings per (?
 EPS_LABEL_RE = re.compile(r"(?i)\beps\b|earnings per (?:common |diluted |basic )?share")
 ADJUSTED_RE = re.compile(r"(?i)non-gaap|adjusted|excluding|operating earnings|\bcore\b")
 MONEY2_RE = re.compile(r"(\()?\$\s?(\()?(\d+\.\d{2})")
+BARE2_RE = re.compile(r"(?<![\w.$%])(\()?(\d{1,3}(?:,\d{3})*\.\d{2})(\))?(?![\d%.])")
 
 
-def _money_values(s: str) -> list[float]:
-    """The per-share amounts in a string, in column order; "$(0.12)", "$ (0.12)" and "($0.12)" are losses. A loss that
+def _amounts(s: str, bare: bool = False) -> list[float]:
+    """The per-share amounts in a string, in column order. With a currency sign, "$(0.12)", "$ (0.12)" and "($0.12)" are
+    losses; `bare`, for table rows without one ("Adjusted Diluted EPS | 3.64 | 2.62 | 14.94"), "(0.10)" is. A loss that
     is skipped would shift every later column."""
-    return [-float(m.group(3)) if m.group(1) or m.group(2) else float(m.group(3)) for m in MONEY2_RE.finditer(s)]
+    if bare:
+        return [(-1 if m.group(1) and m.group(3) else 1) * float(m.group(2).replace(",", "")) for m in BARE2_RE.finditer(s)]
+    return [(-1 if m.group(1) or m.group(2) else 1) * float(m.group(3)) for m in MONEY2_RE.finditer(s)]
 
 
 def _is_prose(segment: str) -> bool:
     """A row whose cells hold words is a sentence ("Fourth-quarter EPS was $(0.12); non-GAAP EPS was $0.15."), not a
     table row: its amounts sit in different bases and periods and cannot be read as columns."""
-    parts = re.split(r"\$|\|", segment, maxsplit=1)
-    return len(re.findall(r"[A-Za-z]", parts[1] if len(parts) > 1 else "")) > 8
+    return len(re.findall(r"[A-Za-z]", segment[len(_label(segment)) + 1:])) > 8
 
 
 @dataclass
@@ -422,24 +421,39 @@ class EpsFigure:
     period: str  # "Q" (the quarter the release announces) | "FY" (the full fiscal year)
     start: int
     end: int
+    continuing: bool = False  # the label says "continuing operations": compared with the filed continuing-operations EPS
+
+
+def _lines(text: str) -> tuple[list[str], list[int]]:
+    """The lines of a text and the offset at which each starts."""
+    lines, offsets, pos = text.split("\n"), [], 0
+    for line in lines:
+        offsets.append(pos)
+        pos += len(line) + 1
+    return lines, offsets
+
+
+def _label(line: str) -> str:
+    """A table row's label: the text before its first amount or cell separator."""
+    return re.split(r"\$|\|", line, maxsplit=1)[0]
 
 
 def _eps_rows(text: str) -> list[tuple[str, list[float], int, int]]:
     """EPS table rows: (label, $ values in column order, start, end). A row's values sit on its line after the label
     and on the following lines that hold only numbers (tables often put each cell on its own line)."""
-    rows, pos, lines = [], 0, text.split("\n")
-    offsets = []
-    for line in lines:
-        offsets.append(pos)
-        pos += len(line) + 1
+    rows = []
+    lines, offsets = _lines(text)
     for i, line in enumerate(lines):
-        label = re.split(r"\$|\|", line, maxsplit=1)[0]
+        label = _label(line)
         if len(label) > 160 or not EPS_LABEL_RE.search(label) or GUIDANCE_RE.search(label):
             continue
-        vals = _money_values(line[len(label):])
+        vals = _amounts(line[len(label):])
+        bare = not vals and "|" in line  # a table row whose amounts carry no currency sign (Moody's reconciliation tables)
+        if bare:
+            vals = _amounts(line[len(label):], bare=True)
         j = i + 1
         while j < len(lines) and j <= i + 12 and not re.search(r"[A-Za-z]", lines[j]):
-            vals += _money_values(lines[j])
+            vals += _amounts(lines[j], bare)
             j += 1
         if vals:
             rows.append((label.strip(), vals, offsets[i], offsets[j - 1] + len(lines[j - 1])))
@@ -449,38 +463,73 @@ def _eps_rows(text: str) -> list[tuple[str, list[float], int, int]]:
 GUIDANCE_RE = re.compile(r"(?i)expect|guidance|outlook|forecast|target|range of")
 # a column header starts its line ("| Quarters Ended", "Years Ended December 31,"); the same words inside a sentence
 # ("Annual Report on Form 10-K for the year ended ...") are not a header
-HEADER_RE = re.compile(r"(?im)^[ \t|]*(?:(?:three|six|nine|twelve) months|quarters?|(?:fiscal )?years?)\s+ended\b|^[ \t|]*full[- ]year\s*$")
+HEADER_RE = re.compile(r"(?im)^[ \t|]*(?:(?:three|six|nine|twelve) months|quarters?|(?:fiscal )?years?)\s+ended\b|^[ \t|]*full[- ]year\s*$"
+                       # compact headers of summary boxes (Moody's: "3Q 2025", "YTD 2025"), each alone on its line
+                       r"|^[ \t|]*(?:[1-4]Q|Q[1-4])\s*'?(?:20)?\d{2}[ \t|]*$|^[ \t|]*(?:YTD|FY)\s*'?(?:20)?\d{2}[ \t|]*$")
 YTD_RE = re.compile(r"(?i)six months|nine months|year[- ]to[- ]date")
+# a column-header cell naming its period (NVIDIA: "| Q4 FY26 | Q3 FY26 | Q4 FY25 | Q/Q | Y/Y", then "| FY26 | FY25 | Y/Y")
+PERIOD_CELL_RE = re.compile(r"(?i)(?P<Q>(?:Q[1-4]|[1-4]Q)\s*(?:FY\s?)?'?(?:20)?\d{2})|(?P<YTD>YTD\s*'?(?:20)?\d{2})|(?P<FY>FY\s?'?(?:20)?\d{2})")
+
+
+YEAR_CELL_RE = re.compile(r"(?:19|20)\d{2}")
+
+
+def _cell_kinds(line: str) -> tuple[list[str], bool]:
+    """The periods named by a header row's cells, in column order ("Q", "YTD", "FY"), and whether its years ascend
+    ("| 2024 | 2025", Uber: the prior year's column comes first); ([], False) when the line is not a header row (fewer
+    than two period or year cells, or amounts in it; "($ in millions)" is not an amount)."""
+    if "|" not in line or PROSE_AMOUNT_RE.search(line):
+        return [], False
+    cells = [c.strip() for c in line.split("|")]
+    kinds, years = [], []
+    for c in cells:
+        if m := PERIOD_CELL_RE.fullmatch(c):
+            kinds.append(m.lastgroup or "")
+            years.append((m.lastgroup, int(re.findall(r"\d+", c)[-1][-2:])))
+        elif YEAR_CELL_RE.fullmatch(c):
+            years.append(("", int(c[-2:])))
+    # the first two neighbouring columns of one kind that differ in year give the order ("2025 | 2024 | 2025 | 2024" is
+    # newest first in each group; "Q4 FY26 | Q3 FY26 | Q4 FY25" too)
+    order = next((y1 - y0 for (k0, y0), (k1, y1) in zip(years, years[1:], strict=False) if k0 == k1 and y0 != y1), 0)
+    return (kinds if len(kinds) >= 2 else []), order > 0
 
 
 def _header_kinds(text: str, start: int) -> set[str]:
     """The column groups of the table a row sits in, from the nearest header above it: {"Q"}, {"FY"}, {"Q", "FY"},
-    {"Q", "YTD"} (a nine-month column) or empty when there is no header within reach."""
-    hits = list(HEADER_RE.finditer(text, max(0, start - 3000), start))
+    {"Q", "YTD"} (a nine-month column) or empty when there is no header within reach. A header row whose cells put a
+    full-year or year-to-date column before the quarter, or the prior year before the current one, is {"?"}: its first
+    column is not the current quarter or year, so its rows are not read."""
+    lo = max(0, start - 3000)
+    hits: list[tuple[int, set[str]]] = []
+    for m in HEADER_RE.finditer(text, lo, start):
+        w = m.group(0).lower()
+        hits.append((m.start(), {"Q" if re.search(r"quarter|three months|\b[1-4]q|\bq[1-4]", w) else
+                                 "YTD" if re.search(r"six|nine|ytd", w) else "FY"}))
+    lines, offsets = _lines(text[lo:start])
+    for line, off in zip(lines, offsets, strict=True):
+        cells, ascending = _cell_kinds(line)
+        if ascending or ("Q" in cells and cells[0] != "Q"):
+            hits.append((lo + off, {"?"}))
+        elif cells:
+            hits.append((lo + off, set(cells)))
     if not hits:
         return set()
-    last = hits[-1].start()
-    kinds = set()
-    for m in hits:
-        if last - m.start() > 300:  # an earlier table's header
-            continue
-        w = m.group(0).lower()
-        kinds.add("Q" if re.search(r"quarter|three months", w) else "YTD" if re.search(r"six|nine", w) else "FY")
-    return kinds
+    last = max(p for p, _ in hits)
+    return {k for p, ks in hits if last - p <= 300 for k in ks}  # further up: an earlier table's header
 
 
-def _row_figures(label: str, vals: list[float], start: int, end: int, q4: bool, header: set[str]) -> list[EpsFigure]:
+def _row_figures(label: str, vals: list[float], start: int, end: int, header: set[str]) -> list[EpsFigure]:
     """The figures a row states, each with its period, or none when the period cannot be told.
 
     The row's label decides first ("Full Year Adjusted EPS", "Q4 EPS"); then the table header: a year-only table holds
     full-year figures, a quarter-only table quarterly ones; under a quarter-and-year header a row of four values reads
     quarter, prior quarter, year, prior year. A row whose period stays unclear (two values under a two-period header,
-    or no header in a fourth-quarter release, where either is possible) is skipped: a quarter is never read as a year."""
+    or no header) is skipped: a quarter is never read as a year."""
     if YEAR_WORDS.search(label) and not QUARTER_WORDS.search(label):
         return [EpsFigure(vals[0], "FY", start, end)]
     if QUARTER_WORDS.search(label) and not YEAR_WORDS.search(label):
         return [EpsFigure(vals[0], "Q", start, end)]
-    if YTD_RE.search(label):
+    if YTD_RE.search(label) or "?" in header:
         return []
     if header == {"FY"}:
         if len(vals) >= 4:
@@ -490,14 +539,29 @@ def _row_figures(label: str, vals: list[float], start: int, end: int, q4: bool, 
         return [EpsFigure(vals[0], "Q", start, end)]
     if "Q" in header and len(vals) >= 4:
         return [EpsFigure(vals[0], "Q", start, end)] + ([EpsFigure(vals[2], "FY", start, end)] if "FY" in header else [])
-    if not header and not q4:  # a quarterly release without column headers: the first column is the quarter
-        return [EpsFigure(vals[0], "Q", start, end)]
+    # HARD RULE: a figure gets a period only from explicit evidence (its label, its column header or its sentence). With
+    # none, the row is skipped, never assumed to be the quarter: Moody's 2025 summary box put the nine-month GAAP EPS
+    # ($10.26) under the label "Adjusted Diluted EPS" with no header the parser could read, and the old default read it as
+    # the quarter's adjusted EPS.
     return []
 
 
 # a table titled by its basis: a line that is only "GAAP" or "Non-GAAP" (optionally "results", "measures", "summary")
 TABLE_BASIS_RE = re.compile(r"(?im)^[ \t|]*(non-gaap|gaap)(?:\s+(?:results|measures|summary|financial measures))?[ \t|]*$")
 MIXED_BASIS_RE = re.compile(r"(?i)(?<!non-)\bgaap\b.*\bnon-gaap\b|\bnon-gaap\b.*(?<!non-)\bgaap\b")
+GAAP_WORD_RE = re.compile(r"(?i)(?<!non-)\bgaap\b|\breported\b")
+ADJUSTED_WORD_RE = re.compile(r"(?i)\bnon-gaap\b|\badjusted\b")
+PROSE_AMOUNT_RE = re.compile(r"\$\s?\(?\d")
+
+
+def _names_both_bases(text: str, lo: int, m: re.Match) -> bool:
+    """True when the clause leading to a prose EPS amount names both bases ("GAAP and non-GAAP earnings per diluted share
+    were $4.90 and $4.77", NVIDIA FY2026): the first amount is then the GAAP figure, whichever label the pattern matched.
+    The clause starts after the previous amount or semicolon, so "GAAP EPS was $1.20, while adjusted EPS was $1.35" keeps
+    its adjusted figure."""
+    prev = [a.end() for a in PROSE_AMOUNT_RE.finditer(text, lo, m.start())] + [text.rfind(";", lo, m.start()) + 1]
+    window = text[max([lo, *prev]): m.end()]
+    return bool(GAAP_WORD_RE.search(window) and ADJUSTED_WORD_RE.search(window))
 
 
 IMPACT_RE = re.compile(r"(?i)\bimpact(?:s|ed)?\b")  # "gains impacted GAAP diluted EPS by $0.81" states an effect, not the EPS
@@ -548,38 +612,110 @@ def release_eps(ctx: RunContext, rel) -> tuple[list[EpsFigure], list[EpsFigure]]
     its label, else from the title of its table; a row stating both bases ("GAAP and non-GAAP EPS were $0.76 and
     $0.81") is skipped, since which value is which cannot be read from the row alone."""
     q_end = reported_quarter(ctx, pd.Timestamp(rel.period_end))
-    q4 = abs((q_end - ctx.focus).days) <= 8
-    adjusted, gaap = [], []
+    adjusted: list[EpsFigure] = []
+    gaap: list[EpsFigure] = []
     for label, vals, s, e in _eps_rows(rel.text):
         if re.search(r"(?i)\bbasic\b", label) and not re.search(r"(?i)diluted", label):
             continue
         if (MIXED_BASIS_RE.search(label) or _is_prose(rel.text[s:e]) or len(label.split()) > 12 or _in_guidance_table(rel.text, s)
                 or LABEL_TAIL_RE.search(label.strip()) or RANGE_RE.search(rel.text[s:e]) or _prior_period_table(rel.text, s, q_end)):
             continue
-        figs = _row_figures(label, vals, s, e, q4, _header_kinds(rel.text, s))
+        figs = _row_figures(label, vals, s, e, _header_kinds(rel.text, s))
+        for f in figs:
+            f.continuing = bool(CONTINUING_RE.search(label))
         is_adjusted = bool(ADJUSTED_RE.search(label)) or _table_basis(rel.text, s) == "adjusted"
         (adjusted if is_adjusted else gaap).extend(figs)
     if not adjusted:  # prose: "adjusted EPS of $3.04 for the fourth quarter"
         for pattern, out in ((NG_EPS_RE, adjusted), (GAAP_EPS_RE, gaap)):
             for m in pattern.finditer(rel.text):
                 sentence = rel.text[sentence_start(rel.text, m.start()): max(m.end(), sentence_end(rel.text, m.end(), 80))]
-                if GUIDANCE_RE.search(sentence) or YTD_RE.search(sentence) or IMPACT_RE.search(sentence):
+                if (GUIDANCE_RE.search(sentence) or YTD_RE.search(sentence) or IMPACT_RE.search(sentence)
+                        or _names_both_bases(rel.text, sentence_start(rel.text, m.start()), m)):
                     continue
-                period = statement_period(sentence) or (None if q4 else "Q")  # unstated: only a quarter is possible
+                period = statement_period(sentence)  # HARD RULE: unstated means unknown, never assumed to be the quarter
                 if period:
-                    out.append(EpsFigure(float(m.group(1)), period, m.start(), m.end()))
+                    out.append(EpsFigure(float(m.group(1)), period, m.start(), m.end(), bool(CONTINUING_RE.search(m.group(0)))))
     return adjusted, gaap
 
 
-def filed_eps(ctx: RunContext, rel, period: str) -> float:
+CONTINUING_RE = re.compile(r"(?i)continuing")
+
+
+def filed_eps(ctx: RunContext, rel, period: str, continuing: bool = False) -> float:
     """Reported diluted EPS from the filings for the same period a release figure covers: the fiscal year, or the
-    quarter the release announces. NaN when that period's EPS is not filed (a fourth quarter is often not tagged)."""
+    quarter the release announces. NaN when that period's EPS is not filed (a fourth quarter is often not tagged).
+    With `continuing`, EPS from continuing operations when it is filed (General Electric Q2 2025: $1.87 against $1.89
+    including discontinued operations); a company without discontinued operations files only the one EPS, which then is
+    the continuing figure."""
     q_end = reported_quarter(ctx, pd.Timestamp(rel.period_end))
+    panel = ctx.A if period == "FY" else ctx.Q
+    p = next((p for p in panel.periods if abs((p - q_end).days) <= 8), None)
+    if p is None:
+        return float("nan")
+    cont = panel.get("EPS_DILUTED_CONT", p) if continuing else float("nan")
+    return cont if finite(cont) else panel.get("EPS_DILUTED", p)
+
+
+def filed_eps_other_periods(ctx: RunContext, rel, period: str) -> dict[str, float]:
+    """Filed diluted GAAP EPS for the periods a release figure could be confused with: the fiscal year to date (the sum of
+    this fiscal year's quarters up to the quarter announced, before the fourth quarter, where it is the full year), the
+    current and prior full fiscal years, the quarter, and the same quarter a year earlier (releases repeat last year's
+    columns and tables)."""
+    q_end = reported_quarter(ctx, pd.Timestamp(rel.period_end))
+    start = ctx.focus - pd.DateOffset(months=12) + pd.Timedelta(days=8)
+    quarters = [p for p in ctx.Q.periods if start < p <= q_end + pd.Timedelta(days=8)]
+    out: dict[str, float] = {}
+    vals = [ctx.Q.get("EPS_DILUTED", p) for p in quarters]
+    if 2 <= len(quarters) <= 3 and all(finite(v) for v in vals):
+        out["the fiscal year to date"] = float(sum(vals))
+    for k, name in ((0, f"the full year {ctx.focus_label}"), (1, "the prior full fiscal year")):
+        v = ctx.a("EPS_DILUTED", k)
+        if finite(v):
+            out[name] = float(v)
+    q = filed_eps(ctx, rel, "Q")
+    if finite(q):
+        out["the quarter"] = float(q)
+    year_ago = next((p for p in ctx.Q.periods if abs((p - (q_end - pd.DateOffset(months=12))).days) <= 8), None)
+    if year_ago is not None:
+        v = ctx.Q.get("EPS_DILUTED", year_ago)
+        if finite(v):
+            out["the same quarter a year earlier"] = float(v)
     if period == "FY":
-        p = next((p for p in ctx.A.periods if abs((p - q_end).days) <= 8), None)
-        return ctx.A.get("EPS_DILUTED", p) if p is not None else float("nan")
-    p = next((p for p in ctx.Q.periods if abs((p - q_end).days) <= 8), None)
-    return ctx.Q.get("EPS_DILUTED", p) if p is not None and (("EPS_DILUTED", p) not in ctx.Q.derived) else float("nan")
+        out.pop(f"the full year {ctx.focus_label}", None)
+    else:
+        out.pop("the quarter", None)
+    return out
+
+
+def period_mismatch(ctx: RunContext, rel, adj: EpsFigure, base: float) -> str | None:
+    """HARD RULE, checked against the filed statements whatever the release layout: an adjusted figure that equals the filed
+    GAAP EPS of another period, or that sits far closer to another period's EPS than to the same-period GAAP EPS, has been
+    read from the wrong column or row. Such a comparison is refused. A genuine gap between adjusted and GAAP EPS for the
+    same period is never mistaken for this, because it does not land on another period's filed figure."""
+    for name, v in filed_eps_other_periods(ctx, rel, adj.period).items():
+        if v and abs(adj.value - v) <= 0.02 * abs(v):
+            return f"the adjusted figure ${adj.value:.2f} equals the filed GAAP EPS for {name} (${v:.2f})"
+        gap = abs(safe_div(adj.value - base, abs(base))) if base else float("nan")
+        if finite(gap) and gap > 1.0 and abs(adj.value - v) < 0.5 * abs(adj.value - base):
+            return f"the adjusted figure ${adj.value:.2f} is on the scale of {name} (${v:.2f}), not of the period compared (${base:.2f})"
+    return None
+
+
+ANCHOR_TOLERANCE = 0.02  # release vs filed GAAP EPS for the same period; revisions between the two are E.12's subject
+
+
+def release_tagging_problem(ctx: RunContext, rel, gaap: list[EpsFigure]) -> str | None:
+    """HARD RULE: every GAAP EPS figure read from a release, with the period the parser gave it, must equal the filed GAAP
+    EPS for that period (when that period's EPS is filed). One that does not shows the parser misread this release's
+    columns or rows, so none of its figures, adjusted ones included, is used. The release's GAAP figures are the anchor:
+    they are the one part of a release the filed statements can confirm."""
+    for g in gaap:
+        filed = filed_eps(ctx, rel, g.period, g.continuing)
+        if finite(filed) and filed and abs(g.value - filed) > ANCHOR_TOLERANCE * abs(filed) + 0.005:
+            span = "full-year" if g.period == "FY" else "quarterly"
+            return (f"the release's {span} GAAP EPS of ${g.value:.2f} does not match the filed ${filed:.2f} for that period, "
+                    f"so its columns were not read reliably")
+    return None
 
 
 @detector("C.NG.01", "Non-GAAP to GAAP gap", "C", Area.NON_GAAP)
@@ -590,20 +726,30 @@ def cng01(ctx: RunContext):
     releases = releases_in_year(ctx)
     if not releases:
         raise SkipDetector("no earnings releases for this fiscal year fetched")
+    refused: list[str] = []
     for rel in reversed(releases):
         adjusted, gaap = release_eps(ctx, rel)
         if not adjusted:
             continue
+        why = release_tagging_problem(ctx, rel, gaap)
+        if why:
+            refused.append(why)
+            continue
         # prefer the full-year comparison in a fourth-quarter release: the report covers the fiscal year
         for adj in sorted(adjusted, key=lambda a: a.period != "FY"):
-            same = next((g for g in gaap if g.period == adj.period), None)
-            base = same.value if same else filed_eps(ctx, rel, adj.period)
+            # adjusted EPS is reconciled from continuing operations: that GAAP figure first, in the release or the filings
+            same = next((g for g in sorted(gaap, key=lambda g: not g.continuing) if g.period == adj.period), None)
+            base = same.value if same else filed_eps(ctx, rel, adj.period, continuing=True)
             if not finite(base) or base == 0:
+                continue
+            why = period_mismatch(ctx, rel, adj, base)
+            if why:
+                refused.append(why)
                 continue
             gap = safe_div(adj.value - base, abs(base))
             sev = float(np.clip((gap - 0.20) / 0.60, 0, 1)) if finite(gap) else 0.0
             q_end = reported_quarter(ctx, pd.Timestamp(rel.period_end))
-            span = f"the full fiscal year {ctx.focus_label}" if adj.period == "FY" else f"the quarter ended {q_end.date()}"
+            span = f"the full year {ctx.focus_label}" if adj.period == "FY" else f"the quarter ended {q_end.date()}"
             src = "the release" if same else "the filed statements"
             return [mk("C.NG.01", ctx, raw_value=gap, severity=sev, unit="relative gap",
                        scheme=Scheme.MISLEADING_METRICS, direction="income_increasing",
@@ -611,8 +757,14 @@ def cng01(ctx: RunContext):
                                   f"release of {rel.period_end} (GAAP figure from {src}): adjusted EPS is "
                                   f"{fmt_pct(abs(gap))} {'above' if gap >= 0 else 'below'} GAAP EPS."),
                        evidence=[ctx.ev_span(rel, adj.start, adj.end, "Non-GAAP EPS in earnings release")])]
+        if refused:
+            continue  # this release's figures could not be matched by period; try the one before it
         return [mk("C.NG.01", ctx, raw_value=None, severity=0.0,
                    rationale="Non-GAAP EPS found, but no GAAP EPS for the same period (quarter or full year), so nothing was compared.")]
+    if refused:
+        return [mk("C.NG.01", ctx, raw_value=None, severity=0.0,
+                   rationale="Not compared: " + refused[0] + (
+                       "." if "not read reliably" in refused[0] else ", so it was read from the wrong column or row."))]
     return [mk("C.NG.01", ctx, raw_value=0.0, severity=0.0, rationale="No non-GAAP EPS found in this fiscal year's earnings releases.")]
 
 
@@ -630,15 +782,14 @@ def adjustment_rows(text: str) -> list[tuple[str, int, int]]:
     """Table rows of a release: (label, start, end) for each line that has a label and figures, the figures on the same
     line or on the following lines that hold only numbers. A category word inside a sentence (forward-looking-statement
     boilerplate, a risk list, a narrative paragraph) is not a reconciliation line item and is never counted."""
-    lines, rows, pos, offsets = text.split("\n"), [], 0, []
-    for line in lines:
-        offsets.append(pos)
-        pos += len(line) + 1
+    rows = []
+    lines, offsets = _lines(text)
     for i, line in enumerate(lines):
-        label = re.split(r"\$|\|", line, maxsplit=1)[0].strip()
+        raw = _label(line)
+        label = raw.strip()
         if not re.search(r"[A-Za-z]", label) or len(label) > 200:
             continue
-        figures = bool(re.search(r"\d", line[len(label):]))
+        figures = bool(re.search(r"\d", line[len(raw):]))
         j = i + 1
         while not figures and j < len(lines) and j <= i + 4 and not re.search(r"[A-Za-z]", lines[j]):
             figures = bool(re.search(r"\d", lines[j]))
@@ -837,10 +988,6 @@ def e04(ctx: RunContext):
         raise SkipDetector(f"LLM unavailable: {e}") from e
     contradictions, checked, seen = [], 0, set()
     for c in res.claims:
-        key = (c.metric, c.direction, c.magnitude_pct)
-        if key in seen:
-            continue  # the same claim made twice in MD&A is checked (and reported) once
-        seen.add(key)
         metric = claim_metric(c)
         fn = METRIC_FN.get(metric) if metric else None
         if fn is None:
@@ -853,6 +1000,12 @@ def e04(ctx: RunContext):
             continue
         if (SUBSET_RE.search(c.quote) or _part_of_business(c) or (metric != "gross margin" and RATIO_CLAIM_RE.search(c.quote))):
             continue  # a part of the business ("digitally-enabled comparable sales", "Products gross margin") or a ratio
+        # the same company-wide claim made twice in MD&A is checked (and reported) once; a skipped claim about a part of
+        # the business ("Products gross margin decreased") must not hide the company-wide one that follows it
+        key = (metric, c.direction, c.magnitude_pct)
+        if key in seen:
+            continue
+        seen.add(key)
         checked += 1
         ratio = metric == "gross margin"
         actual = (v1 - v0) if ratio else (v1 - v0) / abs(v0)
@@ -908,7 +1061,8 @@ def _claim_gap(c: Claim, actual: float, metric: str) -> str:
 class Relationship(BaseModel):
     counterparty: str
     kind: Literal["major_customer", "major_supplier", "related_party", "guarantee", "factoring", "vie", "side_agreement"]
-    amount_usd: float | None = None
+    amount_usd: float | None = Field(default=None, description="The amount in full units of the reporting currency "
+                                     "($5.2 billion = 5200000000), only when the text states it")
     share_of_revenue_pct: float | None = None
     share_basis: Literal["whole company", "segment or subsidiary", "unclear"] = Field(
         default="unclear", description="Whose revenue the percentage is of: the whole reporting company, or one segment or "

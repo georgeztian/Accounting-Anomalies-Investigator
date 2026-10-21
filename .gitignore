@@ -12,7 +12,6 @@ __pycache__/
 dist/
 
 # Not needed to run the program
-tests/
 .github/
 data/*
 !data/.gitkeep

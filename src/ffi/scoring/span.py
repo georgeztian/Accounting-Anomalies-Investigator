@@ -23,7 +23,7 @@ from typing import Any
 
 import numpy as np
 
-from ffi.scoring.engine import TEMPLATES, Finding, _matches, band_of, index_of
+from ffi.scoring.engine import TEMPLATES, Finding, _matches, band_of, remove_findings
 
 RECENT_YEARS = 3
 OLD_FACTOR = 0.85
@@ -156,18 +156,11 @@ def apply_set_aside(span: SpanResult, years: list[Any]) -> list[Finding]:
     if not aside:
         return []
     for f in aside:
+        # the year's occurrences: the pattern itself, or a test result standing alone in a year without the pattern
         detectors = {s.detector_id for s in f.signals}
-        for y in years:
-            label = y.ctx.focus_label
-            if label not in f.years:
-                continue
-            contrib = dict(y.score.contributions)
-            for key in [f"pattern:{f.id}", *detectors]:
-                contrib.pop(key, None)
-            y.score.contributions = sorted(contrib.items(), key=lambda kv: -kv[1])
-            y.score.risk_index = index_of(contrib)
-            y.score.band = band_of(y.score.risk_index)
-            y.score.findings = [g for g in y.score.findings if g.id != f.id and not (g.kind == "signal" and g.signals[0].detector_id in detectors)]
+        for y in (y for y in years if y.ctx.focus_label in f.years):
+            remove_findings(y.score, lambda g, f=f, d=detectors: g.id != f.id and not (g.kind == "signal" and g.signals[0].detector_id in d),
+                            [f"pattern:{f.id}", *detectors])
     span.findings = [f for f in span.findings if not f.set_aside]
     span.set_aside += aside
     for row, y in zip(span.yearly, years, strict=True):

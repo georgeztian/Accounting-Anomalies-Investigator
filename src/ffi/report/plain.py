@@ -101,6 +101,7 @@ TERMS: list[tuple[str, Any, str | None]] = [
     (r"\bItem 9A\b", "The internal-control section of the annual report", None),
     (r"\bItem 1A\b", "the risk-factors section", None),
     (r"\bCFO and CEO\b", "chief financial officer and chief executive", None),
+    (r"\b(\d+) CFO, (\d+) CEO\b", r"\1 chief financial officer, \2 chief executive", None),  # officer counts in saved runs
     (r"\bCFO (?=exits|departure|change)", "chief financial officer ", None),
     (r"\bCFO/CAO\b", "chief financial or chief accounting officer", None),
     (r"\bRSST accruals\b", "accruals (broad measure)", None),
@@ -148,8 +149,8 @@ TERMS: list[tuple[str, Any, str | None]] = [
     (r"\bMD&A\b", "Management's Discussion and Analysis (MD&A, management's commentary in the annual report)", "MD&A"),
     (r"\bXBRL\b", "XBRL (the machine-readable financial data companies file with the SEC)", "XBRL"),
     (r"\bLIFO\b", "LIFO (last-in, first-out inventory costing)", "LIFO"),
-    (r"\bnon-GAAP\b", "non-GAAP (adjusted figures that leave out some costs and are not defined by accounting standards)", "non-GAAP"),
-    (r"(?<!non-)\bGAAP\b", "GAAP (the official accounting rules)", "GAAP"),
+    (r"\b[Nn]on-GAAP\b", "non-GAAP (adjusted figures that leave out some costs and are not defined by accounting standards)", "non-GAAP"),
+    (r"(?<![Nn]on-)\bGAAP\b", "GAAP (the official accounting rules)", "GAAP"),  # never the "GAAP" inside "Non-GAAP"
     (r"\bCAMs?\b", "critical audit matters", None),
     (r"\bAIF\b", "Annual Information Form", None),
     (r"\b10-K/A\b", "amended annual report", None),
@@ -267,6 +268,7 @@ def plain(text: str | None, expand: bool = True, terms: bool = True) -> str:
 
             out = pat.sub(first_use, out)
     out = re.sub(r"(?<!\.)\.\.(?!\.)", ".", out)
+    out = re.sub(r"(?<=[\w)])\.:(?=\s)", ":", out)  # "an alternative.: its assessment" (a sentence joined to its label)
     out = re.sub(r"\b(\w+(?: \w+)?) or \1(?=[.,;:!?)]|$)", r"\1", out)  # rewrites can collide: "reported or tagged." -> "reported." (a repeat followed by more words, as in "cash and cash equivalents", is real text)
     out = re.sub(r"(?<![A-Za-z])([Aa])n (?=Management's)", lambda m: m.group(1) + " ", out)  # "an MD&A" once expanded
     if expand and out[:1].islower():

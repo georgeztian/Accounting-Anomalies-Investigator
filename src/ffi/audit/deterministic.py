@@ -89,9 +89,13 @@ def _fact_end(ev: EvidenceRef) -> str:
 
 
 def _fact_matches(idx, e: EvidenceRef) -> bool:
-    """The cited value is what the cited filing reports under the cited concept for the cited period."""
+    """The cited value is what the cited filing reports under the cited concept for the cited period: within 0.05%, and
+    within half a unit for an amount or a share count (rounding). A per-share amount or a rate has no such floor: half a
+    unit would let a cited EPS of $3.64 pass against a filed $3.20."""
     vals = idx.get((e.accession, _concept_name(e) or "", _fact_end(e)), np.array([]))
-    return bool(np.any(np.abs(vals - e.value) <= max(abs(e.value) * 0.0005, 0.5)))
+    unit = (e.unit or "").lower()
+    floor = 0.5 if unit and "/" not in unit and unit != "pure" else 1e-9
+    return bool(np.any(np.abs(vals - e.value) <= max(abs(e.value) * 0.0005, floor)))
 
 
 def _doc_for(ctx, accession: str | None):

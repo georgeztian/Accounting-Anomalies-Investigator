@@ -274,15 +274,16 @@ def sloan_accruals(P: Panel, p: pd.Timestamp) -> float:
         return op_assets - op_liab
 
     avg_noa = (noa(0) + noa(1)) / 2
-    if not np.isfinite(avg_noa) or avg_noa <= 0:
-        avg_noa = v.avg("TOTAL_ASSETS")
     # organic investment only: buying marketable securities with surplus cash is part of investing cash flow but not an
     # accrual (those securities are excluded from net operating assets above), and counting it made cash-rich companies
     # look as if most of their profit were unbacked by cash. Cash paid for acquired businesses is left out too: it
-    # buys assets, it is not an accounting estimate (Johnson & Johnson 2025: $17.5B of acquisitions took the ratio to 25%)
+    # buys assets, it is not an accounting estimate (Johnson & Johnson 2025: $17.5B of acquisitions took the ratio to 25%).
+    # Without capex, or with net operating assets that are not positive, the ratio is not defined: investing cash flow
+    # (Toyota's earlier years) or total assets in its place made a different measure that was compared with this one
     capex = v.g("CAPEX")
-    invest = -capex if np.isfinite(capex) else v.g("CFI")
-    return safe_div(v.g("NET_INCOME") - v.g("CFO") - invest, avg_noa)
+    if not np.isfinite(capex) or not np.isfinite(avg_noa) or avg_noa <= 0:
+        return NAN
+    return safe_div(v.g("NET_INCOME") - v.g("CFO") + capex, avg_noa)
 
 
 def montier_c(P: Panel, p: pd.Timestamp) -> dict[str, float]:

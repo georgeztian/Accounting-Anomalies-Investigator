@@ -46,7 +46,7 @@ def f01(ctx: RunContext):
         if amt is None or cik is None:
             continue
         try:
-            fs = FactStore.load(ctx.client, cik, ctx.as_of)
+            fs = FactStore.load(ctx.client, cik, ctx.cutoff or ctx.as_of)  # what the customer had filed by this year's cutoff
         except Exception:  # noqa: BLE001
             continue
         if fs.currency != ctx.currency:
@@ -57,11 +57,12 @@ def f01(ctx: RunContext):
         p = a.values.index[np.argmin(np.abs((a.values.index - ctx.focus).days))]
         if abs((p - ctx.focus).days) > 183:
             continue  # no fiscal year of the customer's that overlaps the focus year
-        # what the customer spends in a year: all operating costs (revenue less operating income) plus capital spending;
-        # summing cost lines misses businesses that report costs under other headings (e.g. restaurant expenses)
+        # what the customer spends in a year: all operating costs (revenue less operating income) plus capital spending.
+        # Without them the customer is not compared: a sum of cost lines misses costs reported under other headings
+        # (restaurant expenses), and a smaller cost base would make ordinary sales look impossible
         opex = a.get("REVENUE", p) - a.get("OPERATING_INCOME", p)
         if not finite(opex) or opex <= 0:
-            opex = sum(a.get(i, p) for i in ("COGS", "SGA", "RND") if finite(a.get(i, p)))
+            continue
         costs = opex + (a.get("CAPEX", p) if finite(a.get("CAPEX", p)) else 0.0)
         checked += 1
         share = safe_div(amt, costs)

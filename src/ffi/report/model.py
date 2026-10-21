@@ -215,6 +215,15 @@ def flag_level(ctx) -> float:
     return float(ctx.tuning.get("scoring", {}).get("flag_severity", 0.5)) if ctx.tuning else 0.5
 
 
+def _alternatives(f) -> list[str]:
+    """The innocent explanations to rule out; "no explaining event detected" is dropped once there are others (the
+    investigation's own), which it would seem to contradict."""
+    from ffi.scoring.engine import NO_EVENT, NO_EVENT_PATTERN
+
+    real = [a for a in f.alternatives if a not in (NO_EVENT, NO_EVENT_PATTERN)]
+    return real or list(f.alternatives)
+
+
 def finding_block(f, ctx, rank: int, flag_at: float, chart_years: int = 6) -> dict[str, Any]:
     """One finding's fixed set of blocks, as the templates show it."""
     summary, inv_status, inv_text = _investigation(f)
@@ -248,7 +257,7 @@ def finding_block(f, ctx, rank: int, flag_at: float, chart_years: int = 6) -> di
         "sab99_text": ("; ".join(P.plain(x) for x in m.sab99) + " (qualitative factors from SEC guidance on materiality)"
                        if m and m.sab99 else NONE_TEXT),
         **_evidence_blocks(evidence),
-        "alternatives": [P.plain(x) for x in f.alternatives] or [NONE_TEXT],
+        "alternatives": [P.plain(x) for x in _alternatives(f)] or [NONE_TEXT],
         "questions": [P.plain(x) for x in f.questions] or [NONE_TEXT],
         "audit": _audit(f.audit),
         "audit_label": f.audit.label if f.audit else "Not independently re-checked",
@@ -272,7 +281,7 @@ def test_families(results, flag_at: float) -> tuple[list[dict[str, Any]], dict[s
                                  "severity": round(s.severity, 2), "value": s.raw_value, "unit": s.unit,
                                  "period": P.plain(s.period, expand=False),
                                  "pct_peer": None if s.percentile_peer is None else round(s.percentile_peer),
-                                 "detail": P.plain(s.rationale + (f" Explained by: {s.suppressed_by}." if s.suppressed_by else "")),
+                                 "detail": P.plain(s.rationale + (f" Explained by: {s.suppressed_by}." if status == "suppressed" else "")),
                                  "reading": P.plain(interpret("ok", s.severity, flag_at, s.flagged, s.percentile_peer, s.suppressed_by)),
                                  **_about(r.id)})
             else:

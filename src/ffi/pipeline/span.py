@@ -69,7 +69,7 @@ def run_span(opts: RunOptions, span: int, choose=None, progress: Callable[[str],
     import pandas as pd
 
     from ffi.audit.deterministic import run_audit
-    from ffi.report.explain import _write_one, fallback
+    from ffi.report.explain import explain_findings
     from ffi.scoring.engine import audit_reported, template_narrative
 
     timings: dict[str, float] = {}
@@ -125,17 +125,9 @@ def run_span(opts: RunOptions, span: int, choose=None, progress: Callable[[str],
 
         audit_reported(result.findings, audit_one)
         span_scoring.apply_audit(result)
+    shown = result.findings[:REPORTED]
     with step("Explaining findings in plain language"):
-        from ffi.concurrency import map_concurrent
-
-        shown = result.findings[:REPORTED]
-        if prep.llm is None:
-            for f in shown:
-                f.client = fallback(f)
-        else:
-            written = map_concurrent(lambda f: _write_one(context_of(f), f), shown, workers=4)
-            for f, r in zip(shown, written, strict=True):
-                f.client = r if isinstance(r, dict) else fallback(f)
+        explain_findings(shown, context_of)
 
     manifest = build_span_manifest(years, result, run_id, opts, span, timings, kg_counts, prep)
     out = SpanOutput(years, result, {f.id: context_of(f) for f in shown}, run_dir, manifest, timings, agent_cases)

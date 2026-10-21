@@ -81,6 +81,13 @@ def implausible_fourth_quarters(ctx: RunContext) -> set:
     return bad
 
 
+def unbroken_quarters(s: pd.Series) -> pd.Series:
+    """The latest run of consecutive quarters (no more than 120 days apart). A seasonal model with a period of four reads
+    every later quarter as another season once one quarter is missing (a fourth quarter whose cost of sales is not filed)."""
+    gaps = np.flatnonzero(np.diff(s.index.to_numpy()) > np.timedelta64(120, "D"))
+    return s.iloc[gaps[-1] + 1:] if len(gaps) else s
+
+
 @detector("D.01", "Seasonal time-series residuals & change points", F, Area.EARNINGS_QUALITY)
 def d01(ctx: RunContext):
     """STL residual of the latest quarter per key ratio, plus PELT change points in the last 4 quarters."""
@@ -98,6 +105,7 @@ def d01(ctx: RunContext):
     for name, (a, b, f) in series.items():
         s = f(a, b.reindex(a.index)).replace([np.inf, -np.inf], np.nan)
         s = s.mask(s.index.isin(skip)).interpolate(limit_direction="both").dropna() if s.index.isin(skip).any() else s.dropna()
+        s = unbroken_quarters(s)
         if len(s) < 12:
             continue
         with warnings.catch_warnings():

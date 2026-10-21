@@ -51,7 +51,7 @@ def _eps_cross_check(ctx) -> list[str]:
     for rel in releases_in_year(ctx):
         _, gaap = release_eps(ctx, rel)
         for g in gaap:
-            filed = filed_eps(ctx, rel, g.period)
+            filed = filed_eps(ctx, rel, g.period, g.continuing)
             if math.isfinite(filed) and filed and abs(g.value - filed) / abs(filed) > 0.01:
                 out.append(f"release {rel.period_end}: GAAP EPS ${g.value:.2f} ({g.period}) vs filed ${filed:.2f} for the same period")
     return out

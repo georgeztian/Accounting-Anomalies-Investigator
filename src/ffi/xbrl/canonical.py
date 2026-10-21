@@ -69,6 +69,10 @@ ITEMS: tuple[CanonicalItem, ...] = (
        "NetIncomeLossAttributableToNoncontrollingInterest", "NetIncomeLossAttributableToNonredeemableNoncontrollingInterest"),
     _i("EPS_BASIC", "EPS (basic)", "D", EPS, "IS", "EarningsPerShareBasic", "EarningsPerShareBasicAndDiluted"),
     _i("EPS_DILUTED", "EPS (diluted)", "D", EPS, "IS", "EarningsPerShareDiluted", "EarningsPerShareBasicAndDiluted"),
+    # what releases headline when there are discontinued operations (General Electric: "Continuing EPS"), and what adjusted
+    # EPS is reconciled from
+    _i("EPS_DILUTED_CONT", "EPS from continuing operations (diluted)", "D", EPS, "IS",
+       "IncomeLossFromContinuingOperationsPerDilutedShare"),
     _i("SHARES_DILUTED", "Weighted diluted shares", "D", SHARES, "IS",
        "WeightedAverageNumberOfDilutedSharesOutstanding"),
     _i("SHARES_BASIC", "Weighted basic shares", "D", SHARES, "IS", "WeightedAverageNumberOfSharesOutstandingBasic"),
@@ -278,6 +282,7 @@ IFRS: dict[str, tuple[str, ...]] = {
     "NCI_INCOME": ("ProfitLossAttributableToNoncontrollingInterests",),
     "EPS_BASIC": ("BasicEarningsLossPerShare",),
     "EPS_DILUTED": ("DilutedEarningsLossPerShare",),
+    "EPS_DILUTED_CONT": ("DilutedEarningsLossPerShareFromContinuingOperations",),
     "SHARES_DILUTED": ("AdjustedWeightedAverageShares",),
     "SHARES_BASIC": ("WeightedAverageShares",),
     "GOODWILL_IMPAIRMENT": ("ImpairmentLossRecognisedInProfitOrLossGoodwill",),

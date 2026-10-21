@@ -94,7 +94,7 @@ def _material(ctx, f) -> str:
         "company": f"{ctx.company.display_name or ctx.company.name}", "industry": ctx.company.sic_description,
         "fiscal_year": ctx.focus_label, "finding": f.title, "test_results": tests,
         "key_figures_this_year_and_prior_year": key,
-        "estimated_effect_on_profit": (f"{fmt_money(m.impact_low)} to {fmt_money(m.impact_high)}" if m else "not quantified"),
+        "estimated_pre_tax_effect": (f"{fmt_money(m.impact_low)} to {fmt_money(m.impact_high)} before tax" if m else "not quantified"),
         "investigation_conclusion": f.narrative if f.narrative_source in ("agent", "agent-degraded") else "",
         "innocent_explanations_considered": f.alternatives[:6],
         **({"years_flagged": f.years,
@@ -135,16 +135,13 @@ def _write_one(ctx, f) -> dict[str, str]:
     return fallback(f)
 
 
-def explain_findings(ctx, sc, limit: int = 12) -> None:
-    """Attach `client` explanations to the reported findings (in parallel; the AI calls mostly wait)."""
+def explain_findings(findings, context_of) -> None:
+    """Attach `client` explanations to the reported findings, each written in the context `context_of(finding)` (its own
+    year in a multi-year review), in parallel since the AI calls mostly wait."""
     from ffi.concurrency import map_concurrent
 
-    findings = sc.findings[:limit]
-    if ctx.llm is None:
-        for f in findings:
-            f.client = fallback(f)
-        return
-    results = map_concurrent(lambda f: _write_one(ctx, f), findings, workers=4)
+    results = map_concurrent(lambda f: _write_one(context_of(f), f) if context_of(f).llm is not None else fallback(f),
+                             findings, workers=4)
     for f, r in zip(findings, results, strict=True):
         f.client = r if isinstance(r, dict) else fallback(f)
 

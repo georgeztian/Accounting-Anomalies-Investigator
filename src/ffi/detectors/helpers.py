@@ -92,3 +92,9 @@ def need(*values: float, reason: str = "required data not reported") -> None:
 
 def finite(*values: float) -> bool:
     return all(v is not None and np.isfinite(v) for v in values)
+
+
+def year_earlier(index, q):
+    """The period in `index` a year before `q`, matched by date (within 10 days, for 52/53-week calendars), or None. A
+    quarter missing from the filings never shifts a year-on-year comparison onto another quarter."""
+    return next((p for p in index if abs((q - p).days - 364) <= 10), None)

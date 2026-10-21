@@ -87,7 +87,9 @@ TEMPLATES: list[SchemeTemplate] = [
 
 # Events or facts that legitimately explain a signal: (condition key, detectors discounted, factor)
 EXPLAIN_RULES = [
-    ("large_acquisition", {"C.AR.01", "C.INV.01", "C.EXP.02", "C.REV.05", "D.04", "B.01", "A.08", "C.REV.01", "C.CF.02", "D.02", "D.03"}, 0.5),
+    # F.04: the balances an acquisition brings move without MD&A naming each line (Waste Management 2024, Stericycle)
+    ("large_acquisition", {"C.AR.01", "C.INV.01", "C.EXP.02", "C.REV.05", "D.04", "B.01", "A.08", "C.REV.01", "C.CF.02", "D.02", "D.03",
+                           "F.04"}, 0.5),
     ("standard_adoption", {"C.REV.01", "C.REV.02", "C.REV.03", "E.01", "A.14"}, 0.6),
     ("stock_split", {"A.12"}, 0.2),
 ]
@@ -177,6 +179,10 @@ def template_narrative(f) -> str:
     return " ".join(parts)
 
 
+# what a finding's innocent explanations say when no explaining event was detected (left out of the report once the
+# investigation has written explanations of its own)
+NO_EVENT = "No explaining event detected."
+NO_EVENT_PATTERN = "No acquisition, accounting-standard adoption or stock split in the focus year explains these signals."
 UNVERIFIED_FACTOR = 0.5
 REPORTED = 12  # findings shown, audited and explained
 
@@ -223,21 +229,22 @@ def contribution_keys(f: Finding) -> list[str]:
     return [f"pattern:{f.id}"] if f.kind == "pattern" else sorted({s.detector_id for s in f.signals})
 
 
+def remove_findings(sc: ScoreResult, keep, keys) -> None:
+    """Keep the findings for which `keep(finding)` holds, drop the contributions `keys` and recompute the index and band."""
+    contrib = {k: v for k, v in sc.contributions if k not in set(keys)}
+    sc.findings = [f for f in sc.findings if keep(f)]
+    sc.contributions = sorted(contrib.items(), key=lambda kv: -kv[1])
+    sc.risk_index = index_of(contrib)
+    sc.band = band_of(sc.risk_index)
+
+
 def apply_set_aside(sc: ScoreResult) -> list[Finding]:
     """Findings the investigation showed to be test errors (confirmed by the independent auditor) leave the list and the
     risk index; they are kept in `sc.set_aside` and shown in their own section of the report."""
     aside = [f for f in sc.findings if f.set_aside]
-    if not aside:
-        return []
-    contrib = dict(sc.contributions)
-    for f in aside:
-        for key in contribution_keys(f):
-            contrib.pop(key, None)
-    sc.findings = [f for f in sc.findings if not f.set_aside]
-    sc.set_aside += aside
-    sc.contributions = sorted(contrib.items(), key=lambda kv: -kv[1])
-    sc.risk_index = index_of(contrib)
-    sc.band = band_of(sc.risk_index)
+    if aside:
+        remove_findings(sc, lambda f: not f.set_aside, [k for f in aside for k in contribution_keys(f)])
+        sc.set_aside += aside
     return aside
 
 
@@ -309,7 +316,7 @@ def score(ctx: RunContext, results: list[DetectorResult]) -> ScoreResult:
         alts = [f"Checked: {v}" for v in conds.values()] + [f"{s.detector_id} discounted: {s.suppressed_by}" for s in suppressed
                                                              if any(_matches(s, tok) for g in t.required_any for tok in g)]
         if not alts:
-            alts = ["No acquisition, accounting-standard adoption or stock split in the focus year explains these signals."]
+            alts = [NO_EVENT_PATTERN]
         ev, seen_ev = [], set()
         for s in sorted(members, key=lambda x: -x.severity):
             for e in s.evidence[:3]:
@@ -327,7 +334,7 @@ def score(ctx: RunContext, results: list[DetectorResult]) -> ScoreResult:
                                 sorted(loose_b, key=lambda x: -x.severity), None, None,
                                 [e for s in loose_b for e in s.evidence[:2]][:8],
                                 ["Which inputs drive the scores, and are they explained by business changes?"],
-                                [f"Checked: {v}" for v in conds.values()] or ["No explaining event detected."]))
+                                [f"Checked: {v}" for v in conds.values()] or [NO_EVENT]))
         used.update(id(s) for s in loose_b)
     for s in core:
         if id(s) in used or s.severity < 0.7:
@@ -335,7 +342,7 @@ def score(ctx: RunContext, results: list[DetectorResult]) -> ScoreResult:
         findings.append(Finding(f"{s.detector_id}@{s.period}", s.name, "signal", s.severity * 0.85, [s], s.impact,
                                 assess(ctx, s.impact), s.evidence[:6],
                                 ["What explains this movement, and is it expected to persist?"],
-                                [f"Checked: {v}" for v in conds.values()] or ["No explaining event detected."]))
+                                [f"Checked: {v}" for v in conds.values()] or [NO_EVENT]))
     for f in findings:
         mult = f.materiality.multiple if f.materiality else 0.0
         f.priority = f.score * (0.5 + 0.5 * min(mult, 3.0) / 3.0) if f.materiality else f.score * 0.5

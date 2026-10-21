@@ -50,7 +50,7 @@ def qualified(text: str, start: int) -> bool:
     w = words[-1]  # the word right before "revenue" / "net income"
     if w.lower() in PART_NOUNS:
         return True
-    allowed = w.lower() in TOTAL_LEAD or re.search(r"quarter|year|month", w.lower())
+    allowed = w.lower() in TOTAL_LEAD or re.search(r"quarter|year|month|^(?:q[1-4]|[1-4]q|fy\d*)$", w.lower())  # "Q4 revenue"
     return any(ch.isupper() for ch in w) and not allowed
 
 
@@ -130,8 +130,9 @@ def check_amounts(text: str, known: dict, quarter_ok: bool = False) -> tuple[int
     for m in AMOUNT_RE.finditer(text):
         lo = sentence_start(text, m.start())
         sentence = text[lo: m.end() + 40]
-        ctx = SKIP_CONTEXT.search(sentence)
-        if ctx and not (quarter_ok and re.search(r"(?i)quarter|three months", ctx.group(0))):
+        # every context word counts: "Fourth quarter adjusted revenue" names a quarter (allowed in a release) and a
+        # non-GAAP basis (never compared), and the first word found must not decide alone
+        if any(not (quarter_ok and QUARTER_WORDS.search(c.group(0))) for c in SKIP_CONTEXT.finditer(sentence)):
             continue
         if qualified(text, m.start()):
             continue

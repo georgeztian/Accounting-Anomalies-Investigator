@@ -3,7 +3,7 @@
 
 {{ m.years }} fiscal years, ended {{ m.first_end }} to {{ m.last_end }} · based on filings available on {{ m.as_of }} · prepared {{ m.generated }} · industry: {{ m.company.sic_description or 'not stated' }} · auditor: {{ m.company.auditor or 'not identified' }}
 
-Company type: **{{ m.profile.label }}** · amounts in {{ m.currency }} · {{ m.profile.excluded }} tests do not apply to this type of company
+Company type: **{{ m.profile.label }}** · amounts in {{ m.currency }}{% if m.profile.excluded %} · {{ m.profile.excluded }} tests do not apply to this type of company{% endif %}
 
 **Caveats:** {% if m.company.warnings %}{{ m.company.warnings|join(' ') }}{% else %}{{ m.none_text }}{% endif %}
 
@@ -72,7 +72,7 @@ These are not warning signs in themselves, but pressure (financial strain, leade
 
 **Investigation ({{ f.investigation_status }}):** {{ f.investigation }}
 
-- **Estimated effect on profit (latest year flagged):** {{ f.impact_text }}{% if f.impact_basis %} (how it was estimated: {{ f.impact_basis }}){% endif %}
+- **Estimated effect on pre-tax profit (latest year flagged):** {{ f.impact_text }}{% if f.impact_basis %} (how it was estimated: {{ f.impact_basis }}){% endif %}
 - **Is it material?** {{ f.materiality_text }}
 - **Other reasons it could matter:** {{ f.sab99_text }}
 
@@ -106,14 +106,13 @@ These are not warning signs in themselves, but pressure (financial strain, leade
 {% endfor %}{% else %}
 No accounting anomaly met the reporting threshold in any year.
 {% endfor %}
-## Results set aside as probable test errors
+{% if m.set_aside %}## Results set aside as probable test errors
 
 {{ m.set_aside_note }}
 
 {% for s in m.set_aside %}- **{{ s.title }}**{% if s.years %} ({{ s.years }}){% endif %} — based on: {{ s.tests|join('; ') }}. Why it was set aside: {{ s.reason }}
-{% else %}- {{ m.none_text }}
 {% endfor %}
-## All tests performed
+{% endif %}## All tests performed
 
 Severity runs from 0 (nothing unusual) to 1 (strongest); a result is flagged at {{ "%.1f"|format(m.flag_at) }}. "Explained" means the result was unusual but a known legitimate cause was found. "Held back" means the result or one of its inputs was physically impossible (for example a part larger than its whole), so it was not counted. This version lists the flagged and explained results of each year; the HTML report and report.json list every test.
 {% for y in m.tests %}

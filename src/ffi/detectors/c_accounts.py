@@ -17,7 +17,7 @@ import pandas as pd
 
 from ffi.context import RunContext
 from ffi.detectors.base import Area, ImpactEstimate, Scheme, SkipDetector, detector
-from ffi.detectors.helpers import finite, mk, need
+from ffi.detectors.helpers import finite, mk, need, year_earlier
 from ffi.detectors.scores import V, debt_parts, dep_measure, depreciable_ppe, same_basis
 from ffi.detectors.stats import (
     fmt_money,
@@ -319,6 +319,9 @@ def crev09(ctx: RunContext):
     raise SkipDetector("operating KPIs are company-specific; requires LLM extraction (planned)")
 
 
+RPO_MIN_SHARE = 0.05
+
+
 @detector("C.REV.10", "Revenue vs remaining performance obligations", F, Area.REVENUE)
 def crev10(ctx: RunContext):
     """Revenue growth exceeding RPO (backlog) growth for consecutive years: borrowing from the future."""
@@ -326,19 +329,23 @@ def crev10(ctx: RunContext):
     rpo = rpo_all.dropna()
     if len(rpo) < 3:
         raise SkipDetector("RPO not reported for 3 years")
+    share = safe_div(rpo.iloc[-1], rev_all.get(rpo.index[-1], float("nan")))  # backlog and revenue of the same year
+    if share < RPO_MIN_SHARE:
+        # a backlog that covers a sliver of revenue (NVIDIA FY2026: $2.3B against $215.9B) is not where the revenue comes
+        # from, so revenue outgrowing it says nothing about borrowing from future periods
+        raise SkipDetector(f"RPO immaterial (under {RPO_MIN_SHARE:.0%} of revenue)")
     # growth from one fiscal year to the next only: a year that is not reported leaves a gap, never a two-year change
     gaps = (rev_all.pct_change(fill_method=None) - rpo_all.pct_change(fill_method=None)).dropna()
-    rev = rev_all.dropna()
     streak = 0
     for g in reversed(gaps.tolist()):
         if g > 0.03:
             streak += 1
         else:
             break
-    sev = float(np.clip(streak / 3, 0, 1)) * (0.9 if safe_div(rpo.iloc[-1], rev.iloc[-1]) > 0.3 else 0.5)
+    sev = float(np.clip(streak / 3, 0, 1)) * (0.9 if share > 0.3 else 0.5)
     return [mk("C.REV.10", ctx, raw_value=float(gaps.iloc[-1]) if len(gaps) else None, severity=sev, unit="growth gap",
                scheme=Scheme.PREMATURE_REVENUE, direction="income_increasing",
-               rationale=f"Revenue growth exceeded RPO growth in {streak} consecutive year(s); RPO = {fmt_pct(safe_div(rpo.iloc[-1], rev.iloc[-1]))} of revenue.",
+               rationale=f"Revenue growth exceeded RPO growth in {streak} consecutive year(s); RPO = {fmt_pct(share)} of revenue.",
                evidence=ctx.evs(["RPO", "REVENUE"], ks=(0, 1)))]
 
 
@@ -383,11 +390,10 @@ def car01(ctx: RunContext):
     qa, qr = ctx.qhist("AR", 8), ctx.qhist("REVENUE", 8)
     if len(qa.dropna()) >= 5 and len(qr.dropna()) >= 5:
         qd = (qa / qr * 91).dropna()
-        # the same quarter a year earlier, found by date: a quarter missing in between must not shift the comparison
-        prior = [q for q in qd.index if abs((qd.index[-1] - q).days - 364) <= 10] if len(qd) else []
-        if prior:
-            yoy = qd.iloc[-1] - qd[prior[0]]
-            qnote = f" Latest quarter DSO {qd.iloc[-1]:.0f} days vs {qd[prior[0]]:.0f} a year earlier ({yoy:+.0f})."
+        prior = year_earlier(qd.index, qd.index[-1]) if len(qd) else None
+        if prior is not None:
+            yoy = qd.iloc[-1] - qd[prior]
+            qnote = f" Latest quarter DSO {qd.iloc[-1]:.0f} days vs {qd[prior]:.0f} a year earlier ({yoy:+.0f})."
     return [mk("C.AR.01", ctx, raw_value=a.cur, expected=a.baseline, severity=a.severity, unit="days",
                percentile_peer=a.pct_peer, percentile_self=a.pct_self, p_value=a.p_value, impact=imp,
                scheme=Scheme.PREMATURE_REVENUE, direction="income_increasing",
@@ -915,7 +921,7 @@ def ccf01(ctx: RunContext):
         return safe_div(cfo, ni) if ni > 0 else float("nan")
 
     cur = r3(V(ctx.A, ctx.focus))
-    need(cur, reason="3 years of positive net income needed")
+    need(cur, reason="three years of net income and operating cash flow needed, with net income positive in sum")
     prev = r3(V(ctx.A, ctx.period_at(1))) if ctx.period_at(1) is not None else float("nan")
     peers = ctx.peer_values(lambda P, p, k: r3(V(P, p)))
     sev = float(np.clip((0.9 - cur) / 0.5, 0, 1))
@@ -1258,8 +1264,9 @@ def cgov03(ctx: RunContext):
     unread = [e for e in ev if e.description.strip() == "8-K Item 5.02"]
     sev = min(1.0, 0.05 * len(unread) + 0.35 * len(cfo) + 0.2 * len(ceo) + 0.15 * len(cao))
     return [mk("C.GOV.03", ctx, raw_value=len(ev), severity=sev * 0.8, unit="events", tags=["pressure"],
-               rationale=(f"{len(ev)} Item 5.02 filing(s) in two years: {len(cfo)} CFO, {len(ceo)} CEO and {len(cao)} chief "
-                          f"accounting officer transition(s)"
+               # officer titles in full: "CFO" reads as operating cash flow in the report's wording
+               rationale=(f"{len(ev)} Item 5.02 filing(s) in two years: {len(cfo)} chief financial officer, {len(ceo)} chief "
+                          f"executive and {len(cao)} chief accounting officer transition(s)"
                           + (f"; {len(unread)} filing(s) could not be read" if unread else "")
                           + ". The other filings concern pay plans or directors. A planned succession is a common benign cause."),
                evidence=[ctx.ev_event(e) for e in (cfo + ceo + cao or ev)[:3]])]

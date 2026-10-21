@@ -8,7 +8,7 @@ import pandas as pd
 from ffi.context import RunContext, pv
 from ffi.detectors import scores as S
 from ffi.detectors.base import Area, EvidenceRef, ImpactEstimate, Scheme, SkipDetector, detector
-from ffi.detectors.helpers import finite, mk
+from ffi.detectors.helpers import finite, mk, year_earlier
 from ffi.detectors.stats import (
     fmt_money,
     fmt_num,
@@ -174,10 +174,10 @@ def b04(ctx: RunContext):
 
 @detector("B.05", "Sloan accrual ratio", F, Area.ACCRUALS, needs_peers=True)
 def b05(ctx: RunContext):
-    """(NI - CFO - CFI) / average net operating assets; top decile = low earnings persistence."""
+    """(NI - CFO + capex) / average net operating assets; top decile = low earnings persistence."""
     v = S.sloan_accruals(ctx.A, ctx.focus)
     if not finite(v):
-        raise SkipDetector("inputs unavailable")
+        raise SkipDetector("capital expenditure not reported, or net operating assets not positive")
     peers = ctx.peer_values(lambda P, p, k: S.sloan_accruals(P, p))
     hist = [S.sloan_accruals(ctx.A, p) for p in ctx.comparable_periods[-6:-1]]
     pct = percentile_of(v, peers) if len(peers) >= 3 else None
@@ -186,14 +186,15 @@ def b05(ctx: RunContext):
     return [mk("B.05", ctx, raw_value=v, expected=float(np.median(peers)) if peers else None, severity=sev,
                unit="ratio", percentile_peer=pct, direction="income_increasing" if v > 0 else "neutral",
                rationale=f"Sloan accrual ratio {fmt_pct(v)} (peer median {fmt_pct(float(np.median(peers)) if peers else np.nan)}).",
-               # the inputs the ratio was computed from: investment is capex (investing cash flow only
-               # when capex is not reported); net operating assets are averaged over two years
-               evidence=ctx.evs(["NET_INCOME", "CFO"] + (["CAPEX"] if finite(ctx.a("CAPEX")) else ["CFI"]), ks=(0,))
+               # the inputs the ratio was computed from; net operating assets are averaged over two years
+               evidence=ctx.evs(["NET_INCOME", "CFO", "CAPEX"], ks=(0,))
                + ctx.evs(["TOTAL_ASSETS", "CASH", "ST_INVESTMENTS", "TOTAL_LIABILITIES", "LONG_TERM_DEBT", "CURRENT_DEBT",
                           "ST_BORROWINGS"], ks=(0, 1), role="supporting"))]
 
 
-MONTIER_LABELS = {"ni_cfo_gap_widening": "net income running further ahead of operating cash flow",
+# net income less operating cash flow (accruals) rising: also when net income is below cash flow, as at most large
+# companies, so "net income running further ahead of cash flow" was false for them (Alphabet 2023: $73.8B vs $101.8B)
+MONTIER_LABELS = {"ni_cfo_gap_widening": "accruals (net income less operating cash flow) rising",
                   "dso_rising": "receivable days rising", "dsi_rising": "inventory days rising",
                   "other_ca_rising": "other current assets rising relative to revenue",
                   "dep_rate_falling": "depreciation rate falling", "asset_growth_gt_10pct": "total assets growing more than 10%"}
@@ -258,7 +259,9 @@ def b09(ctx: RunContext):
     if len(ni.dropna()) >= 8:
         roa = (ni / ta).dropna()
         small_profit = int(((roa >= 0) & (roa <= 0.005)).sum()) if industrial else 0
-        yoy = (eps - eps.shift(4)).dropna().tail(12)
+        # the same quarter a year earlier, found by date: a quarter not filed must not shift the comparison
+        yoy = pd.Series({q: eps[q] - eps[p] for q in eps.index if (p := year_earlier(eps.index, q)) is not None}, dtype=float)
+        yoy = yoy.dropna().tail(12)
         small_inc = int(((yoy >= 0) & (yoy <= 0.01)).sum())
         n = len(roa) if industrial else 0
         rate = (small_profit + small_inc) / max(n + len(yoy), 1)
