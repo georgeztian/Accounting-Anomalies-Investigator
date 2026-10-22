@@ -17,8 +17,8 @@ import pandas as pd
 
 from ffi.context import RunContext
 from ffi.detectors.base import Area, ImpactEstimate, Scheme, SkipDetector, detector
-from ffi.detectors.helpers import finite, mk, need, year_earlier
-from ffi.detectors.scores import V, debt_parts, dep_measure, depreciable_ppe, same_basis
+from ffi.detectors.helpers import finite, mk, need, need_same_basis, year_earlier
+from ffi.detectors.scores import V, debt_parts, dep_measure, depreciable_ppe, mixed_basis, same_basis
 from ffi.detectors.stats import (
     fmt_money,
     fmt_num,
@@ -30,7 +30,8 @@ from ffi.detectors.stats import (
     z_to_p,
 )
 from ffi.text.search import count, new_mentions, search
-from ffi.xbrl.canonical import basis
+from ffi.xbrl.canonical import BY_ID, basis
+from ffi.xbrl.facts import quarters_in_year
 
 F = "C"
 Ratio = Callable[[V], float]
@@ -79,6 +80,8 @@ def assess(ctx: RunContext, fn: Ratio, higher_is_bad: bool = True, z_start: floa
     focus_basis: dict = {}
     cur = fn(V(ctx.A, ctx.focus, focus_basis))
     need(cur)
+    if mixed := mixed_basis(focus_basis):
+        raise SkipDetector(f"{BY_ID[mixed].label.lower()} is reported on different bases in the years the ratio compares")
     hist = ratio_hist(ctx, fn, basis_of=focus_basis)
     def peer_fn(P, p, k):
         # a peer whose inputs are reported on another basis (payables with accrued liabilities, G&A without selling costs,
@@ -220,10 +223,9 @@ def crev04(ctx: RunContext):
     fyes = [p for p in ctx.A.periods if p <= ctx.focus]
     shares, margins = {}, {}
     for fye in fyes:
-        qs = [q for q in rev.index if fye - pd.Timedelta(days=372) < q <= fye + pd.Timedelta(days=8)]
-        if len(qs) < 4:
+        qs = quarters_in_year(rev.index, fye, ctx.A.periods)  # the year's own four quarters, never last year's fourth
+        if len(qs) != 4:
             continue
-        qs = qs[-4:]
         r = rev[qs]
         if r.isna().any() or r.sum() <= 0:
             continue
@@ -261,7 +263,7 @@ def crev04(ctx: RunContext):
 
 @detector("C.REV.05", "Revenue vs asset base", F, Area.REVENUE, needs_peers=True)
 def crev05(ctx: RunContext):
-    """Revenue per dollar of PP&E and of total assets jumps vs history and peers (capacity mismatch)."""
+    """Revenue per dollar of average total assets jumps vs history and peers (capacity mismatch)."""
     fn = lambda v: safe_div(v.g("REVENUE"), v.avg("TOTAL_ASSETS"))  # noqa: E731
     a = assess(ctx, fn, z_start=2.0, z_full=5.0)
     return [mk("C.REV.05", ctx, raw_value=a.cur, expected=a.baseline, severity=a.severity * 0.8, unit="x",
@@ -284,7 +286,7 @@ def crev07(ctx: RunContext):
     hits = new_mentions(ctx.doc, ctx.prior_doc, r"principal versus agent|principal vs\.? agent|gross basis|on a net basis|acting as (?:a|an) (?:principal|agent)")
     v = V(ctx.A, ctx.focus)
     rg = safe_div(v.g("REVENUE"), v.g("REVENUE", 1)) - 1
-    dgm = v.gross_margin(0) - v.gross_margin(1)
+    dgm = v.gross_margin(0, years=(0, 1)) - v.gross_margin(1, years=(0, 1))  # one gross-margin measure in both years
     sev = 0.0
     if hits and finite(rg, dgm) and rg > 0.15 and dgm < -0.02:
         sev = 0.7
@@ -407,8 +409,12 @@ def car02(ctx: RunContext):
     # some filers tag the allowance as the negative amount it is deducted at (Boeing 2019: -73 on receivables of 3,266)
     al, ar = abs(ctx.a("ALLOWANCE")), ctx.a("AR")
     need(al, ar, reason="allowance not tagged")
+    if ctx.basis("ALLOWANCE"):
+        raise SkipDetector("the allowance is tagged for current and non-current receivables together, the receivables for current ones only")
     cov = safe_div(al, ar + al)
-    hist = [safe_div(abs(ctx.a("ALLOWANCE", k)), ctx.a("AR", k) + abs(ctx.a("ALLOWANCE", k))) for k in range(1, 5)]
+    # only years whose allowance and receivables are on this year's basis
+    same = [k for k in range(1, 5) if all(ctx.basis(i, k) in (None, ctx.basis(i)) for i in ("ALLOWANCE", "AR"))]
+    hist = [safe_div(abs(ctx.a("ALLOWANCE", k)), ctx.a("AR", k) + abs(ctx.a("ALLOWANCE", k))) for k in same]
     hist = [h for h in hist if finite(h)]
     if not hist:
         raise SkipDetector("no allowance history")
@@ -418,7 +424,8 @@ def car02(ctx: RunContext):
                    rationale=f"Allowance is immaterial ({fmt_pct(cov, 2)} of gross receivables, {fmt_pct(base, 2)} historically).",
                    evidence=ctx.evs(["ALLOWANCE", "AR"], ks=(0,)))]
     drop = safe_div(base - cov, base)
-    dso_up = _dso(V(ctx.A, ctx.focus)) > _dso(V(ctx.A, ctx.focus), 1)
+    v = V(ctx.A, ctx.focus)
+    dso_up = v.same("AR", 0, 1) and _dso(v) > _dso(v, 1)
     sev = float(np.clip((drop - 0.10) / 0.40, 0, 1)) * (1.0 if dso_up else 0.6)
     imp = ImpactEstimate((base - cov) * (ar + al) * 0.5, (base - cov) * (ar + al), (max(hist) - cov) * (ar + al),
                          "ratio_reversion", "(baseline coverage - coverage) x gross AR") if cov < base else None
@@ -476,6 +483,7 @@ def car05(ctx: RunContext):
     """Non-current receivables growing faster than revenue (extended terms, financing customers)."""
     lt, lt0 = ctx.a("LT_RECEIVABLES"), ctx.a("LT_RECEIVABLES", 1)
     need(lt, lt0, reason="long-term receivables not tagged")
+    need_same_basis(ctx, "LT_RECEIVABLES")
     rev, rev0 = ctx.a("REVENUE"), ctx.a("REVENUE", 1)
     g, rg = safe_div(lt, lt0) - 1, safe_div(rev, rev0) - 1
     share = safe_div(lt, rev)
@@ -521,11 +529,13 @@ def cinv01(ctx: RunContext):
 def cinv02(ctx: RunContext):
     """Inventory growing faster than cost of sales for two consecutive years."""
     _need_inventory(ctx)
+    need_same_basis(ctx, "INVENTORY", "COGS")
+    v = V(ctx.A, ctx.focus)
     spreads = []
     for k in (0, 1):
         ig = safe_div(ctx.a("INVENTORY", k), ctx.a("INVENTORY", k + 1)) - 1
         cg = safe_div(ctx.a("COGS", k), ctx.a("COGS", k + 1)) - 1
-        spreads.append(ig - cg)
+        spreads.append(ig - cg if v.same("INVENTORY", k, k + 1) and v.same("COGS", k, k + 1) else float("nan"))
     need(spreads[0])
     s0, s1 = spreads
     sev = float(np.clip((s0 - 0.05) / 0.25, 0, 1))
@@ -545,8 +555,9 @@ def cinv02(ctx: RunContext):
 def cinv03(ctx: RunContext):
     """Gross margin rising while DSI rises: overhead absorption or under-reserved obsolescence."""
     _need_inventory(ctx)
+    need_same_basis(ctx, "INVENTORY", "COGS")
     v = V(ctx.A, ctx.focus)
-    dgm = v.gross_margin(0) - v.gross_margin(1)
+    dgm = v.gross_margin(0, years=(0, 1)) - v.gross_margin(1, years=(0, 1))
     ddsi = _dsi(v) - _dsi(v, 1)
     need(dgm, ddsi)
     sev = float(np.clip(dgm / 0.03, 0, 1) * np.clip(ddsi / 20, 0, 1)) if dgm > 0 and ddsi > 0 else 0.0
@@ -562,6 +573,7 @@ def cinv04(ctx: RunContext):
     r, inv = ctx.a("INV_RESERVE"), ctx.a("INVENTORY")
     r0, inv0 = ctx.a("INV_RESERVE", 1), ctx.a("INVENTORY", 1)
     need(r, inv, r0, inv0, reason="inventory reserve not tagged")
+    need_same_basis(ctx, "INVENTORY")
     c, c0 = safe_div(r, inv + r), safe_div(r0, inv0 + r0)
     v = V(ctx.A, ctx.focus)
     dsi_up = _dsi(v) > _dsi(v, 1)
@@ -652,12 +664,13 @@ def cexp03(ctx: RunContext):
     impact = depreciation at the prior life - reported. Every year uses the same depreciation measure, so a year that
     tags depreciation on its own is never compared with years that only report D&A."""
     v = V(ctx.A, ctx.focus)
-    years = tuple(k for k in range(4) if finite(v.g("PPE_GROSS", k)))
+    # a year whose gross PP&E is on another basis (finance-lease assets included or not) is left out
+    years = tuple(k for k in range(4) if finite(v.g("PPE_GROSS", k)) and ctx.basis("PPE_GROSS", k) == ctx.basis("PPE_GROSS"))
     basis, dep = dep_measure(v, years or (0,))
     base = depreciable_ppe(v, years or (0,))  # without construction in progress and land, when they are tagged
     adjusted = finite(base(0)) and base(0) != v.g("PPE_GROSS")
     life = safe_div(base(0), dep(0))
-    lives = [safe_div(base(k), dep(k)) for k in range(1, 4)]
+    lives = [safe_div(base(k), dep(k)) for k in years if k > 0]
     lives = [x for x in lives if finite(x) and x > 0]
     need(life, reason="gross PP&E or depreciation not reported")
     if not lives:
@@ -701,8 +714,11 @@ def cexp04(ctx: RunContext):
 @detector("C.EXP.05", "Capex far above depreciation", F, Area.CAPITALIZATION)
 def cexp05(ctx: RunContext):
     """Capex/D&A persistently > 2 while revenue is flat (possible capitalization of operating costs)."""
-    ratios = [safe_div(ctx.a("CAPEX", k), ctx.a("DA", k)) for k in range(3)]
-    rg = safe_div(ctx.a("REVENUE"), ctx.a("REVENUE", 2)) ** 0.5 - 1
+    # a year whose capex or D&A is on another basis than this year's is left out
+    ratios = [safe_div(ctx.a("CAPEX", k), ctx.a("DA", k)) for k in range(3)
+              if all(ctx.basis(i, k) in (None, ctx.basis(i)) for i in ("CAPEX", "DA"))]
+    growth = safe_div(ctx.a("REVENUE"), ctx.a("REVENUE", 2))
+    rg = growth ** 0.5 - 1 if growth > 0 else float("nan")
     ratios = [r for r in ratios if finite(r)]
     need(*(ratios[:1] or [float("nan")]), rg)
     persistent = sum(1 for r in ratios if r > 2)
@@ -799,8 +815,8 @@ def cres01(ctx: RunContext):
     found, evid = [], []
     for res, base, label in RESERVES:
         r1, b1, r0, b0 = ctx.a(res), ctx.a(base), ctx.a(res, 1), ctx.a(base, 1)
-        if not finite(r1, b1, r0, b0) or b0 == 0:
-            continue
+        if not finite(r1, b1, r0, b0) or b0 == 0 or any(ctx.basis(i) != ctx.basis(i, 1) for i in (res, base)):
+            continue  # a ratio whose reserve or base switched concept between the years moved with the tagging
         if res == "ALLOWANCE":
             r1, r0 = abs(r1), abs(r0)  # a deducted allowance is tagged as a negative amount by some filers, in some years only
         rel = (safe_div(r0, b0) - safe_div(r1, b1)) * b1
@@ -918,7 +934,7 @@ def ccf01(ctx: RunContext):
     def r3(v: V) -> float:
         ni = sum(v.g("NET_INCOME", b) for b in range(3))
         cfo = sum(v.g("CFO", b) for b in range(3))
-        return safe_div(cfo, ni) if ni > 0 else float("nan")
+        return safe_div(cfo, ni) if ni > 0 and v.same("NET_INCOME", 0, 1, 2) else float("nan")
 
     cur = r3(V(ctx.A, ctx.focus))
     need(cur, reason="three years of net income and operating cash flow needed, with net income positive in sum")
@@ -990,6 +1006,7 @@ def ccf04(ctx: RunContext):
 
     if not (ctx.a("CFO") > 0 and ctx.a("CFO", 1) > 0):
         raise SkipDetector("operating cash flow not positive in both years; the ratio is not meaningful")
+    need_same_basis(ctx, "CAPEX")
     cur, prev = r(0), r(1)
     need(cur, prev)
     da_g = safe_div(ctx.a("DA"), ctx.a("DA", 1)) - 1
@@ -1083,7 +1100,7 @@ def cbs01(ctx: RunContext):
 
 @detector("C.BS.02", "Off-balance-sheet commitments growth", F, Area.DEBT)
 def cbs02(ctx: RunContext):
-    """Purchase obligations, guarantees and lease liabilities growing faster than revenue and debt."""
+    """Purchase obligations and guarantees growing faster than revenue, weighted by their size relative to assets."""
     def obl(k: int) -> float:
         vals = [ctx.a(i, k) for i in ("PURCHASE_OBLIGATIONS", "GUARANTEES")]
         return sum(v for v in vals if finite(v)) if any(finite(v) for v in vals) else float("nan")

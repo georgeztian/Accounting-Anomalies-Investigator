@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import networkx as nx
 import numpy as np
+import pandas as pd
 
 from ffi.context import RunContext
 from ffi.detectors.base import Area, EvidenceRef, Scheme, SkipDetector, detector
 from ffi.detectors.helpers import finite, mk
 from ffi.detectors.stats import fmt_money, fmt_pct, safe_div
+from ffi.detectors.textnum import YEAR_IN_TEXT_RE, states_amount, states_percent
 from ffi.xbrl.canonical import BY_ID
+from ffi.xbrl.facts import fiscal_year_of
 
 F = "F"
 LARGE_AUDITORS = ("ernst & young", "deloitte", "pricewaterhousecoopers", "kpmg", "grant thornton", "bdo", "rsm", "crowe",
@@ -36,12 +39,18 @@ def f01(ctx: RunContext):
     if not cust:
         return [mk("F.01", ctx, raw_value=0, severity=0.0, rationale="No named major customers disclosed.")]
     rev = ctx.a("REVENUE")
+    years = {ctx.focus.year, fiscal_year_of(ctx.focus)} | ({ctx.focus.year - 1} if ctx.focus.month <= 2 else set())
     findings, checked = [], 0
     for r, loc in cust[:5]:
-        # a percentage converts to dollars only when it is of the whole company's revenue: "13% of a subsidiary's
-        # revenues" times consolidated revenue would overstate the sales many times over
-        whole = r.share_basis == "whole company"
-        amt = r.amount_usd or (r.share_of_revenue_pct / 100 * rev if r.share_of_revenue_pct and whole and finite(rev) else None)
+        # an amount or a share the AI read is used only when the quote states it (digits and scale), and only for the focus
+        # year: a quote that names other years only is about them. A percentage converts to dollars only when it is of the
+        # whole company's revenue: "13% of a subsidiary's revenues" times consolidated revenue overstates the sales
+        named = {int(y) for y in YEAR_IN_TEXT_RE.findall(r.quote)}
+        if named and not named & years:
+            continue
+        amount = r.amount_usd if r.amount_usd and states_amount(r.quote, r.amount_usd) else None
+        pct = r.share_of_revenue_pct if r.share_of_revenue_pct and states_percent(r.quote, r.share_of_revenue_pct) else None
+        amt = amount or (pct / 100 * rev if pct and r.share_basis == "whole company" and finite(rev) else None)
         cik = _resolve_counterparty(ctx, r.counterparty)
         if amt is None or cik is None:
             continue
@@ -139,8 +148,8 @@ def f04(ctx: RunContext):
     for item in ("REVENUE", "COGS", "SGA", "RND", "OPERATING_INCOME", "AR", "INVENTORY", "GOODWILL", "DEFERRED_REV_CURRENT",
                  "LONG_TERM_DEBT", "RESTRUCTURING", "INCOME_TAX", "CAPEX"):
         a, b = ctx.a(item), ctx.a(item, 1)
-        if not finite(a, b):
-            continue
+        if not finite(a, b) or ctx.basis(item) != ctx.basis(item, 1):
+            continue  # a move across a switch of concept is the tagging, which no MD&A explains
         d = abs(a - b)
         if d < mat or safe_div(d, abs(b)) < 0.10:
             continue
@@ -175,12 +184,14 @@ def f05(ctx: RunContext):
 
 @detector("F.06", "Counterparty stress", F, Area.RELATED_PARTY, depends_on=("F.01",), needs_llm=True)
 def f06(ctx: RunContext):
-    """Resolved major customers with going-concern, non-reliance or late-filing events."""
+    """Resolved major customers with non-reliance (8-K Item 4.02) or late-filing notices in the three years to this
+    year's cutoff (never filings made later)."""
     from ffi.edgar import endpoints
 
     ciks = [int(n.split("CIK ")[-1]) for n in ctx.notes if n.startswith("F.01 counterparty")]
     if not ciks:
         return [mk("F.06", ctx, raw_value=0, severity=0.0, rationale="No counterparties resolved to SEC filers.")]
+    lo, hi = (ctx.focus - pd.Timedelta(days=1095)).date().isoformat(), (ctx.cutoff or ctx.as_of).isoformat()
     stressed = []
     for cik in ciks:
         try:
@@ -188,8 +199,8 @@ def f06(ctx: RunContext):
         except Exception:  # noqa: BLE001
             continue
         rec = sub.get("filings", {}).get("recent", {})
-        forms, items = rec.get("form", []), rec.get("items", [])
-        bad = [f for f, it in zip(forms[:200], items[:200], strict=False) if f in ("NT 10-K", "NT 10-Q") or "4.02" in (it or "")]
+        rows = zip(rec.get("form", []), rec.get("items", []), rec.get("filingDate", []), strict=False)
+        bad = [f for f, it, d in rows if lo <= d <= hi and (f in ("NT 10-K", "NT 10-Q") or "4.02" in (it or ""))]
         if bad:
             stressed.append((sub.get("name", cik), len(bad)))
     sev = min(0.8, 0.4 * len(stressed))

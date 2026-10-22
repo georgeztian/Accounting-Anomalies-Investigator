@@ -13,6 +13,8 @@ from collections.abc import Sequence
 
 import numpy as np
 
+from ffi.detectors.stats import money_prefix
+
 W, H = 640, 240
 PAD_L, PAD_R, PAD_T, PAD_B = 64, 96, 16, 32
 
@@ -36,10 +38,9 @@ def _nice_ticks(lo: float, hi: float, n: int = 4) -> list[float]:
 def _fmt(v: float, kind: str) -> str:
     if not np.isfinite(v):
         return "n/a"
-    if kind == "money":
-        a = abs(v)
-        s = "-" if v < 0 else ""
-        return f"{s}${a / 1e9:.1f}B" if a >= 1e9 else f"{s}${a / 1e6:.0f}M" if a >= 1e6 else f"{s}${a:,.0f}"
+    if kind == "money":  # in the reporting currency (€, ¥, C$ ...), never a dollar sign on another currency
+        a, s, c = abs(v), "-" if v < 0 else "", money_prefix()
+        return f"{s}{c}{a / 1e9:.1f}B" if a >= 1e9 else f"{s}{c}{a / 1e6:.0f}M" if a >= 1e6 else f"{s}{c}{a:,.0f}"
     if kind == "pct":
         return f"{v * 100:.1f}%"
     if kind == "days":

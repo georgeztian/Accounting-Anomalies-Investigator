@@ -15,6 +15,7 @@ description: Run anomaly-report for a company (single year, --period, or a multi
    - The key figures (revenue, net income) match the company's filings.
    - For each finding, both figures the test compared are like for like (CLAUDE.md, Comparisons). An investigation that
      did not finish, a "set aside" result, or an auditor objection that blames the test is a lead to a test error.
-   - If a finding is a test error: say so, fix it under the CLAUDE.md rules, re-run, and report the corrected result.
+   - If a finding is a test error: say so, fix it under the CLAUDE.md rules, re-run with `--mode deterministic` (another
+     AI run only if the user agrees: it costs money), and report the corrected result.
 4. **Present** to the user, briefly: the risk index and band (per year for a span); each finding in plain words with its
    period, size and investigation outcome; what was fixed, if anything; the report path; and that nothing is committed.

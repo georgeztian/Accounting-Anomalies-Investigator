@@ -7,21 +7,24 @@ versions: as-first-reported (what the market saw first) and latest (after any re
 from __future__ import annotations
 
 import copy
+import dataclasses
 from dataclasses import dataclass, field
 from datetime import date
 
 import numpy as np
 import pandas as pd
 
-from ffi.xbrl.canonical import BY_ID, CONCEPT_TO_ITEMS
+from ffi.xbrl.canonical import BY_ID, CONCEPT_TO_ITEMS, DIFFERENT_BASIS
 
 ANNUAL_DAYS = (340, 390)
 QUARTER_DAYS = (80, 100)
 ANNUAL_FORMS = ("10-K", "10-K/A", "10-KT", "10-KT/A", "10-K405", "20-F", "20-F/A", "40-F", "40-F/A")
 DATE_TOL = pd.Timedelta(days=8)
 # Items whose concepts include both totals and components (a filer may tag "DepreciationDepletionAndAmortization"
-# for one part and "DepreciationAndAmortization" for the cash-flow total): within a filing the largest value wins.
+# for one part and "DepreciationAndAmortization" for the cash-flow total): within a filing the largest value on the
+# item's main basis wins; a concept on another basis (D&A including impairment) only when no main one is reported.
 LARGEST_WINS = {"DA"}
+OTHER_BASIS_CONCEPTS = sorted({c for i in LARGEST_WINS for c in DIFFERENT_BASIS.get(i, {})})
 # Share counts tagged in thousands or millions (a common XBRL scaling error) are detected from NI / EPS.
 SHARE_ITEMS = {"SHARES_DILUTED": "EPS_DILUTED", "SHARES_BASIC": "EPS_BASIC"}
 CURRENCY_ANCHORS = ("REVENUE", "NET_INCOME", "TOTAL_ASSETS", "EQUITY")
@@ -35,6 +38,16 @@ def fiscal_year_of(end: pd.Timestamp) -> int:
     first days of January (Johnson & Johnson: 2023-01-01; Kellogg: 2021-01-02) closes the year before: it is the company's
     fiscal 2022, and calling it FY2023 gave two different years the same label."""
     return end.year - 1 if end.month == 1 and end.day <= 7 else end.year
+
+
+def quarters_in_year(quarter_ends, fye: pd.Timestamp, fyes) -> list[pd.Timestamp]:
+    """The quarter ends of the fiscal year that ends `fye` (its last quarter included): those after the previous fiscal
+    year end, never that year's fourth quarter. A first quarter longer than a quarter (Jack in the Box: 16 weeks) is not
+    a quarter, and the three ends before the year end were the previous year's Q4, Q2 and Q3."""
+    prev = max((f for f in fyes if f < fye - DATE_TOL), default=fye - pd.Timedelta(days=380))
+    return [q for q in quarter_ends if prev + DATE_TOL < q <= fye + DATE_TOL]
+
+
 # item attributes as lookup tables: Series.map(dict) is many times faster than a Python lambda per row
 KIND = {i: it.kind for i, it in BY_ID.items()}
 STATEMENT = {i: it.statement for i, it in BY_ID.items()}
@@ -220,6 +233,19 @@ class Panel:
     def label(self, period: pd.Timestamp) -> str:
         return self.labels.get(period, str(period.date()))
 
+    def known_by(self, cutoff: date | None) -> Panel:
+        """This (as-first-reported) panel as it stood on `cutoff`: a value first filed later is unknown, and a fiscal year
+        with no value filed by then is dropped. A peer's panel is loaded once for every year of a review; each year sees
+        only what the peer had filed by that year's cutoff."""
+        late = {k for k, r in self.prov.items() if r.filed > pd.Timestamp(cutoff)} if cutoff is not None else set()
+        if not late:
+            return self
+        vals = self.values.copy()
+        for item, p in late:
+            vals.at[p, item] = np.nan
+        vals = vals[vals.notna().any(axis=1)]
+        return dataclasses.replace(self, values=vals, prov={k: r for k, r in self.prov.items() if k not in late and k[1] in vals.index})
+
 
 class FactStore:
     def __init__(self, cik: int, raw: pd.DataFrame, as_of: date | None = None, currency: str | None = None) -> None:
@@ -318,7 +344,10 @@ class FactStore:
         big = d["item"].isin(LARGEST_WINS)
         if big.any():
             d = d.copy()
-            d.loc[big, "rank"] = d[big].groupby(["item", "period", "accn"])["val"].rank(ascending=False, method="first") - 1
+            alt = big & d["concept"].isin(OTHER_BASIS_CONCEPTS)
+            top = big & ~alt
+            d.loc[top, "rank"] = d[top].groupby(["item", "period", "accn"])["val"].rank(ascending=False, method="first") - 1
+            d.loc[alt, "rank"] += 100
         keys = ["item", "period", "rank"] + (extra_sort or []) + ["filed"]
         asc = [True, True, True] + [True] * len(extra_sort or []) + [version == "first"]
         return d.sort_values(keys, ascending=asc).drop_duplicates(["item", "period"], keep="first")
@@ -378,7 +407,7 @@ class FactStore:
         for fye in fyes:
             if fye not in vals.index or fye not in ann.values.index:
                 continue
-            prior = [q for q in qidx if fye - pd.Timedelta(days=380) < q < fye - DATE_TOL][-3:]
+            prior = [q for q in quarters_in_year(qidx, fye, fyes) if q < fye - DATE_TOL]
             if len(prior) != 3:
                 continue
             for item in ann.values.columns:
@@ -404,16 +433,19 @@ class FactStore:
             self._memo[("versions", freq)] = self._versions(freq)
         return self._memo[("versions", freq)]  # type: ignore[return-value]
 
-    def values_by_filing(self) -> dict[tuple[str, str, str], np.ndarray]:
-        """Every reported value by (accession, concept, period end as YYYY-MM-DD), for re-reading cited facts (the
-        independent audit): a cited value must be the one the filing reports for the cited period, not merely a value
-        the filing reports for that concept in some period."""
+    def values_by_filing(self) -> dict[tuple[str, str, str, str], np.ndarray]:
+        """Every reported value by (accession, concept, period start, period end; dates as YYYY-MM-DD, no start for a
+        balance), for re-reading cited facts (the independent audit): a cited value must be the one the filing reports
+        for the cited period, not a value it reports for that concept over another period ending the same day (the
+        fourth quarter in an annual report's quarterly table)."""
         if self._root is not None:
             return self._root.values_by_filing()
-        if ("values", "accn_concept_end") not in self._memo:
-            d = self.df.assign(_end=self.df["end"].dt.strftime("%Y-%m-%d")) if not self.df.empty else self.df.assign(_end=[])
-            self._memo[("values", "accn_concept_end")] = {k: g.to_numpy(float) for k, g in d.groupby(["accn", "concept", "_end"])["val"]}
-        return self._memo[("values", "accn_concept_end")]  # type: ignore[return-value]
+        if ("values", "by_period") not in self._memo:
+            d = self.df
+            self._memo[("values", "by_period")] = {} if d.empty else {
+                k: g.to_numpy(float) for k, g in d.assign(_start=d["start"].dt.strftime("%Y-%m-%d").fillna(""),
+                                                          _end=d["end"].dt.strftime("%Y-%m-%d")).groupby(["accn", "concept", "_start", "_end"])["val"]}
+        return self._memo[("values", "by_period")]  # type: ignore[return-value]
 
     def _versions(self, freq: str) -> pd.DataFrame:
         d = self.df

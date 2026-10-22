@@ -126,8 +126,10 @@ ITEMS: tuple[CanonicalItem, ...] = (
     _i("EQUITY_ISSUED_STMT", "Stock issued (statement of equity)", "D", USD, "NOTE", "StockIssuedDuringPeriodValueNewIssues"),
     _i("EQUITY_CONVERTED", "Convertible securities converted to stock", "D", USD, "NOTE",
        "StockIssuedDuringPeriodValueConversionOfConvertibleSecurities", "ConversionOfStockAmountConverted1"),
-    _i("EQUITY_ISSUED_OTHER", "Other stock issued", "D", USD, "NOTE",
-       "StockIssuedDuringPeriodValueOther", "StockIssuedDuringPeriodValueEmployeeStockPurchasePlan"),
+    _i("EQUITY_ISSUED_OTHER", "Other stock issued", "D", USD, "NOTE", "StockIssuedDuringPeriodValueOther"),
+    # bought by employees for cash: the cash may also be inside the proceeds from issuing stock (EQUITY_ISSUED)
+    _i("EQUITY_ISSUED_ESPP", "Stock issued under employee purchase plans", "D", USD, "NOTE",
+       "StockIssuedDuringPeriodValueEmployeeStockPurchasePlan"),
     _i("CONVERTIBLE_EQUITY_COMPONENT", "Equity component of convertible debt", "D", USD, "NOTE",
        "AdjustmentsToAdditionalPaidInCapitalEquityComponentOfConvertibleDebt"),
     _i("CASH_CHANGE", "Net change in cash", "D", USD, "CF",
@@ -309,7 +311,7 @@ IFRS: dict[str, tuple[str, ...]] = {
     "INTEREST_PAID": ("InterestPaidClassifiedAsOperatingActivities", "InterestPaidClassifiedAsFinancingActivities"),
     "CASH": ("CashAndCashEquivalents",),
     "CASH_RESTRICTED_TOTAL": ("CashAndCashEquivalents",),
-    "AR": ("TradeAndOtherCurrentReceivables", "CurrentTradeReceivables"),
+    "AR": ("CurrentTradeReceivables", "TradeAndOtherCurrentReceivables"),
     "CONTRACT_ASSETS": ("CurrentContractAssets", "ContractAssets"),
     "INVENTORY": ("Inventories",),
     "INV_FINISHED": ("CurrentFinishedGoods",),
@@ -322,7 +324,7 @@ IFRS: dict[str, tuple[str, ...]] = {
     "OTHER_NONCURRENT_ASSETS": ("OtherNoncurrentAssets",),
     "EQUITY_METHOD_INVESTMENTS": ("InvestmentsAccountedForUsingEquityMethod",),
     "TOTAL_ASSETS": ("Assets",),
-    "AP": ("TradeAndOtherCurrentPayables", "TradeAndOtherCurrentPayablesToTradeSuppliers"),
+    "AP": ("TradeAndOtherCurrentPayablesToTradeSuppliers", "TradeAndOtherCurrentPayables"),
     "DEFERRED_REV_CURRENT": ("CurrentContractLiabilities",),
     "DEFERRED_REV_NONCURRENT": ("NoncurrentContractLiabilities",),
     "CURRENT_DEBT": ("CurrentPortionOfLongtermBorrowings", "CurrentBorrowingsAndCurrentPortionOfNoncurrentBorrowings"),
@@ -353,9 +355,15 @@ DIFFERENT_BASIS: dict[str, dict[str, str]] = {
                 "including finance-lease assets"},
     "PPE_GROSS": {"PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetBeforeAccumulatedDepreciationAndAmortization":
                   "including finance-lease assets"},
-    "AR": {"ReceivablesNetCurrent": "all current receivables", "AccountsNotesAndLoansReceivableNetCurrent": "including notes and loans"},
+    "AR": {"ReceivablesNetCurrent": "all current receivables", "AccountsNotesAndLoansReceivableNetCurrent": "including notes and loans",
+           "TradeAndOtherCurrentReceivables": "trade and other receivables"},
     # payables together with accrued liabilities (Coca-Cola: DPO 294 days against a peer median of 62): not comparable with trade payables
-    "AP": {"AccountsPayableAndAccruedLiabilitiesCurrent": "payables and accrued liabilities"},
+    "AP": {"AccountsPayableAndAccruedLiabilitiesCurrent": "payables and accrued liabilities",
+           "TradeAndOtherCurrentPayables": "trade and other payables"},
+    "ALLOWANCE": {"AccountsReceivableAllowanceForCreditLoss": "current and non-current receivables"},
+    "LT_RECEIVABLES": {"NotesReceivableNet": "including current notes"},
+    # IFRS depreciation, amortisation and impairment in one line: a year with an impairment is no depreciation charge
+    "DA": {"DepreciationAmortisationAndImpairmentLossReversalOfImpairmentLossRecognisedInProfitOrLoss": "including impairment"},
     "COGS": {"CostOfServices": "services only",
              "CostOfGoodsAndServiceExcludingDepreciationDepletionAndAmortization": "excluding depreciation"},
     # pre-tax income before the share of equity-method investees' results (Toyota), which sits below income tax

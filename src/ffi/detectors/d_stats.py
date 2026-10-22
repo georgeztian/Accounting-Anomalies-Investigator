@@ -12,7 +12,7 @@ from scipy import stats as sps
 from ffi.context import RunContext
 from ffi.detectors.base import Area, ImpactEstimate, SkipDetector, detector
 from ffi.detectors.helpers import finite, mk
-from ffi.detectors.scores import V
+from ffi.detectors.scores import V, mixed_basis, same_basis
 from ffi.detectors.stats import (
     fmt_money,
     fmt_num,
@@ -55,15 +55,42 @@ RATIOS: dict[str, tuple[str, Callable[[V], float]]] = {
 }
 
 
-def ratio_vector(P, p) -> dict[str, float]:
-    v = V(P, p)
+def ratio_vector(P, p, bases: dict | None = None) -> dict[str, float]:
+    """The ratios of one fiscal year. A ratio whose inputs switch basis between the years it reads is NaN; with `bases`,
+    each ratio's tracked reading (scores.V) is stored under its key, so a comparison can leave out a peer or year whose
+    inputs are on another basis than the company's (payables with accrued liabilities against trade payables)."""
     out = {}
     for k, (_, fn) in RATIOS.items():
+        track: dict = {}
         try:
-            out[k] = float(fn(v))
+            out[k] = float(fn(V(P, p, track))) if p is not None else float("nan")
         except (ZeroDivisionError, TypeError, ValueError):
             out[k] = float("nan")
+        if mixed_basis(track):
+            out[k] = float("nan")
+        if bases is not None:
+            bases[k] = track
     return out
+
+
+def comparable(mine: dict, mine_bases: dict, other: dict, other_bases: dict) -> dict[str, float]:
+    """`other`'s ratios with those measured on another basis than the company's set to NaN."""
+    return {k: (x if same_basis(mine_bases.get(k, {}), other_bases.get(k, {})) else float("nan")) for k, x in other.items()}
+
+
+def ratio_with_peers(ctx, key: str, period=None) -> tuple[float, list[float]]:
+    """The company's ratio `key` in a fiscal year (default the focus year) and its peers' for their aligned years, peers
+    whose inputs are on another basis left out."""
+    p = period if period is not None else ctx.focus
+    mine_b: dict = {}
+    mine = ratio_vector(ctx.A, p, mine_b)[key]
+    out = []
+    for peer in ctx.peers.loaded if ctx.peers else []:
+        pb: dict = {}
+        x = comparable({key: mine}, mine_b, ratio_vector(peer.annual, ctx.peers.aligned_period(peer, p), pb), pb)[key]
+        if np.isfinite(x):
+            out.append(x)
+    return mine, out
 
 
 # ---------------------------------------------------------------------------- D.01
@@ -144,9 +171,13 @@ def d02(ctx: RunContext):
     """Robust z of ~24 ratios vs the peer set; reports the most extreme ones."""
     if not ctx.peers or len(ctx.peers.loaded) < 5:
         raise SkipDetector("needs at least 5 peers")
-    mine = ratio_vector(ctx.A, ctx.focus)
-    peers = [ratio_vector(p.annual, ctx.peers.aligned_period(p, ctx.focus)) for p in ctx.peers.loaded
-             if ctx.peers.aligned_period(p, ctx.focus) is not None]
+    mine_b: dict = {}
+    mine = ratio_vector(ctx.A, ctx.focus, mine_b)
+    peers = []
+    for p in ctx.peers.loaded:
+        if (al := ctx.peers.aligned_period(p, ctx.focus)) is not None:
+            pb: dict = {}
+            peers.append(comparable(mine, mine_b, ratio_vector(p.annual, al, pb), pb))
     rows = []
     excluded = ctx.profile.excluded_ratios if ctx.profile else set()
     for k, val in mine.items():
@@ -191,16 +222,23 @@ def d03(ctx: RunContext):
     if not ctx.peers or len(ctx.peers.loaded) < 5:
         raise SkipDetector("needs at least 5 peers")
     keys = [k for k in RATIOS if not ctx.profile or k not in ctx.profile.excluded_ratios]
+    mine_b: dict = {}
+    mine = ratio_vector(ctx.A, ctx.focus, mine_b)
+
+    def row(P, per) -> dict[str, float]:  # a ratio measured on another basis than the company's is left out (imputed)
+        b: dict = {}
+        return comparable(mine, mine_b, ratio_vector(P, per, b), b)
+
     pool, labels = [], []
     for p in ctx.peers.loaded:
         al = ctx.peers.aligned_period(p, ctx.focus)  # the peer's years up to the focus year, never later ones
         for per in ([q for q in p.annual.values.index if q <= al][-6:] if al is not None else []):
-            pool.append(ratio_vector(p.annual, per))
+            pool.append(row(p.annual, per))
             labels.append(f"peer:{p.cik}")
     for per in ctx.comparable_periods[-6:-1]:
-        pool.append(ratio_vector(ctx.A, per))
+        pool.append(row(ctx.A, per))
         labels.append("self-history")
-    pool.append(ratio_vector(ctx.A, ctx.focus))
+    pool.append(mine)
     labels.append("target")
     df = pd.DataFrame(pool)[keys]
     keep = [c for c in keys if df[c].notna().mean() >= 0.7 and np.isfinite(df[c].iloc[-1])]
@@ -299,11 +337,14 @@ def d04(ctx: RunContext):
     if not finite(rev, ta, gp_t) or rev <= 0 or ta <= 0:
         raise SkipDetector("target revenue / assets unavailable")
     x_t = _structural_features([gp_t / rev], [rev / ta], [np.log(ta)])
-    out = []
+    out, other_basis = [], []
     for target, (driver, label) in STRUCTURAL.items():
         d = base.dropna(subset=[target, driver, "_gm", "_to"])
         d = d[(d[target] > 0) & (d[driver] > 0) & d["_gm"].between(-1, 1) & (d["_to"] > 0)]
         mine, drv = ctx.a(target), ctx.a(driver)
+        if ctx.basis(target) or ctx.basis(driver):
+            other_basis.append(label.lower())  # the industry rows carry the main concepts only (trade receivables, net
+            continue  # inventory, full SG&A)
         if len(d) < 80 or not finite(mine, drv) or mine <= 0 or drv <= 0:
             continue
         X = _structural_features(d["_gm"], d["_to"], d["_la"])
@@ -332,7 +373,8 @@ def d04(ctx: RunContext):
                                  f"(x{np.exp(-q):.2f}-x{np.exp(q):.2f})."),
                       evidence=ctx.evs([target, driver], ks=(0,))))
     if not out:
-        raise SkipDetector("cross-section too small for structural models")
+        raise SkipDetector(f"{' and '.join(other_basis)} reported on another basis than the industry data" if other_basis
+                           else "cross-section too small for structural models")
     return out
 
 

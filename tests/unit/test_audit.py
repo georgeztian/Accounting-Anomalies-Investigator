@@ -89,7 +89,7 @@ def test_cited_per_share_value_must_match_without_a_half_unit_floor():
     from ffi.detectors.base import EvidenceRef
 
     node = "fact:us-gaap:EarningsPerShareDiluted|USD/shares|2025-01-01|2025-12-31|0001-25-000001"
-    idx = {("0001-25-000001", "EarningsPerShareDiluted", "2025-12-31"): np.array([3.20])}
+    idx = {("0001-25-000001", "EarningsPerShareDiluted", "2025-01-01", "2025-12-31"): np.array([3.20])}
 
     def ev(value, unit="USD/shares", node_id=node):
         return EvidenceRef(node_id=node_id, kind="fact", label="EPS (diluted), FY2025", accession="0001-25-000001",
@@ -97,7 +97,11 @@ def test_cited_per_share_value_must_match_without_a_half_unit_floor():
 
     assert _fact_matches(idx, ev(3.20)) and not _fact_matches(idx, ev(3.64))  # 3.64 used to pass within 0.5
     usd = node.replace("EarningsPerShareDiluted|USD/shares", "Revenues|USD")
-    idx[("0001-25-000001", "Revenues", "2025-12-31")] = np.array([1_000_000.0])
+    idx[("0001-25-000001", "Revenues", "2025-01-01", "2025-12-31")] = np.array([1_000_000.0])
     revenue = EvidenceRef(node_id=usd, kind="fact", label="Revenue, FY2025", accession="0001-25-000001",
                           concept="us-gaap:Revenues", value=1_000_000.4, unit="USD")
     assert _fact_matches(idx, revenue)  # an amount still matches within rounding
+    # an annual report also tags the fourth quarter (October to December) under the same concept and end date: a cited
+    # full-year figure must match the full year, never the quarter that ends the same day
+    idx = {("0001-25-000001", "Revenues", "2025-10-01", "2025-12-31"): np.array([1_000_000.0])}
+    assert not _fact_matches(idx, revenue)

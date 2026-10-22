@@ -211,17 +211,35 @@ def apply_audit(sc: ScoreResult) -> None:
                 contrib[key] *= UNVERIFIED_FACTOR
         elif f.kind == "signal" and f"pattern:{f.id}" in contrib:  # downgraded by the auditor
             contrib[f"pattern:{f.id}"] *= 0.6
-    total = sum(contrib.values())
-    sc.risk_index = round(100 * (1 - math.exp(-total / INDEX_K)), 1)
-    sc.band = band_of(sc.risk_index)
-    sc.contributions = sorted(contrib.items(), key=lambda kv: -kv[1])
+    _set_index(sc, contrib)
     sc.findings.sort(key=lambda x: -x.priority)
+
+
+EXPLAINED = "agent: closed as explained"
+EXPLAINED_FACTOR = 0.5
+
+
+def apply_explained(sc: ScoreResult) -> None:
+    """Findings the investigation closed as explained count for half in the risk index, as they do in the ranking."""
+    contrib = dict(sc.contributions)
+    for f in sc.findings:
+        if f.narrative_source == EXPLAINED:
+            for k in contribution_keys(f):
+                if k in contrib:
+                    contrib[k] *= EXPLAINED_FACTOR
+    _set_index(sc, contrib)
 
 
 def index_of(contributions) -> float:
     """The risk index for a set of contributions (a dict, or the list of pairs a ScoreResult keeps)."""
     total = sum(dict(contributions).values())
     return round(100 * (1 - math.exp(-total / INDEX_K)), 1)
+
+
+def _set_index(sc: ScoreResult, contrib: dict[str, float]) -> None:
+    sc.contributions = sorted(contrib.items(), key=lambda kv: -kv[1])
+    sc.risk_index = index_of(contrib)
+    sc.band = band_of(sc.risk_index)
 
 
 def contribution_keys(f: Finding) -> list[str]:
@@ -231,11 +249,8 @@ def contribution_keys(f: Finding) -> list[str]:
 
 def remove_findings(sc: ScoreResult, keep, keys) -> None:
     """Keep the findings for which `keep(finding)` holds, drop the contributions `keys` and recompute the index and band."""
-    contrib = {k: v for k, v in sc.contributions if k not in set(keys)}
     sc.findings = [f for f in sc.findings if keep(f)]
-    sc.contributions = sorted(contrib.items(), key=lambda kv: -kv[1])
-    sc.risk_index = index_of(contrib)
-    sc.band = band_of(sc.risk_index)
+    _set_index(sc, {k: v for k, v in sc.contributions if k not in set(keys)})
 
 
 def apply_set_aside(sc: ScoreResult) -> list[Finding]:
@@ -246,6 +261,16 @@ def apply_set_aside(sc: ScoreResult) -> list[Finding]:
         remove_findings(sc, lambda f: not f.set_aside, [k for f in aside for k in contribution_keys(f)])
         sc.set_aside += aside
     return aside
+
+
+MEMBER_CREDIBILITY = 0.85  # a scheme pattern's member signals
+SCORES_CREDIBILITY = 0.6  # leftover forensic scores folded into one finding
+
+
+def noisy_or(signals: list[Signal], credibility: float, shares: dict[int, int] | None = None) -> float:
+    """1 - prod(1 - credibility x severity): the chance that at least one member reflects a real problem. With `shares`
+    (signal id -> number of patterns it supports), each member enters with 1/k of its weight."""
+    return 1 - math.prod((1 - credibility * s.severity) ** (1 / (shares or {}).get(id(s), 1)) for s in signals)
 
 
 def band_of(index: float) -> str:
@@ -280,7 +305,7 @@ def score(ctx: RunContext, results: list[DetectorResult]) -> ScoreResult:
             if s.detector_id in ids and s.flagged:
                 s.severity *= factor
                 s.rationale += f" [Discounted: {conds[key]}.]"
-                if s.severity < 0.5:
+                if s.severity < s.flag_at:
                     s.flagged = False
                     s.suppressed_by = conds[key]
     # 3. Benjamini-Hochberg across signals that carry p-values ----------------------------------
@@ -311,7 +336,7 @@ def score(ctx: RunContext, results: list[DetectorResult]) -> ScoreResult:
         thin = len(members) < 2 or (len(families) < 2 and len(members) < 3)
         if thin and not (t.id == "reporting_integrity" and any(s.severity >= 0.8 for s in req)):
             continue
-        sc = 1 - math.prod(1 - s.severity * 0.85 for s in members)
+        sc = noisy_or(members, MEMBER_CREDIBILITY)
         imp = max((s.impact for s in members if s.impact), key=lambda i: i.mid, default=None)
         alts = [f"Checked: {v}" for v in conds.values()] + [f"{s.detector_id} discounted: {s.suppressed_by}" for s in suppressed
                                                              if any(_matches(s, tok) for g in t.required_any for tok in g)]
@@ -329,7 +354,7 @@ def score(ctx: RunContext, results: list[DetectorResult]) -> ScoreResult:
     # 5. strong standalone signals (leftover family-B scores fold into one finding) -----------------
     loose_b = [s for s in core if id(s) not in used and s.family == "B" and s.severity >= 0.6]
     if len(loose_b) >= 2:
-        sc_b = 1 - math.prod(1 - s.severity * 0.6 for s in loose_b)
+        sc_b = noisy_or(loose_b, SCORES_CREDIBILITY)
         findings.append(Finding("forensic_scores", "Forensic scores are elevated", "pattern", sc_b,
                                 sorted(loose_b, key=lambda x: -x.severity), None, None,
                                 [e for s in loose_b for e in s.evidence[:2]][:8],
@@ -358,11 +383,17 @@ def score(ctx: RunContext, results: list[DetectorResult]) -> ScoreResult:
         contrib[s.detector_id] = max(contrib.get(s.detector_id, 0.0), w)
     for s in pressure:
         contrib[s.detector_id] = max(contrib.get(s.detector_id, 0.0), PRESSURE_WEIGHT * s.severity)
+    # a warning sign that supports several patterns is shared among them (each holds 1/k of its weight), so it is counted
+    # once in the index while every pattern it supports still shows it
+    shares: dict[int, int] = {}
+    for f in findings:
+        for s in f.signals if f.kind == "pattern" else ():
+            shares[id(s)] = shares.get(id(s), 0) + 1
     for f in findings:
         if f.kind == "pattern":
-            contrib[f"pattern:{f.id}"] = PATTERN_WEIGHT * f.score
-    total = sum(contrib.values())
-    index = round(100 * (1 - math.exp(-total / INDEX_K)), 1)
+            cred = SCORES_CREDIBILITY if f.id == "forensic_scores" else MEMBER_CREDIBILITY
+            contrib[f"pattern:{f.id}"] = PATTERN_WEIGHT * noisy_or(f.signals, cred, shares)
+    index = index_of(contrib)
     area: dict[str, float] = {}
     fam: dict[str, float] = {}
     for s in signals:

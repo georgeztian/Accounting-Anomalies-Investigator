@@ -43,8 +43,10 @@ PART_NOUNS = {"business", "businesses", "segment", "segments", "division", "divi
 
 def qualified(text: str, start: int) -> bool:
     """True when the matched total belongs to a part of the company: a name stands right before it (a segment, region
-    or product, "Greater China", "iPhone"), or a noun that names a part ("GPU business revenue", NVIDIA FY2019)."""
-    words = re.findall(r"[A-Za-z][\w&'-]*", text[max(0, start - 40): start])
+    or product, "Greater China", "iPhone"), or a noun that names a part ("GPU business revenue", NVIDIA FY2019). Only the
+    same line and sentence count: a heading above ("Results of Operations") or the end of the sentence before ("... in
+    Europe. Net income was") names nothing."""
+    words = re.findall(r"[A-Za-z][\w&'-]*", re.split(r"\n|(?<=[a-z0-9)]{2}[.!?])\s+", text[max(0, start - 40): start])[-1])
     if not words:
         return False
     w = words[-1]  # the word right before "revenue" / "net income"
@@ -105,6 +107,23 @@ def totals_by_year(ends_and_totals) -> dict[int, list[float]]:
         for y in {end.year, end.year - 1 if end.month <= 2 else end.year}:
             out.setdefault(y, []).append(total)
     return out
+
+
+MONEY_RE = re.compile(r"(?:[A-Z]{0,3}\$|€|£|¥)\s?(\d[\d,]*(?:\.\d+)?)\s*(billion|million|thousand|bn|mm|m|k)?\b", re.IGNORECASE)
+MONEY_SCALE = {"billion": 1e9, "bn": 1e9, "million": 1e6, "mm": 1e6, "m": 1e6, "thousand": 1e3, "k": 1e3}
+PERCENT_RE = re.compile(r"(\d+(?:\.\d+)?)\s?(?:%|percent\b)", re.IGNORECASE)
+
+
+def states_amount(text: str, value: float) -> bool:
+    """True when the passage states `value` (full units of currency) as one of its amounts, at the scale it writes: an
+    amount an AI read from the passage is used only when the passage confirms both its digits and its scale."""
+    stated = [float(m.group(1).replace(",", "")) * MONEY_SCALE.get((m.group(2) or "").lower(), 1.0) for m in MONEY_RE.finditer(text)]
+    return any(abs(a - value) <= 0.005 * abs(a) for a in stated if a)
+
+
+def states_percent(text: str, pct: float) -> bool:
+    """True when the passage states `pct` percent."""
+    return any(abs(float(m.group(1)) - pct) <= 0.05 for m in PERCENT_RE.finditer(text))
 
 
 def _as_list(v) -> list:
@@ -169,10 +188,8 @@ def check_amounts(text: str, known: dict, quarter_ok: bool = False) -> tuple[int
         if abs(num - nearest) <= tol:
             checked += 1
             continue
-        if mismatch_pool is not None:
-            focus_total = [k for k in mismatch_pool if k and k > 0]
-            if not focus_total or nearest != focus_total[0]:
-                continue  # nearer another year's total than the focus year's: which year it describes is not known
+        if mismatch_pool is not None and nearest not in mismatch_pool:
+            continue  # nearer another year's total than the focus year's: which year it describes is not known
         if abs(num - nearest) / nearest <= 0.05:  # same metric, revised number
             checked += 1
             bad.append(AmountCheck(m.group(0), item, num, nearest, m.start()))

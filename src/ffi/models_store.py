@@ -17,7 +17,9 @@ def load_model(name: str) -> tuple[Any, dict] | None:
         return None
     import lightgbm as lgb
 
-    return lgb.Booster(model_file=str(model_path)), json.loads(meta_path.read_text(encoding="utf-8"))
+    # line endings normalised: a checkout that converted them to CRLF made LightGBM's parser abort the whole process
+    text = model_path.read_bytes().decode("utf-8").replace("\r\n", "\n")
+    return lgb.Booster(model_str=text), json.loads(meta_path.read_text(encoding="utf-8"))
 
 
 def save_model(name: str, booster: Any, meta: dict) -> Path:

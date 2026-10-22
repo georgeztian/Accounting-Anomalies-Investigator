@@ -9,8 +9,7 @@ import numpy as np
 
 from ffi.agent.schemas import EvidenceTask
 from ffi.context import RunContext
-from ffi.detectors.d_stats import RATIOS, ratio_vector
-from ffi.detectors.scores import V
+from ffi.detectors.d_stats import RATIOS, ratio_vector, ratio_with_peers
 from ffi.detectors.stats import fmt_money, fmt_num, fmt_pct, safe_div
 from ffi.text.search import search
 from ffi.xbrl.canonical import BY_ID
@@ -39,7 +38,8 @@ def run_tool(ctx: RunContext, task: EvidenceTask, lid: str) -> dict[str, Any]:
         for k in range(ctx.history):
             v = ctx.a(item, k)
             if np.isfinite(v):
-                vals.append((ctx.label(ctx.period_at(k)), v))
+                b = ctx.basis(item, k)  # a value reported under a broader or narrower concept says so
+                vals.append((ctx.label(ctx.period_at(k)) + (f" ({b})" if b else ""), v))
                 e = ctx.ev(item, k)
                 if e:
                     ev.append(e.to_dict())
@@ -61,14 +61,14 @@ def run_tool(ctx: RunContext, task: EvidenceTask, lid: str) -> dict[str, Any]:
         key = task.ratio_key or ""
         if key not in RATIOS:
             return _entry(lid, task, f"Unknown ratio '{key}'. Valid keys: {', '.join(RATIOS)}.", [], [])
-        name, fn = RATIOS[key]
-        mine = float(fn(V(ctx.A, ctx.focus)))
-        peers = ctx.peer_values(lambda P, p, k: float(fn(V(P, p))))
+        name = RATIOS[key][0]
+        mine, peers = ratio_with_peers(ctx, key)
         if len(peers) < 3:
-            return _entry(lid, task, f"{name}: company {fmt_num(mine, 3)}; too few peers.", [mine], [])
+            return _entry(lid, task, f"{name}: company {fmt_num(mine, 3)}; too few peers on the same basis.", [mine], [])
         q1, med, q3 = np.quantile(peers, [0.25, 0.5, 0.75])
         text = (f"{name}, {ctx.focus_label}: company {fmt_num(mine, 3)} vs peer median {fmt_num(med, 3)} (IQR {fmt_num(q1, 3)} to "
-                f"{fmt_num(q3, 3)}, n={len(peers)} same-industry peers, each at its fiscal year aligned to {ctx.focus_label}; one year only).")
+                f"{fmt_num(q3, 3)}, n={len(peers)} same-industry peers whose inputs are on the company's basis, each at its "
+                f"fiscal year aligned to {ctx.focus_label}; one year only).")
         return _entry(lid, task, text, [mine, med, q1, q3], [])
     if t in ("search_filing", "explaining_text"):
         doc = ctx.doc
@@ -153,7 +153,7 @@ def facts_table(ctx: RunContext, finding) -> list[dict[str, Any]]:
     for item in sorted(items):
         for k in range(max(3, ctx.history - 1)):
             v1, v0 = ctx.a(item, k), ctx.a(item, k + 1)
-            if np.isfinite(v1) and np.isfinite(v0):
+            if np.isfinite(v1) and np.isfinite(v0) and ctx.basis(item, k) == ctx.basis(item, k + 1):  # not across a concept switch
                 span = f"{ctx.label(ctx.period_at(k))} vs {ctx.label(ctx.period_at(k + 1))}"
                 rows.append({"source": f"{BY_ID[item].label} change, {span}", "value": float(v1 - v0),
                              "unit": BY_ID[item].unit.replace("USD", ctx.currency)})
@@ -161,11 +161,11 @@ def facts_table(ctx: RunContext, finding) -> list[dict[str, Any]]:
                     rows.append({"source": f"{BY_ID[item].label} % change, {span}", "value": float((v1 - v0) / abs(v0)), "unit": "ratio"})
     m = finding.materiality
     if m:
-        for k in ("impact_low", "impact_mid", "impact_high", "net_income_effect", "pct_pretax", "pct_revenue", "pct_assets",
-                  "pct_equity", "multiple", "eps_effect", "pct_market_value"):
-            v = getattr(m, k)
+        for name in ("impact_low", "impact_mid", "impact_high", "net_income_effect", "pct_pretax", "pct_revenue", "pct_assets",
+                     "pct_equity", "multiple", "eps_effect", "pct_market_value"):
+            v = getattr(m, name)
             if v is not None:
-                rows.append({"source": f"materiality.{k}", "value": float(v), "unit": ""})
+                rows.append({"source": f"materiality.{name}", "value": float(v), "unit": ""})
     for item in ("REVENUE", "NET_INCOME", "PRETAX_INCOME", "CFO", "TOTAL_ASSETS", "EQUITY"):
         for k in (0, 1):
             v = ctx.a(item, k)

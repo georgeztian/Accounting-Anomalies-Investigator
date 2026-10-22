@@ -478,7 +478,7 @@ def test_net_ppe_above_gross_less_depreciation_is_not_a_subtotal_break():
 
     load_all()
     vals = {"PPE_GROSS": 199.829e9, "ACCUM_DEP": 79.39e9, "PPE_NET": 171.036e9}  # Alphabet 2024: gross leaves out construction in progress
-    ctx = NS(a=lambda item, k=0: vals.get(item, float("nan")), focus_label="FY2024", evs=lambda *a, **k: [])
+    ctx = NS(a=lambda item, k=0: vals.get(item, float("nan")), basis=lambda item, k=0: "", focus_label="FY2024", evs=lambda *a, **k: [])
     try:
         out = REGISTRY["A.02"].fn(ctx)
     except SkipDetector:
@@ -526,7 +526,7 @@ def test_allowance_gap_in_a_year_of_large_acquisition_is_discounted():
     vals = {"ALLOWANCE": 165e6, "PROVISION_DOUBTFUL": 65e6, "WRITE_OFFS": 55e6, "ACQUISITIONS": 7.49e9, "TOTAL_ASSETS": 31.2e9}
     ctx = NS(a=lambda item, k=0: {"ALLOWANCE": 165e6 if k == 0 else 30e6}.get(item) if item == "ALLOWANCE"
              else (31.2e9 if (item == "TOTAL_ASSETS" and k == 1) else vals.get(item, float("nan"))),
-             focus_label="FY2024", evs=lambda *a, **k: [])
+             basis=lambda item, k=0: "", focus_label="FY2024", evs=lambda *a, **k: [])
     s = REGISTRY["A.09"].fn(ctx)[0]
     assert s.severity <= 0.55 and "Discounted" in s.rationale  # Waste Management bought Stericycle in 2024
 

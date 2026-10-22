@@ -1,0 +1,2 @@
+# LightGBM reads its model files byte for byte: a checkout that converts them to CRLF makes its parser abort the run
+src/ffi/models/*.txt -text

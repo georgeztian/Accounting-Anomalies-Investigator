@@ -14,7 +14,7 @@ from langgraph.types import Command
 from ffi.agent.graph import build_graph
 from ffi.agent.ui import PauseRun, TerminalUI, stdin_interactive
 from ffi.detectors.base import EvidenceRef
-from ffi.scoring.engine import apply_set_aside
+from ffi.scoring.engine import EXPLAINED, EXPLAINED_FACTOR, apply_explained, apply_set_aside
 
 log = logging.getLogger(__name__)
 
@@ -62,9 +62,9 @@ def _apply(f, result: dict, case: dict) -> None:
         written = [f"{a['alternative']}: {a['reasoning']}" for a in result.get("alternatives", []) if a.get("supported")]
         f.alternatives = written + f.alternatives
         f.agent_text = written
-        f.narrative_source = "agent: closed as explained"
-        f.score *= 0.5  # counts for half: in the risk ranking as well as in its strength
-        f.priority *= 0.5
+        f.narrative_source = EXPLAINED
+        f.score *= EXPLAINED_FACTOR  # counts for half: in its strength and the ranking here, in the risk index (apply_explained)
+        f.priority *= EXPLAINED_FACTOR
     elif status == "dropped":
         f.narrative_source = "agent narrative dropped by reviewer"
 
@@ -103,6 +103,7 @@ def investigate(ctx, score, run_dir: Path, run_id: str, opts, ui: TerminalUI | N
     candidates = [f for f in score.findings if f.kind == "pattern"] or list(score.findings)
     cases = investigate_with_backfill([(ctx, f) for f in candidates], opts.max_cases, run_dir, run_id, ui)
     apply_set_aside(score)
+    apply_explained(score)
     score.findings.sort(key=lambda x: -x.priority)
     return cases
 

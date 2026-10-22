@@ -9,22 +9,29 @@ import numpy as np
 
 from ffi.detectors import scores as S
 from ffi.detectors.catalog import explain, interpret
-from ffi.detectors.d_stats import RATIOS
-from ffi.detectors.scores import V
+from ffi.detectors.d_stats import RATIOS, ratio_with_peers
 from ffi.detectors.stats import fmt_money, fmt_num, fmt_pct, money_prefix
 from ffi.report import charts
 from ffi.report import plain as P
 from ffi.report.explain import for_report
 from ffi.report.linter import lint
+from ffi.scoring.engine import EXPLAINED, NO_EVENT, NO_EVENT_PATTERN
 
 FAMILY_NAMES = {"A": "Accounting integrity", "B": "Forensic scores & accrual models", "C": "Account-level detectors",
                 "D": "Statistical & ML", "E": "Text & disclosure", "F": "Knowledge-graph"}
+# tests charted against peers: only those whose result is this ratio (a related ratio beside a finding, such as receivables
+# growth beside revenue-vs-cash growth, would show a different comparison from the one the test made)
 DETECTOR_RATIO = {"C.AR.01": ("dso", "days"), "C.INV.01": ("dsi", "days"), "C.CF.03": ("dpo", "days"),
-                  "C.EXP.04": ("dep_rate", "pct"), "C.EXP.02": ("other_ca_rev", "pct"), "B.03": ("accruals_ta", "pct"),
-                  "C.CF.01": ("cfo_ni", "num"), "C.REV.05": ("asset_turnover", "num"), "C.EXP.06": ("sga_ratio", "pct"),
-                  "C.RES.05": ("etr", "pct"), "C.EXP.09": ("sbc_ratio", "pct"), "C.BS.01": ("interest_rate", "pct"),
-                  "C.REV.02": ("deferred_rev_rev", "pct"), "B.05": ("accruals_ta", "pct"), "C.EXP.01": ("rnd_ratio", "pct"),
-                  "C.REV.01": ("ar_growth_less_rev", "pct"), "C.INV.02": ("inv_growth_less_cogs", "pct")}
+                  "C.REV.05": ("asset_turnover", "num"), "C.RES.05": ("etr", "pct"), "C.EXP.09": ("sbc_ratio", "pct")}
+KEY_ITEMS = (("Revenue", "REVENUE"), ("Net income", "NET_INCOME"), ("Cash from operations", "CFO"),
+             ("Total assets", "TOTAL_ASSETS"), ("Shareholders' equity", "EQUITY"))
+TEXT_TESTS = ("E.01", "E.02", "E.03", "E.04", "C.REV.07", "C.REV.11", "C.AR.04", "E.09")  # shown under disclosure changes
+
+
+def key_value(ctx, item: str, k: int = 0) -> str:
+    """A key figure, with its basis when the company reported it under a broader or narrower concept that year."""
+    b = ctx.basis(item, k)
+    return fmt_money(ctx.a(item, k)) + (f" ({b})" if b else "")
 DISCLAIMER = ("This report flags departures from expectation in public filings for further inquiry. It does not allege "
               "wrongdoing and is not evidence of fraud. It is decision support for qualified analysts, not investment, "
               "legal or audit advice. Anomalies often have legitimate explanations.")
@@ -34,19 +41,12 @@ def _ratio_chart(ctx, detector_id: str, years: int = 6) -> str:
     if detector_id not in DETECTOR_RATIO:
         return ""
     key, kind = DETECTOR_RATIO[detector_id]
-    name, fn = RATIOS[key]
+    name = RATIOS[key][0]
     periods = ctx.periods[-years:]
     mine, med, q1, q3 = [], [], [], []
     for p in periods:
-        mine.append(float(fn(V(ctx.A, p))))
-        vals = []
-        if ctx.peers:
-            for peer in ctx.peers.loaded:
-                ap = ctx.peers.aligned_period(peer, p)
-                if ap is not None:
-                    v = float(fn(V(peer.annual, ap)))
-                    if np.isfinite(v):
-                        vals.append(v)
+        v, vals = ratio_with_peers(ctx, key, p)
+        mine.append(v)
         med.append(float(np.median(vals)) if len(vals) >= 3 else float("nan"))
         q1.append(float(np.quantile(vals, 0.25)) if len(vals) >= 3 else float("nan"))
         q3.append(float(np.quantile(vals, 0.75)) if len(vals) >= 3 else float("nan"))
@@ -151,8 +151,8 @@ INVESTIGATION = {  # narrative_source -> (status label, text when the AI investi
     "agent-degraded": ("Did not finish", "The AI investigation did not finish within its time and cost limits, so it adds no "
                                          "conclusion beyond the test results below. Evidence it gathered is listed under "
                                          "Supporting evidence."),
-    "agent: closed as explained": ("Likely explained", "The AI investigation found a likely legitimate explanation, listed under "
-                                                       "Innocent explanations below, so this finding counts for half."),
+    EXPLAINED: ("Likely explained", "The AI investigation found a likely legitimate explanation, listed under "
+                                    "Innocent explanations below, so this finding counts for half."),
     "agent narrative dropped by reviewer": ("Withdrawn", "The AI-written explanation was withdrawn at review, so the conclusion "
                                                          "rests on the test results below."),
     "template": ("Not run", "No AI investigation was run for this finding, so the conclusion rests on the test results below."),
@@ -179,6 +179,27 @@ def _resolution(ctx) -> str:
     c = ctx.company
     return (f"Identified as {c.display_name or c.name}{f' (ticker {c.ticker})' if c.ticker else ''} in the SEC's register of public companies"
             + (f"; industry: {c.sic_description}" if c.sic_description else "") + ".")
+
+
+def company_block(ctx) -> dict[str, Any]:
+    c = ctx.company
+    return {"name": c.display_name or c.name, "ticker": c.ticker, "sic_description": " ".join((c.sic_description or "").split()),
+            "match_note": _resolution(ctx), "warnings": [P.plain(w) for w in c.warnings], "auditor": ctx.auditor}
+
+
+def profile_block(ctx) -> dict[str, Any]:
+    p = ctx.profile
+    if p is None:
+        return {"key": "industrial", "label": "Industrial / commercial company", "description": "Operating company; the full test set applies.",
+                "notes": [], "excluded": 0}
+    return {"key": p.key, "label": p.label, "description": P.plain(p.description), "notes": [P.plain(n) for n in p.notes],
+            "excluded": len(p.excluded)}
+
+
+def audit_summary(findings) -> dict[str, int]:
+    """How many reported findings the independent re-check verified, verified after corrections, or could not verify."""
+    return {k: sum(1 for f in findings if f.audit and f.audit.status == s)
+            for k, s in (("verified", "verified"), ("corrected", "verified_after_corrections"), ("unverified", "unverified"))}
 
 
 def peer_text(ctx) -> str:
@@ -218,8 +239,6 @@ def flag_level(ctx) -> float:
 def _alternatives(f) -> list[str]:
     """The innocent explanations to rule out; "no explaining event detected" is dropped once there are others (the
     investigation's own), which it would seem to contradict."""
-    from ffi.scoring.engine import NO_EVENT, NO_EVENT_PATTERN
-
     real = [a for a in f.alternatives if a not in (NO_EVENT, NO_EVENT_PATTERN)]
     return real or list(f.alternatives)
 
@@ -309,7 +328,7 @@ def build_model(out) -> dict[str, Any]:
     findings = [finding_block(f, ctx, i + 1, flag_at) for i, f in enumerate(sc.findings[:12])]
     families, statuses = test_families(out.results, flag_at)
     text_changes = []
-    for did in ("E.01", "E.02", "E.03", "E.04", "C.REV.07", "C.REV.11", "C.AR.04", "E.09"):
+    for did in TEXT_TESTS:
         for r in out.results:
             if r.id == did:
                 for s in r.signals:
@@ -321,23 +340,16 @@ def build_model(out) -> dict[str, Any]:
     for f in sc.findings[:12]:  # one line per reported finding, so the list always matches the Findings section
         mt = f" ({fmt_money(f.materiality.impact_low)}-{fmt_money(f.materiality.impact_high)}, {fmt_pct(f.materiality.pct_pretax)} of pre-tax income)" if f.materiality and f.materiality.pct_pretax is not None else ""
         top_sentences.append(f"{P.title(f.title)}{mt}.")
-    key_numbers = [{"label": lab, "value": fmt_money(ctx.a(item)), "prior": fmt_money(ctx.a(item, 1))}
-                   for lab, item in (("Revenue", "REVENUE"), ("Net income", "NET_INCOME"), ("Cash from operations", "CFO"),
-                                     ("Total assets", "TOTAL_ASSETS"), ("Shareholders' equity", "EQUITY"))]
+    key_numbers = [{"label": lab, "value": key_value(ctx, item), "prior": key_value(ctx, item, 1)} for lab, item in KEY_ITEMS]
     llm = out.manifest.get("llm")
     peers_txt = peer_text(ctx)
     return {
-        "company": {"name": ctx.company.display_name or ctx.company.name, "ticker": ctx.company.ticker,
-                    "sic_description": " ".join((ctx.company.sic_description or "").split()),
-                    "match_note": _resolution(ctx), "warnings": [P.plain(w) for w in ctx.company.warnings], "auditor": ctx.auditor},
+        "company": company_block(ctx),
         "period": P.plain(ctx.focus_label, expand=False).capitalize(), "period_end": str(ctx.focus.date()), "as_of": str(getattr(ctx, "cutoff", None) or ctx.as_of),
         "generated": datetime.now().strftime("%d %B %Y"),
         "analysis_type": ("Automated checks of the reported figures, plus AI-assisted reading of the filings' text"
                           if llm else "Automated checks of the reported figures and filing text"),
-        "profile": ({"key": ctx.profile.key, "label": ctx.profile.label, "description": P.plain(ctx.profile.description),
-                     "notes": [P.plain(n) for n in ctx.profile.notes], "excluded": len(ctx.profile.excluded)} if ctx.profile else
-                    {"key": "industrial", "label": "Industrial / commercial company", "description": "Operating company; the full test set applies.",
-                     "notes": [], "excluded": 0}),
+        "profile": profile_block(ctx),
         "currency": ctx.currency, "annual_form": ctx.annual_form,
         "risk": {"index": sc.risk_index, "band": sc.band},
         "top_sentences": top_sentences,
@@ -347,11 +359,7 @@ def build_model(out) -> dict[str, Any]:
         "areas": [{"area": P.area(k), "score": round(v, 2)} for k, v in area_rows],
         "findings": findings,
         "set_aside": set_aside_blocks(getattr(sc, "set_aside", [])), "set_aside_note": SET_ASIDE_NOTE,
-        "audit_summary": {
-            "verified": sum(1 for f in sc.findings[:12] if f.audit and f.audit.status == "verified"),
-            "corrected": sum(1 for f in sc.findings[:12] if f.audit and f.audit.status == "verified_after_corrections"),
-            "unverified": sum(1 for f in sc.findings[:12] if f.audit and f.audit.status == "unverified"),
-        },
+        "audit_summary": audit_summary(sc.findings[:12]),
         "families": families,
         "statuses": statuses,
         "flag_at": flag_at,

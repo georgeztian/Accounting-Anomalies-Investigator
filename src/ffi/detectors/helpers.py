@@ -90,6 +90,16 @@ def need(*values: float, reason: str = "required data not reported") -> None:
             raise SkipDetector(reason)
 
 
+def need_same_basis(ctx: Any, *items: str, ks: tuple[int, ...] = (0, 1)) -> None:
+    """Skip when an item is reported on different bases in the years compared (canonical.DIFFERENT_BASIS): a change across
+    a switch of concept (allowance on current receivables, then on all receivables) measures the tagging."""
+    from ffi.xbrl.canonical import BY_ID
+
+    for item in items:
+        if len({ctx.basis(item, k) for k in ks} - {None}) > 1:
+            raise SkipDetector(f"{BY_ID[item].label.lower()} is reported on different bases in the years compared")
+
+
 def finite(*values: float) -> bool:
     return all(v is not None and np.isfinite(v) for v in values)
 

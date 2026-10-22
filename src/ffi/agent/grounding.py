@@ -108,10 +108,14 @@ def check(text: str, allowed: list[float], docs: list, rel_tol: float = 0.015, k
             continue  # fiscal labels and ledger ids
         rep.numbers_checked += 1
         # displayed values are rounded: allow rounding at the shown precision
+        suf = (m.group("suf") or "").lower()
         shown = len(num.split(".")[1]) if "." in num else 0
-        rounding = 0.5 * SCALE.get((m.group("suf") or "").lower(), 1) / 10 ** shown
+        rounding = 0.5 * SCALE.get(suf, 1) / 10 ** shown
+        # a bare number may be a ratio written as a percentage or the reverse ("13.9" for 0.139); an amount of money, a count
+        # of days or a multiple never is, so "$1.9B" is not supported by $19M
+        scales = (1, 100, 0.01) if not suf and "$" not in token else (1,)
         found = any(abs(c - v) <= max(abs(v) * rel_tol, 0.006 if abs(v) < 10 else 0.5, rounding)
-                    for c in (abs(x) for x in _candidates(m)) for a in allowed_abs for v in (a, a * 100, a * 0.01))
+                    for c in (abs(x) for x in _candidates(m)) for a in allowed_abs for v in (a * k for k in scales))
         if not found:
             rep.unsupported_numbers.append(token)
     known = [_norm(k) for k in known_text or []]

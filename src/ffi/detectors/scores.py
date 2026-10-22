@@ -49,8 +49,14 @@ class V:
         return v if np.isfinite(v) else 0.0
 
     def avg(self, item: str, back: int = 0) -> float:
-        a, b = self.g(item, back), self.g(item, back + 1)
-        return (a + b) / 2 if np.isfinite(a) and np.isfinite(b) else a
+        """Two-year average; NaN without both years (a single year's balance is another measure)."""
+        return (self.g(item, back) + self.g(item, back + 1)) / 2
+
+    def same(self, item: str, *backs: int) -> bool:
+        """`item` is reported on one basis in all of `backs` (missing years aside): a change across a switch between
+        concepts of different scope (receivables with and without notes, G&A with and without selling costs) measures the
+        tagging, not the business."""
+        return len({basis(item, self.concept(item, b)) for b in backs if np.isfinite(pv(self.P, item, self.p, b))}) <= 1
 
     def total_liabilities(self, back: int = 0) -> float:
         tl = self.g("TOTAL_LIABILITIES", back)
@@ -71,7 +77,7 @@ class V:
         rev = self.g("REVENUE", back)
         if all(np.isfinite(self.g("GROSS_PROFIT", b)) for b in yrs):
             return safe_div(self.g("GROSS_PROFIT", back), rev)
-        if all(np.isfinite(self.g("COGS", b)) for b in yrs):
+        if all(np.isfinite(self.g("COGS", b)) for b in yrs) and self.same("COGS", *yrs):
             return safe_div(rev - self.g("COGS", back), rev)
         return NAN
 
@@ -138,8 +144,19 @@ def noncurrent_ltd(v: V, back: int = 0) -> float:
 
 
 def same_basis(focus: dict, other: dict) -> bool:
-    """Two tracked readings (see V) measured every item they share on the same basis."""
-    return all(focus[k] == other[k] for k in focus.keys() & other.keys() if focus[k] is not None and other[k] is not None)
+    """Two tracked readings (see V) measured every item they share on the same basis, and each on one basis in every year
+    it read (a change in receivables across a switch of concept is no change in receivables)."""
+    return (mixed_basis(other) is None and
+            all(focus[k] == other[k] for k in focus.keys() & other.keys() if focus[k] is not None and other[k] is not None))
+
+
+def mixed_basis(track: dict) -> str | None:
+    """The first item a tracked reading (see V) read on different bases in different years, or None."""
+    seen: dict[str, str] = {}
+    for (item, _back), b in track.items():
+        if b is not None and seen.setdefault(item, b) != b:
+            return item
+    return None
 
 
 def dep_measure(v: V, backs: tuple[int, ...]) -> tuple[str, Callable[[int], float]]:
@@ -191,17 +208,19 @@ def beneish(P: Panel, p: pd.Timestamp) -> dict[str, float]:
     ico = v.g("INCOME_CONT_OPS")
     if not np.isfinite(ico):
         ico = v.g("NET_INCOME")
+    ppe_same = v.same("PPE_NET", 0, 1)
     comp = {
-        "DSRI": safe_div(safe_div(ar, rev), safe_div(ar0, rev0)),
+        "DSRI": safe_div(safe_div(ar, rev), safe_div(ar0, rev0)) if v.same("AR", 0, 1) else NAN,
         "GMI": safe_div(v.gross_margin(1, years=(0, 1)), v.gross_margin(0, years=(0, 1))),
-        "AQI": safe_div(aq(0), aq(1)),
+        "AQI": safe_div(aq(0), aq(1)) if ppe_same else NAN,
         "SGI": safe_div(rev, rev0),
-        "DEPI": safe_div(deprate(1), deprate(0)),
-        "SGAI": safe_div(sga(0), sga(1)),
+        "DEPI": safe_div(deprate(1), deprate(0)) if ppe_same else NAN,
+        "SGAI": safe_div(sga(0), sga(1)) if v.same("SGA", 0, 1) else NAN,
         "TATA": safe_div(ico - v.g("CFO"), ta),
         "LVGI": safe_div(lev(0), lev(1)),
     }
-    # Neutral imputation (1.0 for indices, 0 for TATA) when a component can't be computed, as is common practice
+    # Neutral imputation (1.0 for indices, 0 for TATA) when a component can't be computed (its inputs missing, or on
+    # different bases in the two years), as is common practice
     filled = {k: (val if np.isfinite(val) else (0.0 if k == "TATA" else 1.0)) for k, val in comp.items()}
     missing = [k for k, val in comp.items() if not np.isfinite(val)]
     core_ok = np.isfinite(comp["SGI"]) and np.isfinite(comp["TATA"])
@@ -234,16 +253,18 @@ def dechow_f(P: Panel, p: pd.Timestamp) -> dict[str, float]:
     ata = v.avg("TOTAL_ASSETS")
     w1, n1, f1 = _rsst_parts(v, 0)
     w0, n0, f0 = _rsst_parts(v, 1)
-    rsst = safe_div((w1 - w0) + (n1 - n0) + (f1 - f0), ata)
-    ch_rec = safe_div(v.g("AR") - v.g("AR", 1), ata)
-    ch_inv = safe_div(v.z("INVENTORY") - v.z("INVENTORY", 1), ata)
+    # a change measured across a switch of concept (cash with and without restricted cash, receivables with and without
+    # notes) is the tagging, not an accrual: the variable is not computed
+    rsst = safe_div((w1 - w0) + (n1 - n0) + (f1 - f0), ata) if v.same("CASH", 0, 1) else NAN
+    ch_rec = safe_div(v.g("AR") - v.g("AR", 1), ata) if v.same("AR", 0, 1) else NAN
+    ch_inv = safe_div(v.z("INVENTORY") - v.z("INVENTORY", 1), ata) if v.same("INVENTORY", 0, 1) else NAN
     soft = safe_div(v.g("TOTAL_ASSETS") - v.g("PPE_NET") - v.g("CASH"), v.g("TOTAL_ASSETS"))
     cs1 = v.g("REVENUE") - (v.g("AR") - v.g("AR", 1))
     cs0 = v.g("REVENUE", 1) - (v.g("AR", 1) - v.g("AR", 2))
-    ch_cs = safe_div(cs1, cs0) - 1
+    ch_cs = safe_div(cs1, cs0) - 1 if v.same("AR", 0, 1, 2) else NAN
     roa1 = safe_div(v.g("NET_INCOME"), ata)
     roa0 = safe_div(v.g("NET_INCOME", 1), v.avg("TOTAL_ASSETS", 1))
-    ch_roa = roa1 - roa0
+    ch_roa = roa1 - roa0 if v.same("NET_INCOME", 0, 1) else NAN
     # securities sold for cash (the cash-flow statement); shares the statement of equity shows as issued include employee
     # stock plans, which raise no capital
     raised = v.z("EQUITY_ISSUED") if basis("EQUITY_ISSUED", v.concept("EQUITY_ISSUED")) != "shares issued, from the statement of equity" else 0.0
@@ -297,6 +318,9 @@ def montier_c(P: Panel, p: pd.Timestamp) -> dict[str, float]:
     base = depreciable_ppe(v, (0, 1))
     dr1, dr0 = safe_div(dep(0), base(0)), safe_div(dep(1), base(1))
     ag = safe_div(v.g("TOTAL_ASSETS"), v.g("TOTAL_ASSETS", 1)) - 1
+    same = {k: all(v.same(i, 0, 1) for i in items) for k, items in (
+        ("ni_cfo_gap_widening", ("NET_INCOME",)), ("dso_rising", ("AR",)), ("dsi_rising", ("INVENTORY", "COGS")),
+        ("dep_rate_falling", ("PPE_GROSS",)))}
     tests = {
         "ni_cfo_gap_widening": gap1 > gap0 if np.isfinite(gap1) and np.isfinite(gap0) else None,
         "dso_rising": dso1 > dso0 if np.isfinite(dso1) and np.isfinite(dso0) else None,
@@ -305,6 +329,7 @@ def montier_c(P: Panel, p: pd.Timestamp) -> dict[str, float]:
         "dep_rate_falling": dr1 < dr0 if np.isfinite(dr1) and np.isfinite(dr0) else None,
         "asset_growth_gt_10pct": ag > 0.10 if np.isfinite(ag) else None,
     }
+    tests = {k: (t if same.get(k, True) else None) for k, t in tests.items()}  # inputs on different bases: not computable
     score = sum(1 for t in tests.values() if t)
     avail = sum(1 for t in tests.values() if t is not None)
     return {"C": float(score), "available": float(avail), **{k: (float(t) if t is not None else NAN) for k, t in tests.items()}}
@@ -313,7 +338,7 @@ def montier_c(P: Panel, p: pd.Timestamp) -> dict[str, float]:
 def piotroski_f(P: Panel, p: pd.Timestamp) -> dict[str, float]:
     v = V(P, p)
     roa = safe_div(v.g("NET_INCOME"), v.g("TOTAL_ASSETS", 1))
-    roa0 = safe_div(v.g("NET_INCOME", 1), v.g("TOTAL_ASSETS", 2))
+    roa0 = safe_div(v.g("NET_INCOME", 1), v.g("TOTAL_ASSETS", 2)) if v.same("NET_INCOME", 0, 1) else NAN
     cfo = safe_div(v.g("CFO"), v.g("TOTAL_ASSETS", 1))
     l1, l0 = noncurrent_ltd(v, 0), noncurrent_ltd(v, 1)
     if np.isfinite(l1) == np.isfinite(l0):  # no long-term debt tagged in either year counts as none in both

@@ -21,15 +21,17 @@ from typing import Any
 
 from ffi.context import RunContext
 from ffi.pipeline.run import (
+    MissingYear,
     RunOptions,
     Step,
     YearAnalysis,
-    _remove_superseded_reports,
     analyse_year,
+    audit_findings,
+    build_manifest,
+    finish,
     pick_focus,
     prepare,
 )
-from ffi.report import snapshot
 from ffi.scoring import span as span_scoring
 from ffi.scoring.engine import REPORTED
 
@@ -68,9 +70,7 @@ def run_span(opts: RunOptions, span: int, choose=None, progress: Callable[[str],
              agent_ui: Any = None) -> SpanOutput:
     import pandas as pd
 
-    from ffi.audit.deterministic import run_audit
     from ffi.report.explain import explain_findings
-    from ffi.scoring.engine import audit_reported, template_narrative
 
     timings: dict[str, float] = {}
     step = Step(timings, progress)
@@ -86,16 +86,25 @@ def run_span(opts: RunOptions, span: int, choose=None, progress: Callable[[str],
     run_dir.mkdir(parents=True, exist_ok=True)
 
     years: list[YearAnalysis] = []
+    skipped: list[str] = []
     kg_counts: dict[str, Any] = {}
     for i, p in enumerate(focuses):
         label = store.fiscal_label(p)
         ystep = Step(timings, progress, prefix=f"{label} ({i + 1}/{len(focuses)}): ")
-        y = analyse_year(prep, opts, p, run_dir, ystep, kg_file=f"kg_{label}.duckdb")
+        try:
+            y = analyse_year(prep, opts, p, run_dir, ystep, kg_file=f"kg_{label}.duckdb")
+        except MissingYear as e:
+            skipped.append(f"{label} was not reviewed: {e}.")
+            continue
         kg_counts[label] = y.kg_counts
         _close_kg(y.ctx, run_dir / f"kg_{label}.duckdb", keep=opts.keep_artifacts)
         y.ctx.xsec = pd.DataFrame()  # the industry cross-section is only read by that year's detectors (tens of MB per year)
         years.append(y)
 
+    if len(years) < 2:
+        raise ValueError("a multi-year review needs at least two fiscal years with figures as first reported; " + " ".join(skipped))
+    if skipped:  # the years reviewed are not consecutive: say so in the report
+        years[-1].ctx.notes.extend(skipped + ["The years shown are not consecutive; recurrence is counted over the years reviewed."])
     with step("Merging findings across years"):
         result = span_scoring.merge(years)
     by_year: dict[int, RunContext] = {}  # one investigation context per representative year, shared by its anomalies
@@ -118,39 +127,20 @@ def run_span(opts: RunOptions, span: int, choose=None, progress: Callable[[str],
         span_scoring.apply_set_aside(result, years)
 
     with step("Independent audit of findings"):
-        def audit_one(f) -> None:
-            if not f.narrative:
-                f.narrative = template_narrative(f)
-            f.audit = run_audit(context_of(f), f, template_narrative, ledger=f.ledger)
-
-        audit_reported(result.findings, audit_one)
+        audit_findings(result.findings, context_of)
         span_scoring.apply_audit(result)
     shown = result.findings[:REPORTED]
     with step("Explaining findings in plain language"):
         explain_findings(shown, context_of)
 
-    manifest = build_span_manifest(years, result, run_id, opts, span, timings, kg_counts, prep)
+    ctx = years[-1].ctx
+    manifest = build_manifest(
+        ctx, run_id, opts, timings, kg_counts, prep.cf, result, sorted({d.url for y in years for d in y.ctx.docs + y.ctx.releases}),
+        kind="span", periods=result.periods, span_requested=span, yearly=result.yearly,
+        detectors={y.ctx.focus_label: {r.id: {"status": r.status, "flagged": r.flagged} for r in y.results} for y in years},
+        peers={y.ctx.focus_label: ([p.cik for p in y.ctx.peers.loaded] if y.ctx.peers else []) for y in years})
     out = SpanOutput(years, result, {f.id: context_of(f) for f in shown}, run_dir, manifest, timings, agent_cases)
-    with step("Rendering report"):
-        from ffi.report.render import render, to_json
-
-        out.files = render(out, opts.formats)
-    (run_dir / "manifest.json").write_text(to_json(manifest), encoding="utf-8")
-    try:
-        snapshot.save(out)
-    except Exception as e:  # noqa: BLE001 - the report is already written; only re-rendering is lost
-        log.warning("could not save the run for re-rendering: %s", e)
-    if not opts.keep_artifacts:
-        import gc
-
-        gc.collect()  # release graph-database handles still held by finished years before deleting their files
-        for path in run_dir.glob("kg_*.duckdb*"):
-            with contextlib.suppress(OSError):
-                path.unlink()
-        if not any(isinstance(c, dict) and c.get("status") in ("paused", "error", "running") for c in agent_cases):
-            with contextlib.suppress(OSError):
-                (run_dir / "checkpoints.sqlite").unlink(missing_ok=True)
-    _remove_superseded_reports(run_dir, company.cik)
+    finish(out, opts, step, company.cik)
     return out
 
 
@@ -164,31 +154,3 @@ def _close_kg(ctx: RunContext, path: Path, keep: bool) -> None:
                 f.unlink(missing_ok=True)
             except OSError as e:
                 log.debug("could not remove %s: %s", f, e)
-
-
-def build_span_manifest(years: list[YearAnalysis], result, run_id: str, opts: RunOptions, span: int, timings, kg_counts, prep) -> dict:
-    from ffi import __version__
-
-    ctx = years[-1].ctx
-    llm = prep.llm
-    return {
-        "run_id": run_id, "kind": "span", "package_version": __version__,
-        "company": {"cik": ctx.company.cik, "ticker": ctx.company.ticker, "name": ctx.company.name, "sic": ctx.company.sic,
-                    "resolution": ctx.company.match_note, "warnings": ctx.company.warnings,
-                    "annual_form": ctx.annual_form, "currency": ctx.currency},
-        "profile": {"key": ctx.profile.key, "label": ctx.profile.label} if ctx.profile else None,
-        "periods": result.periods, "span_requested": span, "as_of": str(ctx.as_of),
-        "options": {k: (str(v) if isinstance(v, Path) or hasattr(v, "isoformat") else v) for k, v in opts.__dict__.items()},
-        "mode": ctx.mode,
-        "yearly": result.yearly,
-        "detectors": {y.ctx.focus_label: {r.id: {"status": r.status, "flagged": r.flagged} for r in y.results} for y in years},
-        "peers": {y.ctx.focus_label: ([p.cik for p in y.ctx.peers.loaded] if y.ctx.peers else []) for y in years},
-        "kg": kg_counts,
-        "sources": {"companyfacts_sha256": prep.cf.sha256,
-                    "documents": sorted({d.url for y in years for d in y.ctx.docs + y.ctx.releases})},
-        "llm": ({"backend": llm.backend, "reasoning_model": llm.reasoning_model, "extraction_model": llm.extraction_model,
-                 "calls": llm.spend.calls, "usd": round(llm.spend.usd, 4), "by_purpose": llm.spend.by_purpose} if llm else None),
-        "risk_index": result.risk_index, "band": result.band,
-        "audit": {f.id: f.audit.label for f in result.findings if f.audit is not None},
-        "timings_s": timings,
-    }

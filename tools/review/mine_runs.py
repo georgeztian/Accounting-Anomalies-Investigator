@@ -43,6 +43,8 @@ def _finite(x) -> bool:
 
 
 def _bounds_problem(s) -> str | None:
+    from ffi.detectors.plausibility import MAX_DAYS, MAX_YEARS
+
     v, unit = s.raw_value, (s.unit or "").lower()
     if v is None:
         return None
@@ -50,9 +52,9 @@ def _bounds_problem(s) -> str | None:
         return "result is NaN or infinite"
     if not _finite(s.severity) or not 0 <= s.severity <= 1:
         return f"severity {s.severity} outside 0-1"
-    if unit == "days" and not 0 <= v <= 1500:
+    if unit == "days" and not 0 <= v <= MAX_DAYS:
         return f"{v:.0f} days is outside any plausible range"
-    if unit == "years" and not 0 <= v <= 100:
+    if unit == "years" and not 0 <= v <= MAX_YEARS:
         return f"{v:.1f} years is outside any plausible range"
     if s.flagged and not s.evidence and s.family not in ("D",):
         return "flagged with no evidence attached"

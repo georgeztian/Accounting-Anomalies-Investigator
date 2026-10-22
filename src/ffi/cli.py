@@ -153,14 +153,17 @@ def _span_summary(res) -> None:
     else:
         console.print("No anomalies met the reporting threshold in any year.")
     console.print("Timings: " + ", ".join(f"{k} {v}s" for k, v in res.timings.items()))
+    _files_and_spend(res)
+
+
+def _files_and_spend(res) -> None:
     for kind, p in res.files.items():
         console.print(f"[green]{kind.upper()}[/green] {p.resolve()}")
-    llm = ctx.llm
-    if llm:
-        if llm.backend == "claude-code":
-            console.print(f"LLM: {llm.spend.calls} calls on your Claude subscription (API-equivalent ${llm.spend.usd:.2f}, not billed per token).")
-        else:
-            console.print(f"LLM spend ${llm.spend.usd:.2f} over {llm.spend.calls} calls.")
+    llm = res.ctx.llm
+    if llm and llm.backend == "claude-code":
+        console.print(f"LLM: {llm.spend.calls} calls on your Claude subscription (API-equivalent ${llm.spend.usd:.2f}, not billed per token).")
+    elif llm:
+        console.print(f"LLM spend ${llm.spend.usd:.2f} over {llm.spend.calls} calls.")
 
 
 def _summary(res) -> None:
@@ -190,13 +193,7 @@ def _summary(res) -> None:
     console.print(f"Detectors: {stat['ok']} ran, {stat['skipped']} skipped (missing data), {stat['n/a']} not applicable "
                   f"to this profile, {stat['error']} errored. Timings: "
                   + ", ".join(f"{k} {v}s" for k, v in res.timings.items()))
-    for kind, p in res.files.items():
-        console.print(f"[green]{kind.upper()}[/green] {p.resolve()}")
-    if ctx.llm:
-        if ctx.llm.backend == "claude-code":
-            console.print(f"LLM: {ctx.llm.spend.calls} calls on your Claude subscription (API-equivalent ${ctx.llm.spend.usd:.2f}, not billed per token).")
-        else:
-            console.print(f"LLM spend ${ctx.llm.spend.usd:.2f} over {ctx.llm.spend.calls} calls.")
+    _files_and_spend(res)
 
 
 @app.command("batch")

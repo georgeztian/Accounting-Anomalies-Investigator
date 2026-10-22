@@ -79,10 +79,10 @@ def fallback(f) -> dict[str, str]:
 
 def _material(ctx, f) -> str:
     """Everything the writer may draw on, as one block of text."""
+    from ffi.report.model import KEY_ITEMS, key_value
+
     m = f.materiality
-    key = {lab: (fmt_money(ctx.a(item)), fmt_money(ctx.a(item, 1)))
-           for lab, item in (("Revenue", "REVENUE"), ("Net income", "NET_INCOME"), ("Cash from operations", "CFO"),
-                             ("Total assets", "TOTAL_ASSETS"), ("Shareholders' equity", "EQUITY"))}
+    key = {lab: (key_value(ctx, item), key_value(ctx, item, 1)) for lab, item in KEY_ITEMS}
     tests = []
     for s in f.signals[:6]:
         ex = explain(s.detector_id)

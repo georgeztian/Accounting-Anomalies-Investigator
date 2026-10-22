@@ -107,7 +107,10 @@ class TerminalUI:
             out["reason"] = self.console.input("Reason for overriding: ").strip()
         elif choice == "raise":
             amt = self.console.input("Raise run budget by USD (default 2): ").strip()
-            out["amount"] = float(amt) if amt else 2.0
+            try:
+                out["amount"] = max(0.0, float(amt)) if amt else 2.0
+            except ValueError:  # a typo must not fail the case
+                out["amount"] = 2.0
         return out
 
     def _edit(self, text: str) -> str:

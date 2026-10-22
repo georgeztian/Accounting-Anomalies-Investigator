@@ -201,9 +201,9 @@ The app covers any company that has filed at least one annual report on EDGAR: a
 | Bank or lender (including card issuers) | 6000–6199 | Off: models built on trade receivables, inventory, operating-cycle accruals, operating cash flow and corporate leverage (e.g. Beneish, Sloan, Altman, DSO, CFO/NI, implied interest rate). Peer-ratio models drop ratios that don't apply. Earnings-release checks use net income only, because banks headline taxable-equivalent revenue. |
 | Broker-dealer or asset manager | 6200–6299 | As for banks |
 | Insurer | 6300–6411 | As for banks, plus the receivable-allowance checks |
-| Real-estate company or REIT | 6500–6553, 6798 | Off: inventory, Altman Z, capex intensity and soft-asset checks |
+| Real-estate company or REIT | 6500–6553, 6798 | Off: inventory, Altman Z, capex intensity, soft-asset checks and the misstatement model |
 | Holding or investment company | 6700–6799 | As for banks |
-| SPAC / shell company | 6770 | Only integrity, governance and disclosure checks |
+| SPAC / shell company | 6770 | As for banks, plus every test that needs operating revenue or a cost base: integrity, governance, reserve, acquisition and disclosure checks remain |
 
 For financial and real-estate profiles, the earnings-management test also drops its small-ROA and real-activity parts, because those companies earn a small return on assets as a matter of course.
 
@@ -400,7 +400,9 @@ intake → hypothesize → plan_evidence → [review_plan] → gather (parallel 
 
 - **Reporting anomalies only.** The app can't verify cash, assets or transactions.
 - **Financial companies** run with the industrial detectors switched off. There are no dedicated bank or insurer models yet, such as loan-loss reserve adequacy, net interest margin outliers or reserve development, so their reports rest mainly on the integrity, governance, disclosure and peer checks.
-- **Peer baselines** use the latest values SEC publishes. They can include peers' later restatements. The company's own numbers are always as first reported.
+- **Industry baselines** (the industry-wide models and the choice of peers) use the latest values SEC publishes, so they can include
+  later restatements. The chosen peers' own figures are as first reported and as known at the year's cutoff, and the company's
+  own numbers are always as first reported.
 - **Segment-level checks** are skipped, because SEC's companyfacts API carries no dimensional facts.
 - **Earnings-call checks and company-specific operating metrics** are skipped. They need licensed transcripts or company-specific extraction.
 - **The supervised misstatement model is a ranking signal, not a probability.** It is trained on weak labels: 8-K Item 4.02 non-reliance filings.

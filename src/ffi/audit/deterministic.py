@@ -72,27 +72,21 @@ class AuditResult:
 
 
 # ------------------------------------------------------------------------------------- helpers
-def _facts_index(ctx) -> dict[tuple[str, str, str], np.ndarray]:
+def _facts_index(ctx) -> dict[tuple[str, str, str, str], np.ndarray]:
     return ctx.store.values_by_filing()  # built once per company and shared by every year of a multi-year review
 
 
-def _concept_name(ev: EvidenceRef) -> str | None:
-    if not ev.concept:
-        return None
-    return ev.concept.split(":", 1)[-1]
-
-
-def _fact_end(ev: EvidenceRef) -> str:
-    """The period end a cited fact is for, from its id ("fact:taxonomy:concept|unit|start|end|accession")."""
+def _fact_period(ev: EvidenceRef) -> tuple[str, str]:
+    """(start, end) of the period a cited fact is for, from its id ("fact:taxonomy:concept|unit|start|end|accession")."""
     parts = ev.node_id.split("|")
-    return parts[3] if ev.node_id.startswith("fact:") and len(parts) == 5 else ""
+    return (parts[2], parts[3]) if ev.node_id.startswith("fact:") and len(parts) == 5 else ("", "")
 
 
 def _fact_matches(idx, e: EvidenceRef) -> bool:
-    """The cited value is what the cited filing reports under the cited concept for the cited period: within 0.05%, and
-    within half a unit for an amount or a share count (rounding). A per-share amount or a rate has no such floor: half a
-    unit would let a cited EPS of $3.64 pass against a filed $3.20."""
-    vals = idx.get((e.accession, _concept_name(e) or "", _fact_end(e)), np.array([]))
+    """The cited value is what the cited filing reports under the cited concept for the cited period (start and end):
+    within 0.05%, and within half a unit for an amount or a share count (rounding). A per-share amount or a rate has no
+    such floor: half a unit would let a cited EPS of $3.64 pass against a filed $3.20."""
+    vals = idx.get((e.accession, (e.concept or "").split(":", 1)[-1], *_fact_period(e)), np.array([]))
     unit = (e.unit or "").lower()
     floor = 0.5 if unit and "/" not in unit and unit != "pure" else 1e-9
     return bool(np.any(np.abs(vals - e.value) <= max(abs(e.value) * 0.0005, floor)))
@@ -111,8 +105,7 @@ def _allowed_numbers(ctx, finding, ledger: list[dict] | None = None) -> list[flo
     vals = [r["value"] for r in facts_table(ctx, finding)]
     for s in finding.signals:
         vals += [x for x in (s.percentile_peer, s.percentile_self) if x is not None]
-        for m in grounding.NUM_RE.finditer(grounding.strip_dates(s.rationale)):  # code-generated detector outputs are a valid source
-            vals += [abs(c) for c in grounding._candidates(m)] + grounding._candidates(m)
+        vals += grounding.numbers_in(s.rationale)  # code-generated detector outputs are a valid source
     for e in ledger or []:
         vals += e.get("numbers", []) + grounding.numbers_in(e.get("text", ""))  # incl. amounts in quoted filing text
     from ffi.detectors.catalog import definition

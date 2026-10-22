@@ -76,8 +76,9 @@ def select_peers(
 ) -> PeerSet:
     """`target_row` supplies the company's own metrics when it is missing from the frames cross-section (IFRS or
     non-USD filers, or revenue tagged with a concept the frames do not sample). Without `size_comparable`
-    (amounts in another currency) peers are matched on margins and growth only. `cache` (CIK -> name and annual
-    panel) lets the years of a multi-year review load each peer once: the panel does not depend on the year."""
+    (amounts in another currency) peers are matched on margins and growth only. Each peer's figures are as first reported
+    and as known on `as_of` (the year's cutoff): a peer year filed later is not compared. `cache` (CIK -> name and full
+    annual panel) lets the years of a multi-year review load each peer once."""
     names = names or {}
     if override:
         chosen = [(c, 0.0) for c in override if c != target_cik]
@@ -117,17 +118,17 @@ def select_peers(
         cik, dist = item
         p = Peer(cik=int(cik), name=names.get(int(cik), str(cik)), distance=float(dist))
         if cache is not None and p.cik in cache:
-            p.name, p.annual = cache[p.cik]
-            return p
-        try:
-            facts = load_companyfacts(client, p.cik, max_age_s=PEER_FACTS_MAX_AGE)
-            p.name = facts.name or p.name
-            p.annual = FactStore(p.cik, facts.raw, as_of).annual("first")
-        except (EdgarError, KeyError, ValueError) as exc:
-            log.warning("peer %s skipped: %s", cik, exc)
-            return p  # not cached: a later year retries it
-        if cache is not None:
-            cache[p.cik] = (p.name, p.annual)
+            p.name, full = cache[p.cik]
+        else:
+            try:
+                facts = load_companyfacts(client, p.cik, max_age_s=PEER_FACTS_MAX_AGE)
+                p.name, full = facts.name or p.name, FactStore(p.cik, facts.raw).annual("first")
+            except (EdgarError, KeyError, ValueError) as exc:
+                log.warning("peer %s skipped: %s", cik, exc)
+                return p  # not cached: a later year retries it
+            if cache is not None:
+                cache[p.cik] = (p.name, full)
+        p.annual = full.known_by(as_of) if full is not None else None
         return p
 
     peers = [p for p in map_concurrent(load, chosen, workers=6) if isinstance(p, Peer)]

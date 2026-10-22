@@ -17,7 +17,7 @@ from ffi.peers.select import PeerSet
 from ffi.profiles import Profile
 from ffi.resolve.resolver import CompanyRef
 from ffi.text.document import TextDoc
-from ffi.xbrl.canonical import BY_ID
+from ffi.xbrl.canonical import BY_ID, basis
 from ffi.xbrl.facts import FactStore, Panel
 
 STATUTORY_TAX = 0.21
@@ -116,10 +116,22 @@ class RunContext:
         return (self.A_latest if latest else self.A).get(item, p)
 
     def avg(self, item: str, k: int = 0) -> float:
-        cur, prev = self.a(item, k), self.a(item, k + 1)
-        if np.isfinite(cur) and np.isfinite(prev):
-            return (cur + prev) / 2
-        return cur
+        """Two-year average; NaN without both years (a single year's balance is another measure)."""
+        return (self.a(item, k) + self.a(item, k + 1)) / 2
+
+    def basis(self, item: str, k: int = 0) -> str | None:
+        """The basis key of `item` in year k (canonical.DIFFERENT_BASIS; "" = the item's main basis), None when missing."""
+        p = self.period_at(k)
+        rec = self.A.prov.get((item, p)) if p is not None else None
+        return basis(item, rec.concept) if rec is not None and np.isfinite(self.a(item, k)) else None
+
+    def ni_parent(self, k: int = 0) -> float:
+        """Net income attributable to the company's shareholders: net income tagged including noncontrolling interests has
+        their share taken out when it is reported, and is NaN otherwise (equity and EPS are the parent's)."""
+        ni = self.a("NET_INCOME", k)
+        if self.basis("NET_INCOME", k) != "including noncontrolling interests":
+            return ni
+        return ni - self.a("NCI_INCOME", k)
 
     def hist(self, item: str, n: int = 6) -> pd.Series:
         s = self.A.series(item)

@@ -37,7 +37,7 @@ from ffi.report import snapshot
 from ffi.resolve.resolver import CompanyRef, resolve
 from ffi.scoring.engine import REPORTED, ScoreResult, score
 from ffi.text.document import TextDoc, build_doc, find_auditor
-from ffi.xbrl.facts import FactStore, load_companyfacts
+from ffi.xbrl.facts import FactStore, fiscal_year_of, load_companyfacts
 
 log = logging.getLogger(__name__)
 
@@ -313,6 +313,17 @@ class Prepared:
     peer_cache: dict[int, Any] = field(default_factory=dict)
 
 
+class MissingYear(ValueError):
+    """A fiscal year with no annual figures as first reported by its cutoff."""
+
+
+def require_first_reported(A0, focus: pd.Timestamp, cutoff: date) -> None:
+    """The SEC's data can hold no annual figures for a year as first reported by its cutoff (SPGI's FY2024 appears only in the
+    2026 report, restated): the year is not analysed, never replaced by the one before it."""
+    if not (focus in A0.values.index and A0.values.loc[focus].notna().any()):
+        raise MissingYear(f"the SEC's data holds no figures for FY{fiscal_year_of(focus)} as first reported by {cutoff}")
+
+
 @dataclass
 class YearAnalysis:
     """One fiscal year analysed: detectors run and scored, before any investigation."""
@@ -358,6 +369,7 @@ def analyse_year(prep: Prepared, opts: RunOptions, focus: pd.Timestamp, run_dir:
         if cutoff < as_of:  # only what was public by the end of the year's filing season
             store = store.restricted(cutoff)
         A0, AL0, Q = store.annual("first"), store.annual("latest"), store.quarterly("first")  # memoized per store
+        require_first_reported(A0, focus, cutoff)
     keep = [p for p in A0.values.index if p <= focus][-(opts.years + 3):]
     A = dataclasses.replace(A0, values=A0.values.loc[keep])
     A_latest = dataclasses.replace(AL0, values=AL0.values.loc[[p for p in AL0.values.index if p in keep]])
@@ -391,7 +403,7 @@ def analyse_year(prep: Prepared, opts: RunOptions, focus: pd.Timestamp, run_dir:
                 prior = A.periods[-2] if len(A.periods) > 1 else None
                 own["REV_PRIOR"] = A.get("REVENUE", prior) if prior is not None else float("nan")
                 peers = select_peers(client, company.cik, sorted(industry), digits,
-                                     xsec[xsec["cik"].isin(industry)], focus, tuning["peers"]["count"], as_of, override,
+                                     xsec[xsec["cik"].isin(industry)], focus, tuning["peers"]["count"], cutoff, override,
                                      target_row=own, size_comparable=store.currency == "USD", cache=prep.peer_cache)
         except EdgarError as e:
             log.warning("peer data unavailable: %s", e)
@@ -450,27 +462,43 @@ def run(opts: RunOptions, choose=None, progress: Callable[[str], None] | None = 
             agent_cases = investigate(ctx, sc, run_dir, run_id, opts, ui=agent_ui)
 
     with step("Independent audit of findings"):
-        audit_findings(ctx, sc)
+        from ffi.scoring.engine import apply_audit
+
+        audit_findings(sc.findings, lambda f: ctx)
+        apply_audit(sc)
     with step("Explaining findings in plain language"):
         from ffi.report.explain import explain_findings
 
         explain_findings(sc.findings[:REPORTED], lambda f: ctx)
 
-    manifest = build_manifest(ctx, results, sc, run_id, opts, timings, year.kg_counts, prep.cf)
-    out = RunOutput(ctx, results, sc, run_dir, manifest, timings, agent_cases)
-    with step("Rendering report"):
-        from ffi.report.render import render, to_json
+    from ffi.detectors.base import REGISTRY
 
+    manifest = build_manifest(
+        ctx, run_id, opts, timings, year.kg_counts, prep.cf, sc, [{"accession": d.accession, "url": d.url} for d in ctx.docs + ctx.releases],
+        focus_period=ctx.focus_label, focus_end=str(ctx.focus.date()),
+        detectors={r.id: {"version": REGISTRY[r.id].version, "module": REGISTRY[r.id].fn.__module__, "status": r.status,
+                          "reason": r.reason, "seconds": round(r.seconds, 3), "flagged": r.flagged} for r in results},
+        peers={"method": ctx.peers.method if ctx.peers else None, "ciks": [p.cik for p in ctx.peers.loaded] if ctx.peers else []})
+    out = RunOutput(ctx, results, sc, run_dir, manifest, timings, agent_cases)
+    finish(out, opts, step, company.cik)
+    return out
+
+
+def finish(out, opts: RunOptions, step: Step, cik: int) -> None:
+    """Render the report, write the manifest, save the run for `anomaly-report render`, then remove the working files and
+    the reports this one supersedes."""
+    from ffi.report.render import render, to_json
+
+    with step("Rendering report"):
         out.files = render(out, opts.formats)
-    (run_dir / "manifest.json").write_text(to_json(manifest), encoding="utf-8")
+    (out.run_dir / "manifest.json").write_text(to_json(out.manifest), encoding="utf-8")
     try:
-        snapshot.save(out)  # lets `anomaly-report render` rebuild the report without re-running
+        snapshot.save(out)
     except Exception as e:  # noqa: BLE001 - the report is already written; only re-rendering is lost
         log.warning("could not save the run for re-rendering: %s", e)
     if not opts.keep_artifacts:
-        _remove_working_files(run_dir, ctx.kg, agent_cases)
-    _remove_superseded_reports(run_dir, company.cik)
-    return out
+        _remove_working_files(out.run_dir, out.ctx.kg, out.agent_cases)
+    _remove_superseded_reports(out.run_dir, cik)
 
 
 def _remove_superseded_reports(run_dir: Path, cik: int) -> None:
@@ -494,11 +522,15 @@ def _remove_superseded_reports(run_dir: Path, cik: int) -> None:
 
 
 def _remove_working_files(run_dir: Path, kg, cases: list[Any]) -> None:
-    """The graph database and agent checkpoints are only working files once the report is written (4-7 MB per run).
-    Checkpoints are kept when an investigation paused or failed, so `--resume` can continue it."""
+    """The graph databases (one per year in a multi-year review) and agent checkpoints are only working files once the
+    report is written (4-7 MB a year). Checkpoints are kept when an investigation paused or failed, so `--resume` can
+    continue it."""
+    import gc
+
     with contextlib.suppress(Exception):
         kg.con.close()
-    targets = [run_dir / "kg.duckdb", run_dir / "kg.duckdb.wal"]
+    gc.collect()  # release graph-database handles still held by finished years before deleting their files
+    targets = list(run_dir.glob("kg*.duckdb*"))
     if not any(isinstance(c, dict) and c.get("status") in ("paused", "error", "running") for c in cases):
         targets.append(run_dir / "checkpoints.sqlite")
     for f in targets:
@@ -508,24 +540,24 @@ def _remove_working_files(run_dir: Path, kg, cases: list[Any]) -> None:
             log.debug("could not remove %s: %s", f, e)
 
 
-def audit_findings(ctx: RunContext, sc: ScoreResult) -> None:
-    """Independent audit with a correction loop (max 3 rounds) for every reported finding."""
+def audit_findings(findings, context_of: Callable[[Any], RunContext]) -> None:
+    """Independent audit with a correction loop (max 3 rounds) of every reported finding, each in its own context (its own
+    year in a multi-year review). A finding without a narrative is given the one written from its test results."""
     from ffi.audit.deterministic import run_audit
-    from ffi.scoring.engine import apply_audit, audit_reported, template_narrative
+    from ffi.scoring.engine import audit_reported, template_narrative
 
     def one(f) -> None:
         if not f.narrative:
             f.narrative = template_narrative(f)
-        f.audit = run_audit(ctx, f, template_narrative, ledger=f.ledger)
+        f.audit = run_audit(context_of(f), f, template_narrative, ledger=f.ledger)
 
-    audit_reported(sc.findings, one)
-    apply_audit(sc)
+    audit_reported(findings, one)
 
 
-def build_manifest(ctx: RunContext, results, sc: ScoreResult, run_id: str, opts: RunOptions, timings, kg_counts, cf) -> dict:
-    from ffi.detectors.base import REGISTRY
-
-    src_hash = cf.sha256  # of the downloaded file (re-serialising the parsed JSON took seconds for large filers)
+def build_manifest(ctx: RunContext, run_id: str, opts: RunOptions, timings, kg_counts, cf, scored, documents, **specific) -> dict:
+    """What reproduces a run: versions, options, company and profile, source data (the hash of the downloaded companyfacts
+    file) and documents, AI use, result and timings; `specific` adds the single-year or multi-year parts."""
+    llm = ctx.llm
     return {
         "run_id": run_id,
         "package_version": __version__,
@@ -534,20 +566,15 @@ def build_manifest(ctx: RunContext, results, sc: ScoreResult, run_id: str, opts:
                     "annual_form": ctx.annual_form, "currency": ctx.currency},
         "profile": ({"key": ctx.profile.key, "label": ctx.profile.label, "not_applicable": ctx.profile.excluded,
                      "excluded_ratios": sorted(ctx.profile.excluded_ratios)} if ctx.profile else None),
-        "focus_period": ctx.focus_label, "focus_end": str(ctx.focus.date()), "as_of": str(ctx.as_of),
+        "as_of": str(ctx.as_of),
         "options": {k: (str(v) if isinstance(v, Path | date) else v) for k, v in opts.__dict__.items()},
         "mode": ctx.mode,
-        "detectors": {r.id: {"version": REGISTRY[r.id].version, "module": REGISTRY[r.id].fn.__module__, "status": r.status, "reason": r.reason,
-                             "seconds": round(r.seconds, 3), "flagged": r.flagged} for r in results},
-        "peers": {"method": ctx.peers.method if ctx.peers else None,
-                  "ciks": [p.cik for p in ctx.peers.loaded] if ctx.peers else []},
+        **specific,
         "kg": kg_counts,
-        "sources": {"companyfacts_sha256": src_hash,
-                    "documents": [{"accession": d.accession, "url": d.url} for d in ctx.docs + ctx.releases]},
-        "llm": ({"backend": ctx.llm.backend, "reasoning_model": ctx.llm.reasoning_model, "extraction_model": ctx.llm.extraction_model,
-                 "calls": ctx.llm.spend.calls, "usd": round(ctx.llm.spend.usd, 4), "by_purpose": ctx.llm.spend.by_purpose}
-                if ctx.llm else None),
-        "risk_index": sc.risk_index, "band": sc.band,
-        "audit": {f.id: f.audit.label for f in sc.findings if f.audit is not None},
+        "sources": {"companyfacts_sha256": cf.sha256, "documents": documents},
+        "llm": ({"backend": llm.backend, "reasoning_model": llm.reasoning_model, "extraction_model": llm.extraction_model,
+                 "calls": llm.spend.calls, "usd": round(llm.spend.usd, 4), "by_purpose": llm.spend.by_purpose} if llm else None),
+        "risk_index": scored.risk_index, "band": scored.band,
+        "audit": {f.id: f.audit.label for f in scored.findings if f.audit is not None},
         "timings_s": timings,
     }

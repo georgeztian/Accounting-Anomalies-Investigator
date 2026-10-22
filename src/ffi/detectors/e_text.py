@@ -27,6 +27,7 @@ from ffi.detectors.textnum import (
     sentence_end,
     sentence_start,
     statement_period,
+    states_amount,
 )
 from ffi.llm import LLMError
 from ffi.text.document import TextDoc
@@ -329,12 +330,17 @@ def _release_period_totals(ctx: RunContext, released: pd.Timestamp) -> dict[str,
     if q is None:
         return None
     fy = next((p for p in ctx.A.periods if abs((p - q).days) <= 8), None)
+    def candidates(panel, p, items) -> list[float]:
+        vals = [panel.get(i, p) for i in items]
+        if "NET_INCOME" in items:  # the parent's share when only the total including noncontrolling interests is tagged
+            vals.append(panel.get("NET_INCOME_INCL_NCI", p) - panel.get("NCI_INCOME", p))
+        return [v for v in vals if finite(v)]
+
     out: dict[str, dict[str, list[float]]] = {}
     for key, items in RELEASE_ITEMS.items():
         if key == "REVENUE" and ctx.profile is not None and ctx.profile.key == "bank":
             continue  # banks headline revenue on a managed (taxable-equivalent) basis, a non-GAAP figure
-        out[key] = {"Q": [v for v in (ctx.Q.get(i, q) for i in items) if finite(v)],
-                    "FY": [v for v in (ctx.A.get(i, fy) for i in items) if finite(v)] if fy is not None else []}
+        out[key] = {"Q": candidates(ctx.Q, q, items), "FY": candidates(ctx.A, fy, items) if fy is not None else []}
     return out if any(v["Q"] or v["FY"] for v in out.values()) else None
 
 
@@ -905,8 +911,11 @@ def e02(ctx: RunContext):
         raise SkipDetector(f"LLM unavailable: {e}") from e
     sigs = []
     for a in e1:
+        # the same estimate in both years: the same description, or the only one of its kind in each year. Two useful lives
+        # (buildings, equipment) are never compared with each other
         b = next((x for x in e0 if x.name == a.name and x.unit == a.unit and x.description[:20].lower() == a.description[:20].lower()), None)
-        b = b or next((x for x in e0 if x.name == a.name and x.unit == a.unit), None)
+        same_kind = [[x for x in e if x.name == a.name and x.unit == a.unit] for e in (e1, e0)]
+        b = b or (same_kind[1][0] if len(same_kind[0]) == len(same_kind[1]) == 1 else None)
         if b is None or a.name == "other":
             continue
         mid1, mid0 = (a.value_low + a.value_high) / 2, (b.value_low + b.value_high) / 2
@@ -956,6 +965,9 @@ METRIC_FN = {
     "net income": lambda ctx, k: ctx.a("NET_INCOME", k),
     "cash from operations": lambda ctx, k: ctx.a("CFO", k),
 }
+METRIC_ITEMS = {"revenue": ("REVENUE",), "gross margin": ("REVENUE", "COGS"), "gross profit": ("REVENUE", "COGS"),
+                "operating expenses": ("REVENUE", "COGS", "OPERATING_INCOME"), "costs and expenses": ("REVENUE", "OPERATING_INCOME"),
+                "operating income": ("OPERATING_INCOME",), "net income": ("NET_INCOME",), "cash from operations": ("CFO",)}
 PERCENT_CLAIM_RE = re.compile(r"(?i)percentage|basis points?|\bpoints?\b|as a percent|margin rate|% of (?:net |total )?(?:sales|revenues?)")
 
 
@@ -998,8 +1010,12 @@ def e04(ctx: RunContext):
         loc = locate(cur, c.quote)
         if loc is None:
             continue
-        if (SUBSET_RE.search(c.quote) or _part_of_business(c) or (metric != "gross margin" and RATIO_CLAIM_RE.search(c.quote))):
-            continue  # a part of the business ("digitally-enabled comparable sales", "Products gross margin") or a ratio
+        if (SUBSET_RE.search(c.quote) or _part_of_business(c) or (metric != "gross margin" and RATIO_CLAIM_RE.search(c.quote))
+                or QUARTER_WORDS.search(c.quote) or GUIDANCE_RE.search(c.quote)
+                or any(ctx.basis(i) != ctx.basis(i, 1) for i in METRIC_ITEMS[metric])):
+            # a part of the business ("digitally-enabled comparable sales", "Products gross margin"), a ratio, a quarter, an
+            # expectation, or a measure reported under another concept in one of the two years: not the full-year total
+            continue
         # the same company-wide claim made twice in MD&A is checked (and reported) once; a skipped claim about a part of
         # the business ("Products gross margin decreased") must not hide the company-wide one that follows it
         key = (metric, c.direction, c.magnitude_pct)
@@ -1108,7 +1124,8 @@ def e09(ctx: RunContext):
 
 class Covenant(BaseModel):
     metric: Literal["max_leverage_debt_to_ebitda", "min_interest_coverage", "min_net_worth", "other"]
-    threshold: float
+    threshold: float = Field(description="A ratio (3.5 for 3.50 to 1.00), or for min_net_worth the amount in full units "
+                                         "of currency ($500 million = 500000000)")
     quote: str
 
 
@@ -1127,13 +1144,14 @@ def covenant_signal(ctx: RunContext):
                              purpose="C.BS.03 covenants")
     except LLMError as e:
         raise SkipDetector(f"LLM unavailable: {e}") from e
-    ebitda = ctx.a("OPERATING_INCOME") + (ctx.a("DA") if finite(ctx.a("DA")) else 0)
+    # without D&A, or with D&A that includes impairment, there is no EBITDA (operating income is another measure)
+    ebitda = ctx.a("OPERATING_INCOME") + ctx.a("DA") if not ctx.basis("DA") else float("nan")
     debt = V(ctx.A, ctx.focus).debt()  # total borrowings, no part counted twice
     out = []
     for c in res.covenants:
         loc = locate(cur, c.quote)
-        if loc is None or c.metric == "other":
-            continue
+        if loc is None or c.metric == "other" or (c.metric == "min_net_worth" and not states_amount(c.quote, c.threshold)):
+            continue  # a net-worth floor is compared only at the scale the covenant's own words state
         if c.metric == "max_leverage_debt_to_ebitda":
             actual = safe_div(debt, ebitda)
             headroom = safe_div(c.threshold - actual, c.threshold)

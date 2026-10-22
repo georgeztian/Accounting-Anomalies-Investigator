@@ -13,13 +13,18 @@ from ffi.report import charts
 from ffi.report import plain as P
 from ffi.report.model import (
     DISCLAIMER,
+    KEY_ITEMS,
     NONE_TEXT,
     SET_ASIDE_NOTE,
+    TEXT_TESTS,
     _ev_dict,
-    _resolution,
+    audit_summary,
+    company_block,
     finding_block,
     flag_level,
+    key_value,
     peer_text,
+    profile_block,
     run_notes,
     set_aside_blocks,
     test_families,
@@ -27,9 +32,6 @@ from ffi.report.model import (
 from ffi.scoring.span import years_text
 
 MAX_SIGNALS = 15  # test results shown per merged anomaly (newest first); the JSON keeps all
-KEY_ITEMS = (("Revenue", "REVENUE"), ("Net income", "NET_INCOME"), ("Cash from operations", "CFO"),
-             ("Total assets", "TOTAL_ASSETS"), ("Shareholders' equity", "EQUITY"))
-TEXT_TESTS = ("E.01", "E.02", "E.03", "E.04", "C.REV.07", "C.REV.11", "C.AR.04", "E.09")
 
 
 def _level(v: float) -> int:
@@ -72,7 +74,7 @@ def build_span_model(out) -> dict[str, Any]:
         "Net income vs cash from operations", periods,
         [{"name": "Net income", "values": [y.ctx.a("NET_INCOME") for y in years], "cls": "s1"},
          {"name": "Cash from operations", "values": [y.ctx.a("CFO") for y in years], "cls": "s2"}], "money")
-    key_numbers = [{"label": lab, "values": [fmt_money(y.ctx.a(item)) for y in years]} for lab, item in KEY_ITEMS]
+    key_numbers = [{"label": lab, "values": [key_value(y.ctx, item) for y in years]} for lab, item in KEY_ITEMS]
     areas = sorted(span.area_by_year.items(), key=lambda kv: -max(kv[1]))
     area_rows = [{"area": P.area(a), "values": [{"v": v, "level": _level(v)} for v in vals]} for a, vals in areas]
 
@@ -123,19 +125,14 @@ def build_span_model(out) -> dict[str, Any]:
     reported = span.findings[:12]
     llm = out.manifest.get("llm")
     return {
-        "company": {"name": ctx.company.display_name or ctx.company.name, "ticker": ctx.company.ticker,
-                    "sic_description": " ".join((ctx.company.sic_description or "").split()),
-                    "match_note": _resolution(ctx), "warnings": [P.plain(w) for w in ctx.company.warnings], "auditor": ctx.auditor},
+        "company": company_block(ctx),
         "periods": [P.plain(p, expand=False).capitalize() for p in periods],
         "period": f"{P.plain(periods[0], expand=False).capitalize()} to {P.plain(periods[-1], expand=False)}",
         "first_end": span.yearly[0]["period_end"], "last_end": span.yearly[-1]["period_end"], "years": n,
         "as_of": str(getattr(ctx, "cutoff", None) or ctx.as_of), "generated": datetime.now().strftime("%d %B %Y"),
         "analysis_type": ("Automated checks of the reported figures for each year, plus AI-assisted reading of the filings' text"
                           if llm else "Automated checks of the reported figures and filing text for each year"),
-        "profile": ({"label": ctx.profile.label, "description": P.plain(ctx.profile.description),
-                     "notes": [P.plain(x) for x in ctx.profile.notes], "excluded": len(ctx.profile.excluded)} if ctx.profile else
-                    {"label": "Industrial / commercial company", "description": "Operating company; the full test set applies.",
-                     "notes": [], "excluded": 0}),
+        "profile": profile_block(ctx),
         "currency": ctx.currency,
         "risk": {"index": span.risk_index, "band": span.band},
         "yearly": yearly,
@@ -147,11 +144,7 @@ def build_span_model(out) -> dict[str, Any]:
         "areas": area_rows,
         "findings": findings,
         "set_aside": set_aside_blocks(getattr(span, "set_aside", [])), "set_aside_note": SET_ASIDE_NOTE,
-        "audit_summary": {
-            "verified": sum(1 for f in reported if f.audit and f.audit.status == "verified"),
-            "corrected": sum(1 for f in reported if f.audit and f.audit.status == "verified_after_corrections"),
-            "unverified": sum(1 for f in reported if f.audit and f.audit.status == "unverified"),
-        },
+        "audit_summary": audit_summary(reported),
         "tests": tests,
         "flag_at": flag_at,
         "text_changes": text_changes,

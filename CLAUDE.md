@@ -11,7 +11,10 @@ first reported), unit and scale, sign, and the same measure across years; and mu
 
 - Never guess. Period, scope, basis and unit come only from explicit evidence (label, column header, sentence, XBRL concept).
   Missing or ambiguous evidence means skip the comparison and say so. Review every fallback (`else`, `or`, defaults).
-- Anchor figures parsed from text to the filed XBRL figures for the same and neighbouring periods before using them.
+- Anchor figures parsed from text to the filed XBRL figures for the same and neighbouring periods before using them; use
+  a figure the AI read only when its quoted text states it (digits and scale: `textnum.states_amount`).
+- Reuse the guards: `ctx.basis`/`need_same_basis`, `V.same`/`mixed_basis` (one concept basis across years and peers),
+  `ratio_with_peers`, `quarters_in_year`, `Panel.known_by` (the year's cutoff), `ctx.ni_parent`.
 - Fix the root cause and every sibling use of the same pattern, not one case.
 - Every fix: a regression test from the real wording or layout, and the change documented in `Algorithms.md`.
 

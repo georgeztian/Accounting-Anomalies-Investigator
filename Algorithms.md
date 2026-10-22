@@ -127,8 +127,9 @@ items has a priority-ordered list of us-gaap concepts, followed by ifrs-full con
 different concepts in different years would show changes that are only tagging changes.
 
 **How.** For each item and period the highest-priority concept that is reported wins. For depreciation and
-amortization (`DA`) the largest candidate value in the same filing wins instead, because companies often tag only a
-component (such as depreciation alone) with a concept that ranks higher. Totals rank before components: for revenue, total revenue (`Revenues`, then
+amortization (`DA`) the largest candidate value on the item's main basis in the same filing wins instead, because companies
+often tag only a component (such as depreciation alone) with a concept that ranks higher; IFRS depreciation, amortisation
+and impairment in one line is used only when no plain D&A is reported, and is marked as another basis. Totals rank before components: for revenue, total revenue (`Revenues`, then
 `RevenuesNetOfInterestExpense`) comes before ASC 606 contract revenue, which at banks and card issuers leaves out net
 interest income. Monetary items accept only facts in the
 **reporting currency**, chosen as the unit used in the most annual-report filings, so amounts are never mixed across
@@ -137,11 +138,19 @@ currencies.
 **Same basis.** Some fallback concepts measure a narrower or broader amount than the item's main concepts: general and
 administrative expense for SG&A, payables together with accrued liabilities, net income including noncontrolling
 interests, cash including restricted cash, PP&E including finance-lease assets, pre-tax income before the share of equity-method income, long-term debt including its
-current maturities, current debt including short-term borrowings (`DIFFERENT_BASIS` in `canonical.py`). Two values
-of an item are compared only when both are on the same basis:
+current maturities, current debt including short-term borrowings, an allowance for current and non-current receivables,
+notes receivable including current ones, IFRS trade and other receivables or payables, D&A including impairment
+(`DIFFERENT_BASIS` in `canonical.py`). Two values of an item are compared only when both are on the same basis:
 
+- every comparison of an item across years (a change, a growth rate, a roll-forward, a ratio that reads several years)
+  needs it on one basis in all of them; otherwise the comparison is not made: the test is skipped with that reason, a
+  history year or peer is left out, a score component is not computed (`V.same`, `need_same_basis`, `mixed_basis`);
 - the standard assessment (section 3.5) leaves out a history year, and a peer, whose inputs were on another basis than
   the focus year's;
+- equity, retained earnings and EPS move with the parent's share of income: net income tagged including noncontrolling
+  interests has their share taken out, and the test is skipped when that share is not reported (`ni_parent`);
+- a two-year average needs both years: a single year's balance is another measure;
+- a part on a broader basis is no part of a subtotal (cash including restricted cash, inventory before reserves, A.02);
 - **SG&A** is general and administrative expense plus selling and marketing expense where a company reports them
   apart (C.EXP.06); **depreciable PP&E** is gross PP&E less construction in progress and land where both are tagged and
   the gross tag includes them (C.EXP.03, B.06);
@@ -187,8 +196,17 @@ and only filings public by the `--as-of` date, makes the analysis reproduce what
   Q4 = FY - (Q1 + Q2 + Q3)
   ```
 
+  Q1-Q3 are the three quarters after the previous fiscal year end, never that year's fourth quarter: a 16-week first
+  quarter (Jack in the Box) is no quarter, and the three quarter ends before the year end were the previous year's Q4,
+  Q2 and Q3. Without three such quarters nothing is derived (`quarters_in_year`).
+
 - **Share-count scale fix**: if `|NI / EPS|` equals the tagged share count × 1,000,000 or × 1,000 within 5%, the
   count was tagged in millions or thousands; it is rescaled and the correction is noted in the report.
+
+A year whose annual figures as first reported by its cutoff are absent from the SEC's data (S&P Global's FY2024 appears
+only in the 2026 report, restated for the Mobility spin-off) is not analysed, and is never replaced by the year before it.
+A single-year run for it stops with that reason; a multi-year review skips it, says so in the report's notes, and counts
+recurrence over the years reviewed (at least two are needed).
 
 The processed company data is cached and refreshed daily.
 
@@ -204,8 +222,9 @@ of firms to estimate what a typical company in the industry looks like.
 
 A fiscal year belongs to calendar year y if it ends in July of y or later, otherwise to y-1, matching how the SEC
 assigns frames. Each item's concepts keep the canonical priority order (total revenue net of interest expense before
-contract revenue, so a bank's or card issuer's revenue is its total). Frames carry each firm's latest value, so peer baselines can include peers' later restatements; the
-company under review always uses its own first-reported values.
+contract revenue, so a bank's or card issuer's revenue is its total). Frames carry each firm's latest value, so industry
+baselines (the cross-sectional models and peer selection) can include later restatements; the selected peers' own figures
+are as first reported and as known at the year's cutoff (section 2.4), and the company always uses its own first-reported values.
 
 ### 2.4 Industry universe and peer selection (`peers/universe.py`, `peers/select.py`)
 
@@ -237,15 +256,16 @@ accounting choices.
 
    Size weighs most because scale drives cost structure, customer mix and accounting complexity. Missing features take
    the universe median. For a company reporting in another currency the two size features are dropped.
-3. The 15 nearest (configurable) are the peers. Each peer's own annual data is then loaded, and comparisons use the
-   peer fiscal year closest to the company's (within 183 days).
+3. The 15 nearest (configurable) are the peers. Each peer's own annual data is then loaded as first reported and as
+   known at the year's cutoff (section 2.2; a peer year filed later is not there), and comparisons use the peer fiscal
+   year closest to the company's (within 183 days).
 
 ### 2.5 Filing text (`text/document.py`, `text/verify.py`)
 
 Annual reports are converted from HTML to text, split into Items (Items 1, 1A, 7, 7A, 8, 9A and so on; 20-F items are
 mapped onto their 10-K equivalents; Exhibit 13 and 40-F exhibits are appended when the financial statements are filed
 as exhibits) and into paragraphs with fixed character positions. Every quote used anywhere must be found verbatim at
-its position, after normalizing whitespace, dashes and quote marks. Earnings releases are the EX-99 exhibits of 8-K
+its position, after normalizing whitespace, dashes, quote marks and letter case. Earnings releases are the EX-99 exhibits of 8-K
 Item 2.02 filings: the six latest filed between 430 days before the fiscal year end and 120 days after it that announce
 a quarter of that year or earlier (a first-quarter release filed within 120 days of the year end, as American Express
 files it, announces the next year and is not read), so a past year is tested against its own releases rather than
@@ -336,7 +356,8 @@ s = +1 when a higher ratio is worse, -1 when a lower ratio is worse
 ```
 
 Own history needs 3 or more years and peers 5 or more. A history year whose inputs were reported on a different basis
-from the focus year's (section 2.1) is left out of H. With S_s and S_p the severities from 3.3:
+from the focus year's (section 2.1), or that reads an item on different bases in different years, is left out of H; a
+focus-year ratio that does so is not assessed. With S_s and S_p the severities from 3.3:
 
 ```
 severity = 0.55 × S_s + 0.45 × S_p + 0.15 × min(S_s, S_p)    both baselines available
@@ -411,18 +432,22 @@ tol is the tolerance for rounding and untagged minor items, f the size at which 
   0.5%, full at 3%. Gross profit below `Rev - COGS` by up to a quarter of revenue is not counted (gross profit on
   product sales, with membership or other fees outside it: Costco, $3.35B of $152.7B); gross profit above it is. The
   current-asset excess is the smaller of the two readings with and without short-term investments, which are often a part
-  of cash and equivalents (Target: "included short-term investments of $4,611 million").
+  of cash and equivalents (Target: "included short-term investments of $4,611 million"). Cash tagged including restricted
+  cash (often non-current) and inventory tagged before reserves are not parts of current assets and are left out.
 - **Why it works**: statements that do not add up point to manual edits or late changes, which reduce confidence in
   every ratio built on them.
 - **Innocent causes**: a subtotal that includes a line not tagged separately.
 
 ### A.03 Cash roll-forward
 
-- **Computes**: `e = (Cash_t - Cash_t-1) - (CFO + CFI + CFF + FX effect + net cash of discontinued operations)`, with cash
+- **Computes**: `e = (Cash_t - Cash_t-1) - (CFO + CFI + CFF + FX effect [+ net cash of discontinued operations])`, with cash
   including restricted cash. The effect of exchange rates is read from the disposal-group variant of the concept too
-  (Goldman Sachs 2025), and the cash of discontinued operations is its own line when the three totals are those of
-  continuing operations (Disney 2019: $10.97B). Base
-  `max(|Cash_t|, |CFO|)`, tol 1%, full at 5%. Skipped when cash includes restricted cash in one year and not the other.
+  (Goldman Sachs 2025). The cash of discontinued operations is a line of its own beside continuing-operations totals
+  (Disney 2019: $10.97B) or already inside the totals, and neither the tags nor the totals say which reliably (of 172
+  company-years that tag it, 42 tie only without it and 52 only with it, whatever the tags): the smaller residual of the
+  two readings counts, so the line is counted at most once and a break is reported only when neither presentation
+  reconciles. Base `max(|Cash_t|, |CFO|)`, tol 1%, full at 5%. Skipped when cash includes restricted cash in one year and
+  not the other.
 - **Why it works**: cash is the hardest figure to manipulate because it can be confirmed with banks. A cash-flow
   statement that does not reconcile to the balance sheet suggests the two were prepared inconsistently.
 - **Innocent causes**: restricted-cash definitions, discontinued operations.
@@ -431,8 +456,9 @@ tol is the tolerance for rounding and untagged minor items, f the size at which 
 
 - **Computes**: `e = E_t - (E_t-1 + NI + OCI - dividends - buybacks + shares issued + stock compensation + convertible
   equity components - taxes withheld on net share settlement + shares issued for acquisitions + converted securities +
-  other tagged issuance)`. Shares issued is the larger of the cash proceeds and the statement of equity's total (dividend
-  reinvestment and forward sales settled later are in the second only: Realty Income 2019). Dividends are those declared; when only cash dividends paid are tagged they are adjusted by the
+  other tagged issuance)`, with NI the parent's share (section 2.1). Shares issued is the larger of the cash proceeds and the
+  statement of equity's new issues plus employee-plan purchases (dividend reinvestment and forward sales settled later are
+  in the second only: Realty Income 2019; the cash employees pay for plan shares can be in both, so it counts once). Dividends are those declared; when only cash dividends paid are tagged they are adjusted by the
   change in dividends payable (Progressive declares an annual dividend in December and pays it in January), and used
   alone only when that change is not tagged. Buybacks are the cash paid, else the treasury stock acquired as the
   statement of equity reports it. Base `max(|E_t|, |E_t-1|)`, tol 4%, full at 15%, then × 0.7; halved again when noncontrolling
@@ -445,7 +471,7 @@ tol is the tolerance for rounding and untagged minor items, f the size at which 
 
 ### A.05 Retained-earnings roll-forward
 
-- **Computes**: `e = RE_t - (RE_t-1 + NI - dividends)`, with dividends measured as in A.04. If e is negative and no larger than 1.1 × (buybacks + taxes
+- **Computes**: `e = RE_t - (RE_t-1 + NI - dividends)`, with NI the parent's share and dividends measured as in A.04. If e is negative and no larger than 1.1 × (buybacks + taxes
   paid on net share settlement of stock awards), the residual is treated as explained; if dividends exceed net income
   and e is positive, the excess dividend is deducted. Base `max(|NI|, 0.1 × |RE_t|)`, tol 5%, full at 30%.
 - **Why it works**: retained earnings should move only through profit and distributions. Other movements can be
@@ -478,7 +504,7 @@ tol is the tolerance for rounding and untagged minor items, f the size at which 
 - **Computes**: `unexplained = dPP&E gross - capex - 0.5 × acquisitions - finance-lease additions - (unpaid capex_t -
   unpaid capex_t-1)` (only positive gaps count). Base prior gross PP&E, tol 3%, full at 15%. Oracle 2026: gross PP&E
   +$63.1B, cash capex $55.7B, and finance-lease additions of $4.9B and capex accrued but unpaid of $5.3B ($1.4B a year
-  earlier) explain the rest.
+  earlier) explain the rest. Skipped when gross PP&E includes finance-lease assets in one year only (section 2.1).
 - **Why it works**: fixed assets that grow faster than the cash spent on them can mean operating costs were
   capitalized (moved from expense to assets, raising profit), or assets were acquired through non-cash financing that
   deserves disclosure. Disposals would make the gap larger, so the test is conservative.
@@ -489,7 +515,8 @@ tol is the tolerance for rounding and untagged minor items, f the size at which 
 - **Computes**: `e = allowance_t - (allowance_t-1 + provision - write-offs)`. Base the larger allowance, tol 10%, full
   at 50%. A positive residual in a year when cash paid for acquisitions exceeds 10% of prior-year assets has its severity
   halved, because allowance taken on with acquired receivables is a roll-forward item the provision and write-off tags
-  do not carry (Waste Management 2024: $7.49B for Stericycle, allowance $30M to $165M).
+  do not carry (Waste Management 2024: $7.49B for Stericycle, allowance $30M to $165M). Skipped when the allowance covers
+  current receivables in one year and all receivables in the other.
 - **Why it works**: the allowance for doubtful accounts is a judgment-based reserve. Movements its roll-forward cannot
   explain may be unexplained reserve adjustments that move profit.
 - **Innocent causes**: recoveries, acquisitions and currency effects, which are often untagged.
@@ -512,7 +539,7 @@ Needs segment-level (dimensional) XBRL, which the SEC's companyfacts data does n
 ### A.12 EPS consistency
 
 - **Computes**: `d = NI / diluted shares - diluted EPS` (NI is the income for diluted EPS, after preferred dividends,
-  when the company tags it: Boeing 2025, 2,235 - 345 = 1,890 over 762.3 = 2.48), tolerance `max(0.02, 0.02 × |EPS|)`;
+  when the company tags it: Boeing 2025, 2,235 - 345 = 1,890 over 762.3 = 2.48; otherwise the parent's share, section 2.1), tolerance `max(0.02, 0.02 × |EPS|)`;
   `severity = clip((|d| - tolerance) / (0.15 × |EPS| + 0.05))`; 0.8 if diluted EPS exceeds basic EPS while the
   company is profitable (dilution can only lower EPS).
 - **Why it works**: EPS is the most-watched number. Inconsistencies point to errors in share counts or in the income
@@ -533,7 +560,8 @@ Needs segment-level (dimensional) XBRL, which the SEC's companyfacts data does n
 
 ### A.14 Silent restatement
 
-- **Computes**: for each significant item and each of the last three years, the first and the last reported value.
+- **Computes**: for each significant item and each of the last three years, the first and the latest reported value (a
+  revision that a later report reverses is no revision).
   If the change is at least 0.5% of the first value: `severity = 0.3 + 4 × |change| / base` for income items
   (revenue, cost of sales, pre-tax, operating and net income, retained earnings, equity), or
   `0.15 + 2 × |change| / TA` for balance-sheet items, capped at 1. The base is NI for net, pre-tax and operating income
@@ -606,7 +634,8 @@ M = -4.84 + 0.920 × DSRI + 0.528 × GMI + 0.404 × AQI + 0.892 × SGI
 | TATA, total accruals | `(income from continuing operations_t - CFO_t) / TA_t` | Earnings not backed by cash are the most direct footprint of aggressive accruals; it has by far the largest coefficient |
 | LVGI, leverage index | `((CL_t + LTD_t)/TA_t) / ((CL_t-1 + LTD_t-1)/TA_t-1)`, LTD excluding current maturities (already in CL); neutral when LTD is tagged in one year only | Rising leverage tightens debt covenants and increases the incentive to manage results |
 
-**How.** Missing components take their neutral value (1 for indices, 0 for TATA); SGI and TATA are required.
+**How.** Missing components take their neutral value (1 for indices, 0 for TATA), and so do DSRI, SGAI, AQI and DEPI when
+receivables, SG&A or net PP&E are reported on different bases in the two years (section 2.1); SGI and TATA are required.
 `severity = clip((M + 2.4) / 1.4)`, so 0 at M = -2.4 and 1 at M = -1.0 (the published flag is M > -1.78). The three
 components that raise M most above neutral are reported as drivers; a receivables-driven score joins the
 premature-revenue pattern.
@@ -643,7 +672,9 @@ F = P / 0.0037
   of strong results that management struggles to sustain, and props up a declining ROA.
 - **ISSUE = 1** if debt or equity was issued: firms raising capital benefit most from looking strong.
 
-**How.** Inputs are capped to limit extreme values (RSST and dROA at ±1, dREC and dINV at ±0.5, dCS at ±3).
+**How.** A change measured across a switch of concept (cash with and without restricted cash, receivables with and
+without notes, net income with and without noncontrolling interests) is not computed; without RSST, dREC or dROA the
+score is not computed. Inputs are capped to limit extreme values (RSST and dROA at ±1, dREC and dINV at ±0.5, dCS at ±3).
 `severity = clip((F - 0.8) / 1.8)`, full at F = 2.6 (the paper's "high risk" band starts at 2.45).
 
 ### 5.3 Discretionary accruals: the Kothari modified Jones model, B.03
@@ -687,7 +718,9 @@ terms. A pooled regression over the company's and its peers' firm-years (25 or m
 dWC_t = b0 + b1 × CFO_t-1 + b2 × CFO_t + b3 × CFO_t+1 + b4 × dRev_t + b5 × PP&E_t + e_t
 ```
 
-with `dWC = dAR + dInventory + d(other current assets) - dAP - d(accrued liabilities)`.
+with `dWC = dAR + dInventory + d(other current assets) - dAP - d(accrued liabilities)`. A line reported in neither year
+adds nothing; one reported in one year only, or on different bases in the two, makes the year's change unknown, and the
+firm-year is left out.
 
 **Why it works.** A good accrual is an early recognition of cash that later arrives (a receivable collected next
 year) or a deferral of cash already received. If accruals are reliable, they are well explained by surrounding cash
@@ -736,7 +769,8 @@ is negative (low accruals are not a warning sign).
 | Depreciation / gross PP&E falling (one depreciation measure in both years) | Profit raised by slower depreciation |
 | Total assets growing more than 10% | Acquisitive or fast growth, where accounting is most flexible |
 
-The depreciation rate uses depreciable gross PP&E (without construction in progress and land, as in C.EXP.03).
+The depreciation rate uses depreciable gross PP&E (without construction in progress and land, as in C.EXP.03). A test whose
+inputs are reported on different bases in the two years is not computable.
 
 **How.** At least 4 tests must be computable; `severity = clip((C - 2) / 3)`. The score is simple by design: each
 point is a separate, interpretable symptom.
@@ -760,7 +794,8 @@ rationalization. Weak fundamentals and financial distress are the clearest measu
 refinancing and survival all depend on reported results. These scores are not anomalies, so they are tagged
 *pressure* and count only 0.15 towards the index (section 10.6).
 
-**How.** Piotroski: a test whose inputs are not reported is not computable, not failed (at least 7 of 9 required);
+**How.** Piotroski: a test whose inputs are not reported, or are on different bases in the years compared, is not
+computable, not failed (at least 7 of 9 required);
 `severity = 0.5 × clip((4 - F × 9 / computable) / 4)`, flagged at 0.45. Altman:
 `0.7 × clip((2.99 - Z) / (2.99 - 1.81))`, or `0.7 × clip((2.6 - Z'') / (2.6 - 1.1))`.
 
@@ -773,8 +808,9 @@ refinancing and survival all depend on reported results. These scores are not an
    far less often. Over 12 quarters:
    `rate = (quarters with ROA between 0 and 0.5% + quarters with EPS up by 0 to 1 cent vs the same quarter a year
    earlier) / quarters`; `severity = 0.8 × clip((rate - 0.10) / 0.25)`. The ROA part is used for industrial
-   companies only. The quarter a year earlier is found by its date (within 10 days), never by counting back four
-   rows, so a quarter that was not filed cannot pair two quarters a year and a quarter apart.
+   companies only, and a quarter's ROA uses that quarter's own assets (a quarter without them has none). The quarter a
+   year earlier is found by its date (within 10 days), never by counting back four rows, so a quarter that was not filed
+   cannot pair two quarters a year and a quarter apart.
 2. **Real earnings management** (Roychowdhury 2006). Managers can also hit targets with real decisions: discounting
    to pull sales forward, overproducing to spread fixed costs, or cutting R&D and advertising. Three industry-year
    regressions estimate normal levels, with A = lagged assets and S = revenue:
@@ -821,7 +857,8 @@ Each test looks at one account where accounting judgment is concentrated and mea
 most common manipulation of that account. Most compute a ratio and use the two-baseline assessment of section 3.5
 (marked "assess"); others use fixed rules. The logic is the same throughout: manipulation moves an account away from
 where the business economics would put it, and because accruals must reverse, the departure tends to grow until it
-does.
+does. A test that compares a balance across years skips, or leaves out the year, when the balance is reported on
+different bases in those years (section 2.1), and a gross margin compared across years is one measure in all of them.
 
 ### 6.1 Revenue
 
@@ -846,7 +883,7 @@ the customer can be billed rests on estimates of progress, a common area for agg
 
 **C.REV.04 Quarter-end revenue concentration.** The fourth quarter's share of annual revenue, scored by robust z
 against the company's own last five years with four reported quarters (1.5 to 4.0; the result names them), + 0.15 if the fourth quarter's gross margin is also unusual (z above
-2). *Why*: pulling sales into the last quarter (channel stuffing, side agreements) inflates the year at the expense
+2). A year's quarters are the four after the previous fiscal year end (section 2.2), never that year's fourth quarter. *Why*: pulling sales into the last quarter (channel stuffing, side agreements) inflates the year at the expense
 of the next, and concentrates in the quarter that closes the year.
 
 **C.REV.05 Revenue vs asset base.** Asset turnover `Rev / avg(TA)` (assess, 2.0 to 5.0). *Why*: revenue that jumps
@@ -883,7 +920,8 @@ collection pace. The latest quarter's DSO is also shown against the same quarter
 **C.AR.02 Allowance coverage decline.** Coverage `allowance / (AR + allowance)` against its prior four-year median;
 `severity = clip((drop - 0.10) / 0.40) × (1 if DSO rose, else 0.6)`. *Why*: reducing the reserve for bad debts while
 receivables age raises profit by under-reserving. The allowance is read as its size: some filers tag it as the negative
-amount it is deducted at (Boeing 2019: -73).
+amount it is deducted at (Boeing 2019: -73). An allowance tagged for current and non-current receivables together is no
+coverage of the current ones, and the test is skipped.
 
 **C.AR.03 Provision below write-offs.** Consecutive years back from the focus year (a year not reported ends the run)
 in which the provision for credit losses was below write-offs; `severity = 0.8 × clip((years - 1) / 2)`. *Why*: the reserve is being drawn down into earnings.
@@ -1045,7 +1083,9 @@ the tagged concept changed between years (the series may not be comparable). *Wh
 liabilities still have to be paid; fast growth can hide leverage.
 
 **C.BS.03 Covenant proximity.** Distance between actual leverage and coverage and the covenant thresholds extracted
-by the AI from the debt notes. *Why*: companies close to a covenant breach have a strong motive to manage results;
+by the AI from the debt notes. EBITDA is operating income plus D&A; without D&A (or with D&A that includes impairment)
+leverage and coverage are not computed. A net-worth floor is used only when the covenant's own words state it at that
+scale ("$500 million" for 500,000,000). *Why*: companies close to a covenant breach have a strong motive to manage results;
 context, not evidence.
 
 **C.BS.04 Unconsolidated affiliates.** Equity-method investments / equity, with loss-making investees;
@@ -1151,6 +1191,9 @@ CEO, CFO or chief accounting officer changes and acquisitions (listed when they 
 **What it is.** The robust z of each ratio against at least 5 peers;
 `severity = 0.7 × clip((number of ratios with |z| ≥ 3.5 - 1) / 4)`.
 
+A peer ratio whose inputs are on another basis than the company's (section 2.1) is left out, and so is a ratio, the
+company's or a peer's, that reads an item on different bases in different years.
+
 **Why it works.** Any company has one or two ratios far from its peers because of its business model. Several extreme
 ratios at once are harder to explain by business differences, so only clusters score.
 
@@ -1158,7 +1201,8 @@ ratios at once are harder to explain by business differences, so only clusters s
 
 **What it is.** Three unsupervised outlier detectors applied to the ratio vectors of up to six years of each peer
 (its years up to the one aligned with the focus year),
-five years of the company's history and the focus year (at least 30 rows and 6 ratios with 70% coverage), after
+five years of the company's history and the focus year (at least 30 rows and 6 ratios with 70% coverage; a ratio measured
+on another basis than the focus year's is treated as missing, as in D.02), after
 median imputation, clipping at the 2nd and 98th percentiles, and robust scaling `(x - median) / interquartile range`:
 
 1. **Robust Mahalanobis distance** with the Minimum Covariance Determinant estimator (Rousseeuw 1984; support
@@ -1202,7 +1246,9 @@ low-margin, asset-heavy ones. A balance outside the 95% interval for a company l
 and the gap between actual and expected is a dollar impact. Conformal intervals are used because financial residuals
 are not normally distributed.
 
-**How.** Industry rows if there are 40 or more firms, else all filers; the company is excluded; at least 80 rows. For
+**How.** Industry rows if there are 40 or more firms, else all filers; the company is excluded; at least 80 rows. The
+industry rows carry the main concepts only (trade receivables, net inventory, selling, general and administrative
+expense), so a balance or driver the company reports on another basis is not scored. For
 the company: `e = ln(balance / driver) - y_hat`, expected balance `= exp(y_hat) × driver`, `z = e / (q / 1.96)`;
 outside the interval means `|e| > q`. `severity = clip((|z| - 1.96) / 2)` when outside and above the prediction
 (× 0.8 for SG&A); impact high = actual - expected, mid = half of that, low = actual - the upper end of the interval.
@@ -1308,8 +1354,8 @@ evidence.
 | ID | What the AI extracts | What the code does with it, and why |
 |---|---|---|
 | E.01 | Changes between this year's and last year's accounting-policy notes, each with direction and whether it comes from a new standard | 0.6 for an income-increasing voluntary change, 0.25 for one required by a new standard, 0.1 otherwise. Voluntary changes that raise income are discretion; required ones are not |
-| E.02 | Critical estimates and their values (useful lives, rates, assumptions) in both years | Changes of 5% or more are reported, 0.5 if income-increasing else 0.15. Changing an estimate is the quietest way to move earnings |
-| E.04 | Full-year, company-wide claims in MD&A (metric, direction, stated %) | Claims about a part of the business are skipped, then duplicates are merged (a skipped segment claim never hides the company-wide claim with the same metric and direction); each claim is checked against the reported figures, measured as the claim's own words state them: "operating expenses" as revenue less cost of sales less operating income, "costs and expenses" as revenue less operating income, "gross margin" as a percentage only when the claim speaks of a percentage or basis points and as gross profit in dollars when it names gross profit or a dollar amount (a claim that says neither is skipped). A contradiction is a wrong direction, or a stated size off by more than `2% + 10% × |actual|`; `severity = min(1, 0.45 × contradictions)`. Management's description should match the results |
+| E.02 | Critical estimates and their values (useful lives, rates, assumptions) in both years | An estimate is compared with the same estimate last year: the same description, or the only one of its kind in each year (two useful lives, buildings and equipment, are never compared with each other). Changes of 5% or more are reported, 0.5 if income-increasing else 0.15. Changing an estimate is the quietest way to move earnings |
+| E.04 | Full-year, company-wide claims in MD&A (metric, direction, stated %) | Claims about a part of the business, claims whose quote names a quarter or an expectation, and claims about a measure reported on different bases in the two years are skipped, then duplicates are merged (a skipped segment claim never hides the company-wide claim with the same metric and direction); each claim is checked against the reported figures, measured as the claim's own words state them: "operating expenses" as revenue less cost of sales less operating income, "costs and expenses" as revenue less operating income, "gross margin" as a percentage only when the claim speaks of a percentage or basis points and as gross profit in dollars when it names gross profit or a dollar amount (a claim that says neither is skipped). A contradiction is a wrong direction, or a stated size off by more than `2% + 10% × |actual|`; `severity = min(1, 0.45 × contradictions)`. Management's description should match the results |
 | E.09 | Customers, suppliers, related parties, guarantees, factoring and variable-interest entities, with amounts or revenue shares and whose revenue a share refers to (the whole company or one segment or subsidiary) | Verified relationships become graph edges (section 9). New related-party, guarantee, VIE or side-agreement edges score `min(0.8, 0.25 × new)` |
 | C.BS.03 | Numeric covenant thresholds | Compared with actual leverage and coverage |
 | C.NG.03 | Non-GAAP reconciliation lines in the latest release and one a year earlier | New categories, renamed measures and asymmetric treatment are counted; a measure counts as renamed only if its core name (without qualifiers such as TTM, Y/Y growth or excluding F/X) appears nowhere in the earlier release |
@@ -1374,10 +1420,15 @@ statement is **skipped** when:
 - its sentence mentions segments, products, regions, guidance, non-GAAP or adjusted figures, per-share amounts,
   excluded items or (in MD&A) a quarter; every such word counts, so "Fourth quarter adjusted revenue" in a release is
   skipped although the quarter alone is allowed there;
-- a name stands right before the metric, as in "Data Center revenue" (a segment or product line), unless it is a
-  word that can precede a company total (Record, Total, Quarterly, Fiscal, a period such as Q4 or FY2025, and similar), or a noun that names a part
-  of the company does ("GPU business revenue", "segment revenue", "services revenue");
+- a name stands right before the metric on the same line and in the same sentence, as in "Data Center revenue" (a segment
+  or product line), unless it is a word that can precede a company total (Record, Total, Quarterly, Fiscal, a period such
+  as Q4 or FY2025, and similar), or a noun that names a part of the company does ("GPU business revenue", "segment
+  revenue", "services revenue"); a heading on the line above or the end of the sentence before names nothing;
 - it is far from every reported total.
+
+Net income is compared with the filed totals (attributable to the company, including noncontrolling interests, available
+to common shareholders) and, when the company tags only the total including noncontrolling interests, with the parent's
+share (that total less theirs): a statement of the parent's figure is not a revision of another measure.
 
 The tolerance is half a unit at the stated precision or 0.5%, whichever is larger. A statement **matches** within the
 tolerance, and is a **mismatch** if it differs by more than that but by no more than 5% of the nearest total.
@@ -1397,12 +1448,12 @@ year's point in time (section 2.2).
 
 | ID | Test | Method and severity | Why it works |
 |---|---|---|---|
-| F.01 | Sales to a major customer vs that customer's spending | For customers that file with the SEC: sales = the disclosed amount, or the revenue share × company revenue only when the share is of the whole company's revenue. The customer's spending = (its revenue - its operating income) + its capex, from its own filings as they stood at the year's cutoff, for the fiscal year closest to the company's (within 183 days) and in the same currency; a customer without revenue and operating income is not compared (a sum of cost lines would miss costs under other headings and make ordinary sales look impossible). Sales over 50% of that spending are implausible; `severity = min(1, 0.6 × cases)` | A customer cannot buy more than it spends. Sales a customer could not plausibly have made are a red flag for fictitious revenue |
+| F.01 | Sales to a major customer vs that customer's spending | For customers that file with the SEC: sales = the disclosed amount, or the revenue share × company revenue only when the share is of the whole company's revenue. An amount or share is used only when the quoted sentence states it (digits and scale: "$5.2 billion", "13%"), and not when the sentence names other years only. The customer's spending = (its revenue - its operating income) + its capex, from its own filings as they stood at the year's cutoff, for the fiscal year closest to the company's (within 183 days) and in the same currency; a customer without revenue and operating income is not compared (a sum of cost lines would miss costs under other headings and make ordinary sales look impossible). Sales over 50% of that spending are implausible; `severity = min(1, 0.6 × cases)` | A customer cannot buy more than it spends. Sales a customer could not plausibly have made are a red flag for fictitious revenue |
 | F.02 | Circular flows | Directed cycles of up to 4 steps over sales, related-party, guarantee and side-agreement edges; `min(1, 0.5 × cycles)` | Money that flows from the company back to itself through counterparties can create revenue or cash that does not exist (round-tripping) |
 | F.03 | Auditor profile | 0.45 for a large company audited by a small firm, + 0.2 per auditor change (at most 2) | A small firm may lack the resources for a complex audit; context only |
-| F.04 | Unexplained movements | Material line-item movements with no passage of this year's MD&A or notes linked to them (earlier years' reports discussed earlier changes; a line goes by several captions: operating earnings, income from operations, marketing, general and administrative, unearned revenue, additions to property and equipment); `0.7 × clip(score / 10)` | Large changes management does not explain are disclosure gaps worth asking about |
+| F.04 | Unexplained movements | Material line-item movements with no passage of this year's MD&A or notes linked to them (earlier years' reports discussed earlier changes; a line goes by several captions: operating earnings, income from operations, marketing, general and administrative, unearned revenue, additions to property and equipment; a move across a switch of concept is not a movement); `0.7 × clip(score / 10)` | Large changes management does not explain are disclosure gaps worth asking about |
 | F.05 | Contradiction density | The number of text-vs-number tests (A.15, E.04, E.12) that found a contradiction; `min(1, 0.35 × tests)`; derived, so it does not add to the index on its own | Several independent contradictions are stronger evidence than one |
-| F.06 | Customers under stress | Major customers with late-filing (NT 10-K / NT 10-Q) or non-reliance (8-K Item 4.02) filings; `min(0.8, 0.4 × customers)` | Revenue from distressed customers may not be collectible |
+| F.06 | Customers under stress | Major customers with late-filing (NT 10-K / NT 10-Q) or non-reliance (8-K Item 4.02) filings in the three years to the year's cutoff (never later ones); `min(0.8, 0.4 × customers)` | Revenue from distressed customers may not be collectible |
 | F.07 | New relationships | New related-party, guarantee, VIE or side-agreement edges this year; `min(0.8, 0.3 × new)` | New arrangements with related or off-balance-sheet entities are where risks are often moved |
 
 ---
@@ -1444,7 +1495,7 @@ mistaken for the whole); a number that cannot be right should never reach the an
 | New accounting standard | E.01 finds an adoption | C.REV.01, C.REV.02, C.REV.03, E.01, A.14 | × 0.6 |
 | Stock split | Diluted shares up 1.8 times or more | A.12 | × 0.2 |
 
-A discounted signal that falls below 0.5 is no longer flagged and is shown as *explained*.
+A discounted signal that falls below its test's flag level (normally 0.5) is no longer flagged and is shown as *explained*.
 
 **Why it works.** An acquisition brings in the target's receivables, inventory and assets at once, so working-capital
 ratios jump without any change in accounting; a new standard changes revenue timing for every company; a split changes
@@ -1515,7 +1566,11 @@ corroborated they are. Contributions are summed without double counting:
 |---|---|
 | Each flagged signal not in a pattern (and not derived from other signals) | family weight × severity, the largest per test |
 | Each pressure signal | 0.15 × severity |
-| Each pattern | 0.8 × pattern score |
+| Each pattern | 0.8 × pattern score, with a signal that supports k patterns entering each with 1/k of its weight: `1 - product of (1 - 0.85 × severity)^(1/k)` |
+
+A signal can support several schemes (operating cash flow far below net income is required by premature revenue and by
+accrual-heavy earnings). Each pattern it supports still shows it and keeps its full score for ranking, but in the index
+its weight is shared among them, so it is counted once.
 
 Family weights: A 0.55, C 0.45, B 0.35, F 0.35, D 0.30, E 0.30. With T the total contribution:
 
@@ -1530,7 +1585,8 @@ alarm as a few strong ones. One strong, fully corroborated pattern (T about 0.8)
 Elevated below 50, High below 75, Severe 75 and above, applied to the index rounded to a whole number as the report
 shows it (so "25" is never labelled Low). The index is a screening score, not a probability of fraud.
 
-After the independent audit (section 14), an unverified finding's priority and pattern contribution are halved, a
+After the investigation (section 12), a finding closed as explained counts for half in the index, as it does in the
+ranking. After the independent audit (section 14), an unverified finding's priority and pattern contribution are halved, a
 pattern the audit downgraded to a single source keeps 60% of its contribution, and the index is recomputed.
 
 ---
@@ -1587,16 +1643,19 @@ intake -> hypothesize -> plan evidence -> [plan review] -> gather (parallel, per
    explanations that must be ruled out.
 2. **Plan evidence**: up to 12 tool calls. The tools are read-only and deterministic: `get_fact(item)`,
    `ratio(numerator, denominator)`, `peer_stats(ratio)`, `search_filing(query, section)`, `explaining_text(item)`,
-   `get_events(types)` and `diff_risk_factors()`. In interactive mode a person approves the plan when the maximum
+   `get_events(types)` and `diff_risk_factors()`. `get_fact` names the basis of a figure reported under a broader or
+   narrower concept, and `peer_stats` compares only peers whose inputs are on the company's basis (section 2.1). In
+   interactive mode a person approves the plan when the maximum
    severity is 0.8 or more, the materiality multiple is 1 or more, or a hypothesis has confidence below 0.5.
 3. **Gather**: the tools run, grouped by hypothesis, in parallel; each result enters an evidence ledger with an ID.
 4. **Test innocent explanations**: each is judged strictly from the ledger. A "supported" verdict without a ledger
    citation is overruled. If any explanation is supported and strong, the case closes as *explained* and the
-   finding's score and its ranking weight are halved. This step exists because the most valuable output of an investigation is often a
+   finding's score, its ranking weight and its contribution to the risk index are halved. This step exists because the most valuable output of an investigation is often a
    documented innocent explanation.
 5. **Draft**: a summary and explanation using only numbers from the facts table, the test results or the ledger.
    The facts table is computed by code so the writer never does arithmetic: each test's result, its reference value
-   and the gap between them; the cited line items with their year-on-year changes (in dollars and percent); the
+   and the gap between them; the cited line items with their year-on-year changes (in dollars and percent; none across
+   a switch of concept); the
    company's key figures and ratios; the materiality figures. Cash-flow change lines carry their sign convention
    ("positive = receivables rose, which used cash"), and the fiscal-year end dates and lengths (52 or 53 weeks) are
    given, as is each test's definition (how its result and reference value are computed), so neither the writer
@@ -1649,7 +1708,8 @@ draft is sent back with the exact problems listed.
 **Numbers.** Every number in the text (with $, %, billion, million, thousand, B, M, K, bps, x or days) is extracted.
 Years, dates (including written dates such as "September 28, 2024"), calendar lengths ("52-week year"), single-digit counts (but not "$5"), evidence and test IDs, fiscal labels and references to standards or document parts
 ("ASC 842", "Topic 606", "Note 5", "Rule 10b5-1") are ignored. A number c is supported if, for some allowed value a and
-scale k of 1, 100 or 0.01 (percent vs fraction):
+scale k (1; and 100 or 0.01 for a bare number, which may be a percentage written as a fraction or the reverse, never for
+an amount of money, days or a multiple, so "$1.9B" is not supported by $19M):
 
 ```
 |c - k·a| ≤ max( 1.5% × |k·a|,  eps,  ½ × unit × 10^(-decimals shown) )
@@ -1662,13 +1722,14 @@ ledger, and numbers in the tests' own result sentences.
 
 **Quotes.** Quotation marks are paired in order (re-synchronizing when a closing mark is followed by punctuation),
 evidence references are removed, and each quote of four words or 25 characters or more must be found verbatim in a filing (after
-normalizing whitespace, dashes and quote styles), or in the tests' own result sentences or labels. Long quotes are
+normalizing whitespace, dashes, quote styles and letter case), or in the tests' own result sentences or labels. Long quotes are
 checked on their first 300 characters.
 
 **Language.** A linter rewrites accusatory wording into neutral terms and reports what it changed: "fraud" becomes
 "inconsistent with expectations", "manipulation" becomes "management of reported results", "cooking the books"
-becomes "aggressive accounting", and "embezzlement", "scam", "lie" and "criminal" become "irregularity",
-"inconsistent statement" or "irregular". The disclaimer sentences are exempt. An anomaly is a reason to ask
+becomes "aggressive accounting", and "embezzlement", "scam", "lied" (or "lying to") and "criminal" become "irregularity",
+"inconsistent statement" or "irregular" ("the difference lies in timing" is left alone). The disclaimer sentences are
+exempt, and line and paragraph breaks are kept. An anomaly is a reason to ask
 questions, not proof of wrongdoing, and the report's language must say so.
 
 ---
@@ -1682,7 +1743,7 @@ which can bring the next finding into the 12 reported; that finding is audited t
 | Check | Passes when |
 |---|---|
 | Evidence present | At least one primary XBRL fact or filing quote supports the finding |
-| Fact values | Every cited fact is re-read from the filing's XBRL for the same concept and period, and matches within 0.05% (at least 0.5 for an amount or a share count; per-share amounts and rates get no such floor) |
+| Fact values | Every cited fact is re-read from the filing's XBRL for the same concept and period (start and end: the fourth quarter an annual report also tags is not the year), and matches within 0.05% (at least 0.5 for an amount or a share count; per-share amounts and rates get no such floor) |
 | Quotes | Every quote is found verbatim at its position in the filing |
 | Impact | low ≤ mid ≤ high, mid is positive, and materiality recomputes to the same values |
 | Corroboration | Patterns still have 2 or more live signals from 2 or more families (or 3 or more) |
@@ -1760,7 +1821,9 @@ period index = mean(yearly index) + 0.5 x (max(yearly index) - mean(yearly index
 ```
 
 It sits halfway between the average year and the worst year, so one bad year is neither averaged away nor allowed to
-define the whole period. The yearly indices are the screening scores of each year before any investigation.
+define the whole period. The yearly indices are the screening scores of each year, less the results the investigation set
+aside as test errors (section 12); an anomaly the investigation explains is halved in the ranking, not in the yearly
+indices.
 
 **Investigation.** The AI investigates the top 5 merged anomalies (`--max-cases`). Each case runs in the representative
 year's context with three additions: the finding lists every flagged year's results with their years and a strength
@@ -1779,8 +1842,9 @@ accounts) can recur across years too; the investigation is the step that separat
 
 ## 17. Known approximations
 
-- **Peer baselines are approximately point in time.** SEC frames carry peers' latest values, so a peer's later
-  restatement can leak into a baseline. The company under review always uses its own first-reported values.
+- **Industry baselines are approximately point in time.** SEC frames carry each filer's latest values, so a later
+  restatement can leak into the cross-sectional models (B.03, B.09, D.04) and the choice of peers. The selected peers'
+  figures are as first reported and known at the year's cutoff, and the company always uses its own first-reported values.
 - **Segment data is unavailable.** The companyfacts data has no dimensional facts, so segment reconciliation (A.11)
   and segment growth (C.REV.06) are skipped.
 - **Weak labels for D.06.** An 8-K Item 4.02 notice shows that a restatement happened, but the restated year is

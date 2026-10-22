@@ -104,9 +104,15 @@ def b03(ctx: RunContext):
 
 
 def _dwc(P, p, back: int = 0) -> float:
+    """Change in working capital. A line reported in neither year adds nothing; one reported in one year only, or on
+    different bases in the two, is an unknown change, so the year's change is NaN (never the whole balance, never zero)."""
+    v = S.V(P, p)
+
     def d(item: str) -> float:
-        a, b = pv(P, item, p, back), pv(P, item, p, back + 1)
-        return (a - b) if (np.isfinite(a) and np.isfinite(b)) else 0.0
+        a, b = v.g(item, back), v.g(item, back + 1)
+        if not np.isfinite(a) and not np.isfinite(b):
+            return 0.0
+        return a - b if v.same(item, back, back + 1) else float("nan")
     return d("AR") + d("INVENTORY") + d("OTHER_CURRENT_ASSETS") - d("AP") - d("ACCRUED_LIABILITIES")
 
 
@@ -124,7 +130,7 @@ def _aq_rows(P, periods: list[pd.Timestamp]) -> list[tuple[pd.Timestamp, list[fl
         ppe = pv(P, "PPE_NET", p)
         x = [cfo_m1, cfo_0, cfo_p1, drev, ppe]
         y = _dwc(P, p)
-        if np.isfinite(aA) and aA > 0 and all(np.isfinite(x)):
+        if np.isfinite(aA) and aA > 0 and all(np.isfinite(x)) and np.isfinite(y):
             rows.append((p, [v / aA for v in x], y / aA))
     return rows
 
@@ -251,7 +257,7 @@ def b09(ctx: RunContext):
     """Frequency of just-positive results over 12 quarters, plus real earnings management (Roychowdhury)."""
     out = []
     ni = ctx.qhist("NET_INCOME", 12)
-    ta = ctx.qhist("TOTAL_ASSETS", 12).reindex(ni.index).ffill()
+    ta = ctx.qhist("TOTAL_ASSETS", 12).reindex(ni.index)  # a quarter without its own assets has no ROA (no earlier quarter's)
     eps = ctx.qhist("EPS_DILUTED", 16)
     # leveraged balance sheets (banks, insurers, REITs) earn a quarterly ROA of 0-0.5% as a matter of course, and the
     # Roychowdhury production / discretionary-spend models describe industrial operating cycles

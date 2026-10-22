@@ -3,7 +3,7 @@
 `anomaly-report render <run>` reloads this file and renders again: no SEC downloads, no detectors, no AI calls.
 Only what rendering reads is kept; live handles (SEC client, AI client, graph database) and bulk data the report
 never shows (the raw fact store, the industry cross-section, full filing text, the source facts behind peers'
-figures) are dropped to keep the file small. A multi-year review saves every year's context the same way; contexts
+figures other than their basis) are dropped to keep the file small. A multi-year review saves every year's context the same way; contexts
 shared by several anomalies are saved once.
 """
 
@@ -15,6 +15,8 @@ import pickle
 from pathlib import Path
 
 import pandas as pd
+
+from ffi.xbrl.canonical import basis
 
 SNAPSHOT = "run.pkl.gz"
 SNAPSHOT_VERSION = 1
@@ -34,13 +36,19 @@ def _lighten(memo: dict[int, object]):
     def peers(ps):
         if ps is None:
             return None
-        return once(ps, lambda ps: dataclasses.replace(ps, peers=[dataclasses.replace(
-            p, annual=once(p.annual, lambda a: dataclasses.replace(a, prov={}))) if p.annual is not None else p for p in ps.peers]))
+        # a peer's source facts are dropped except those on another basis, which decide whether it is compared at all
+        return once(ps, lambda ps: dataclasses.replace(ps, peers=[dataclasses.replace(p, annual=once(p.annual, lambda a: dataclasses.replace(
+            a, prov={k: r for k, r in a.prov.items() if basis(k[0], r.concept)}))) if p.annual is not None else p for p in ps.peers]))
 
     def light(ctx):
-        return once(ctx, lambda c: dataclasses.replace(
-            c, kg=None, client=None, llm=None, store=None, xsec=pd.DataFrame(), peers=peers(c.peers),
-            docs=[doc(d) for d in c.docs], releases=[doc(d) for d in c.releases]))
+        def make(c):
+            out = dataclasses.replace(c, kg=None, client=None, llm=None, store=None, xsec=pd.DataFrame(), peers=peers(c.peers),
+                                      docs=[doc(d) for d in c.docs], releases=[doc(d) for d in c.releases])
+            # the year the company changed shape is read from the fact store, which is not saved: keep it, so a re-rendered
+            # report compares the same years as the original
+            out.__dict__["_perimeter_break"] = c.perimeter_break
+            return out
+        return once(ctx, make)
     return light
 
 
