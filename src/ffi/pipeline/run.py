@@ -34,7 +34,7 @@ from ffi.peers.universe import expanding_universe
 from ffi.pipeline.detect import DetectorResult, run_detectors
 from ffi.profiles import for_company
 from ffi.report import snapshot
-from ffi.resolve.resolver import CompanyRef, resolve
+from ffi.resolve.resolver import CompanyRef, normalize_ticker, resolve
 from ffi.scoring.engine import REPORTED, ScoreResult, score
 from ffi.text.document import TextDoc, build_doc, find_auditor
 from ffi.xbrl.facts import FactStore, fiscal_year_of, load_companyfacts
@@ -287,6 +287,7 @@ def pick_focus(store: FactStore, period: str | None) -> pd.Timestamp:
         raise ValueError("no annual financial data (10-K, 20-F or 40-F XBRL) found for this company")
     if period:
         want = period.upper().replace(" ", "")
+        want = f"FY{want}" if re.fullmatch(r"\d{4}", want) else want  # "2024" names fiscal 2024, as "FY2024" does
         for p in fyes:
             if store.fiscal_label(p) == want:
                 return p
@@ -385,6 +386,7 @@ def analyse_year(prep: Prepared, opts: RunOptions, focus: pd.Timestamp, run_dir:
     xsec = pd.DataFrame()
     industry: set[int] = set()
     digits = 2
+    unknown_peers: list[str] = []
     with step("Building industry cross-section and peer set"):
         y = calendar_year_of(focus)
         try:
@@ -396,8 +398,10 @@ def analyse_year(prep: Prepared, opts: RunOptions, focus: pd.Timestamp, run_dir:
                 override = None
                 if opts.peers:
                     tick = endpoints.company_tickers(client)
-                    override = [int(tick.loc[tick["ticker"] == t.strip().upper(), "cik"].iloc[0]) for t in opts.peers
-                                if (tick["ticker"] == t.strip().upper()).any()]
+                    by_ticker = dict(zip(tick["ticker"], tick["cik"], strict=True))
+                    wanted = [normalize_ticker(t) for t in opts.peers]
+                    override = [int(by_ticker[t]) for t in wanted if t in by_ticker]
+                    unknown_peers = [t for t in wanted if t not in by_ticker]  # said in the report, never dropped silently
                 own = {k: A.get(k, focus) for k in ("REVENUE", "NET_INCOME", "CFO", "COGS", "SGA", "OPERATING_INCOME",
                                                      "GROSS_PROFIT", "TOTAL_ASSETS", "AR", "PPE_NET", "INVENTORY")}
                 prior = A.periods[-2] if len(A.periods) > 1 else None
@@ -416,6 +420,8 @@ def analyse_year(prep: Prepared, opts: RunOptions, focus: pd.Timestamp, run_dir:
         auditor = find_auditor(docs[-1]) if docs else None
 
     notes = list(prep.notes)
+    if unknown_peers:
+        notes.append(f"Requested comparison companies not found in the SEC's ticker list, so not compared: {', '.join(unknown_peers)}.")
     for (item, p), factor in sorted(A.rescaled.items(), key=lambda kv: kv[0][1]):
         if p in keep:
             notes.append(f"XBRL data quality: {item.replace('_', ' ').lower()} for {A.label(p)} is tagged in "

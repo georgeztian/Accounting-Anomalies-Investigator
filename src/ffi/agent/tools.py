@@ -23,6 +23,9 @@ SIGN_NOTES = {
 }
 
 
+MIN_QUOTE_WORDS = 6  # a passage shorter than this is a heading or a fragment, not a statement
+
+
 def _entry(lid: str, task: EvidenceTask, text: str, numbers: list[float], evidence: list[dict]) -> dict[str, Any]:
     return {"id": lid, "tool": task.tool, "purpose": task.purpose, "hypothesis": task.hypothesis_index,
             "text": text, "numbers": [float(n) for n in numbers if n is not None and np.isfinite(n)], "evidence": evidence}
@@ -52,7 +55,11 @@ def run_tool(ctx: RunContext, task: EvidenceTask, lid: str) -> dict[str, Any]:
         n, d = (task.numerator or "").upper(), (task.denominator or "").upper()
         if n not in BY_ID or d not in BY_ID:
             return _entry(lid, task, "Unknown numerator/denominator.", [], [])
-        vals = [(ctx.label(ctx.period_at(k)), safe_div(ctx.a(n, k), ctx.a(d, k))) for k in range(ctx.history)]
+        def basis_note(k: int) -> str:  # a year whose numerator or denominator is on another basis says so, as get_fact does
+            bs = [f"{BY_ID[i].label.lower()}: {b}" for i in dict.fromkeys((n, d)) if (b := ctx.basis(i, k))]
+            return f" ({'; '.join(bs)})" if bs else ""
+
+        vals = [(ctx.label(ctx.period_at(k)) + basis_note(k), safe_div(ctx.a(n, k), ctx.a(d, k))) for k in range(ctx.history)]
         vals = [(lab, v) for lab, v in vals if np.isfinite(v)]
         text = f"{BY_ID[n].label} / {BY_ID[d].label}: " + ", ".join(f"{lab} {fmt_pct(v)}" for lab, v in vals)
         ev = [e.to_dict() for e in ctx.evs([n, d], ks=(0, 1))]
@@ -92,7 +99,8 @@ def run_tool(ctx: RunContext, task: EvidenceTask, lid: str) -> dict[str, Any]:
             secs = None if task.section in (None, "any") else (task.section,)
             hits = search(doc, pat, secs)
             hits.sort(key=lambda h: -sum(1 for w in words if re.search(w, h.quote, re.I)))
-        hits = hits[:3]
+        # a heading or a line broken off mid-sentence ("Current market,") is no evidence: sentences come first
+        hits = ([h for h in hits if len(h.quote.split()) >= MIN_QUOTE_WORDS] or hits)[:3]
         ev = [ctx.ev_span(doc, h.start, h.end, f"10-K {h.paragraph.section}").to_dict() for h in hits]
         text = " | ".join(f'"{h.quote}"' for h in hits) if hits else "No matching passages."
         nums = [float(x.replace(",", "")) for h in hits for x in re.findall(r"\d[\d,]*\.?\d*", h.quote)][:20]

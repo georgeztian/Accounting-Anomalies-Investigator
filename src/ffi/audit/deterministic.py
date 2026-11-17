@@ -259,6 +259,12 @@ def correct(ctx, finding, checks: list[AuditCheck], template_narrative) -> list[
             "No innocent explanation written by the investigation could be traced to the evidence."]
         finding.questions = [q for q in finding.questions if q not in bad] or ["What explains this movement, and is it expected to persist?"]
         fixes.append(f"removed {len(bad)} innocent explanation(s) or question(s) that could not be traced to sources")
+        from ffi.scoring.engine import EXPLAINED, withdraw_explanation
+
+        if finding.narrative_source == EXPLAINED and not any(t in finding.alternatives for t in finding.agent_text):
+            # the finding was halved for an explanation that is no longer in the report
+            withdraw_explanation(finding)
+            fixes.append("restored the finding's full weight: none of the explanations it was closed on could be traced to sources")
     if "narrative" in failed:
         finding.narrative = template_narrative(finding)
         finding.narrative_source = f"template (previous {finding.narrative_source} narrative failed audit)"

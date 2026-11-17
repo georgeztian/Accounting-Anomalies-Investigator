@@ -593,7 +593,7 @@ Needs segment-level (dimensional) XBRL, which the SEC's companyfacts data does n
 
 ### A.16 Rounding consistency
 
-- **Computes**: the share of monetary facts in the annual report not divisible by the dominant rounding unit (the
+- **Computes**: the share of monetary facts in the annual report (each reported fact counted once) not divisible by the dominant rounding unit (the
   largest unit that covers at least 80% of facts); `severity = 0.6 × clip((share - 0.10) / 0.30)`.
 - **Why it works**: when most amounts are in millions but some are precise to the dollar, those figures may have been
   added or adjusted by hand late in the process.
@@ -899,7 +899,7 @@ falls as a result.
 if rising. *Why*: sales to related parties may not be at arm's length and can be used to round-trip cash.
 
 **C.REV.10 Revenue vs remaining performance obligations.** The number of consecutive years in which revenue growth
-exceeded backlog growth by more than 3 points, each growth rate measured between adjacent years; `severity = clip(years / 3) × (0.9 if backlog exceeds 30% of revenue, else 0.5)`; skipped when backlog is under 5% of the same year's revenue (it is not where the revenue comes from). *Why*:
+exceeded backlog growth by more than 3 points, counted back from the focus year, each growth rate measured between adjacent years (a year whose backlog is not reported ends the run; a focus year without backlog skips the test); `severity = clip(years / 3) × (0.9 if backlog exceeds 30% of revenue, else 0.5)`; skipped when backlog is under 5% of the same year's revenue (it is not where the revenue comes from). *Why*:
 revenue that outgrows backlog year after year may be borrowing from future periods.
 
 **C.REV.11 Aggressive revenue-arrangement language.** New bill-and-hold, consignment, extended-payment-terms or
@@ -981,7 +981,7 @@ effect seen as a rate. *Innocent causes*: large construction in progress, not ye
 C.EXP.03 and the Montier C-score).
 
 **C.EXP.05 Capex far above depreciation.** Years with capex / D&A above 2 while revenue is flat;
-`severity = clip((years - 1) / 2) × (1 if two-year revenue growth is under 5% a year, else 0.3)`. *Why*: heavy
+`severity = clip((years - 1) / 2) × (1 if two-year revenue growth is under 5% a year, else 0.3)`. The result shown is the focus year's ratio; without it (capex or D&A missing or zero) the test is skipped. *Why*: heavy
 investment that produces no growth can mean operating costs are being capitalized.
 
 **C.EXP.06 Discretionary expense cut.** (SG&A + R&D) / revenue against own history only (assess, lower is worse,
@@ -1270,8 +1270,18 @@ time) follow Benford's law; invented or adjusted numbers tend not to, because pe
 Nigrini's (2012) thresholds: under 0.006 close conformity, 0.006 to 0.012 acceptable, 0.012 to 0.015 marginal, above
 that nonconformity. The first-two-digit version is reported too.
 
-**How.** `severity = 0.4 × clip((MAD1 - 0.012) / 0.012)`: deliberately low weight, because subtotals, small samples
-and amounts with natural limits legitimately deviate.
+**Sample size.** Those thresholds were set on samples of thousands of amounts. An annual report has 100 to 200 tagged
+amounts, and N amounts that follow Benford's law exactly still show, from sampling alone, about
+
+```
+chance(N) = (1/9) × sum over d of sqrt( 2 × b_d × (1 - b_d) / (π × N) )      (0.019 for N = 150)
+```
+
+which is above the nonconformity line: every company in the review panel (MAD1 0.022 to 0.037 on 103 to 172 amounts)
+was called nonconforming. The test therefore counts a departure only above `line = max(0.012, 1.5 × chance(N))`.
+
+**How.** `severity = 0.4 × clip((MAD1 - line) / 0.012)`: deliberately low weight, because subtotals, repeated amounts
+and amounts with natural limits legitimately deviate. The result states the sampling expectation and the line used.
 
 ### 7.7 Supervised misstatement model, D.06 (`training/`)
 
@@ -1355,7 +1365,7 @@ evidence.
 |---|---|---|
 | E.01 | Changes between this year's and last year's accounting-policy notes, each with direction and whether it comes from a new standard | 0.6 for an income-increasing voluntary change, 0.25 for one required by a new standard, 0.1 otherwise. Voluntary changes that raise income are discretion; required ones are not |
 | E.02 | Critical estimates and their values (useful lives, rates, assumptions) in both years | An estimate is compared with the same estimate last year: the same description, or the only one of its kind in each year (two useful lives, buildings and equipment, are never compared with each other). Changes of 5% or more are reported, 0.5 if income-increasing else 0.15. Changing an estimate is the quietest way to move earnings |
-| E.04 | Full-year, company-wide claims in MD&A (metric, direction, stated %) | Claims about a part of the business, claims whose quote names a quarter or an expectation, and claims about a measure reported on different bases in the two years are skipped, then duplicates are merged (a skipped segment claim never hides the company-wide claim with the same metric and direction); each claim is checked against the reported figures, measured as the claim's own words state them: "operating expenses" as revenue less cost of sales less operating income, "costs and expenses" as revenue less operating income, "gross margin" as a percentage only when the claim speaks of a percentage or basis points and as gross profit in dollars when it names gross profit or a dollar amount (a claim that says neither is skipped). A contradiction is a wrong direction, or a stated size off by more than `2% + 10% × |actual|`; `severity = min(1, 0.45 × contradictions)`. Management's description should match the results |
+| E.04 | Full-year, company-wide claims in MD&A (metric, direction, stated %) | Claims about a part of the business, claims whose quote names a quarter or an expectation, and claims about a measure reported on different bases in the two years are skipped, then duplicates are merged (a skipped segment claim never hides the company-wide claim with the same metric and direction); each claim is checked against the reported figures, measured as the claim's own words state them: "operating expenses" as revenue less cost of sales less operating income, "costs and expenses" as revenue less operating income, "gross margin" as a percentage only when the claim speaks of a percentage or basis points and as gross profit in dollars when it names gross profit or a dollar amount (a claim that says neither is skipped). A contradiction is a wrong direction, or a stated size off by more than `2% + 10% × |actual|` (sizes are compared without sign, since the direction is checked on its own and "decreased 5%" is read as 5 or as -5); `severity = min(1, 0.45 × contradictions)`. Management's description should match the results |
 | E.09 | Customers, suppliers, related parties, guarantees, factoring and variable-interest entities, with amounts or revenue shares and whose revenue a share refers to (the whole company or one segment or subsidiary) | Verified relationships become graph edges (section 9). New related-party, guarantee, VIE or side-agreement edges score `min(0.8, 0.25 × new)` |
 | C.BS.03 | Numeric covenant thresholds | Compared with actual leverage and coverage |
 | C.NG.03 | Non-GAAP reconciliation lines in the latest release and one a year earlier | New categories, renamed measures and asymmetric treatment are counted; a measure counts as renamed only if its core name (without qualifiers such as TTM, Y/Y growth or excluding F/X) appears nowhere in the earlier release |
@@ -1586,7 +1596,7 @@ Elevated below 50, High below 75, Severe 75 and above, applied to the index roun
 shows it (so "25" is never labelled Low). The index is a screening score, not a probability of fraud.
 
 After the investigation (section 12), a finding closed as explained counts for half in the index, as it does in the
-ranking. After the independent audit (section 14), an unverified finding's priority and pattern contribution are halved, a
+ranking; if the audit then removes every explanation it was closed on (none could be traced to sources), it counts in full again. After the independent audit (section 14), an unverified finding's priority and pattern contribution are halved, a
 pattern the audit downgraded to a single source keeps 60% of its contribution, and the index is recomputed.
 
 ---
@@ -1643,13 +1653,13 @@ intake -> hypothesize -> plan evidence -> [plan review] -> gather (parallel, per
    explanations that must be ruled out.
 2. **Plan evidence**: up to 12 tool calls. The tools are read-only and deterministic: `get_fact(item)`,
    `ratio(numerator, denominator)`, `peer_stats(ratio)`, `search_filing(query, section)`, `explaining_text(item)`,
-   `get_events(types)` and `diff_risk_factors()`. `get_fact` names the basis of a figure reported under a broader or
-   narrower concept, and `peer_stats` compares only peers whose inputs are on the company's basis (section 2.1). In
+   `get_events(types)` and `diff_risk_factors()`. `get_fact` and `ratio` name the basis of a figure reported under a broader or
+   narrower concept, `search_filing` returns sentences before headings and fragments (passages under six words), and `peer_stats` compares only peers whose inputs are on the company's basis (section 2.1). In
    interactive mode a person approves the plan when the maximum
    severity is 0.8 or more, the materiality multiple is 1 or more, or a hypothesis has confidence below 0.5.
 3. **Gather**: the tools run, grouped by hypothesis, in parallel; each result enters an evidence ledger with an ID.
 4. **Test innocent explanations**: each is judged strictly from the ledger. A "supported" verdict without a ledger
-   citation is overruled. If any explanation is supported and strong, the case closes as *explained* and the
+   citation is overruled, and reasoning that fails the grounding gate is replaced by a plain statement that the evidence supports it (the ledger IDs are kept beside it, never written into report text). If any explanation is supported and strong, the case closes as *explained* and the
    finding's score, its ranking weight and its contribution to the risk index are halved. This step exists because the most valuable output of an investigation is often a
    documented innocent explanation.
 5. **Draft**: a summary and explanation using only numbers from the facts table, the test results or the ledger.
@@ -1706,7 +1716,7 @@ quote. Checking every number against an allow-list, with a tolerance for roundin
 draft is sent back with the exact problems listed.
 
 **Numbers.** Every number in the text (with $, %, billion, million, thousand, B, M, K, bps, x or days) is extracted.
-Years, dates (including written dates such as "September 28, 2024"), calendar lengths ("52-week year"), single-digit counts (but not "$5"), evidence and test IDs, fiscal labels and references to standards or document parts
+Years, dates (including written dates such as "September 28, 2024"), calendar lengths ("52-week year"), single-digit counts (but not "$5"), evidence and test IDs (evidence IDs with or without brackets: "(L0.1, L2.2)" cites two ledger entries, it does not state 0.1 and 2.2), fiscal labels and references to standards or document parts
 ("ASC 842", "Topic 606", "Note 5", "Rule 10b5-1") are ignored. A number c is supported if, for some allowed value a and
 scale k (1; and 100 or 0.01 for a bare number, which may be a percentage written as a fraction or the reverse, never for
 an amount of money, days or a multiple, so "$1.9B" is not supported by $19M):
@@ -1748,7 +1758,7 @@ which can bring the next finding into the 12 reported; that finding is audited t
 | Impact | low ≤ mid ≤ high, mid is positive, and materiality recomputes to the same values |
 | Corroboration | Patterns still have 2 or more live signals from 2 or more families (or 3 or more) |
 | Narrative | The narrative passes the grounding gate |
-| Investigation text | The innocent explanations and questions the investigation wrote pass the grounding gate (those that do not are removed) |
+| Investigation text | The innocent explanations and questions the investigation wrote pass the grounding gate (those that do not are removed; a finding closed as explained that loses every such explanation gets its full weight back and is shown as "explanation not confirmed") |
 
 Failures are corrected automatically: unverifiable facts are removed, quotes re-anchored or removed, primary evidence
 attached from member signals, the impact range reordered, a pattern that lost corroboration downgraded to a single

@@ -223,7 +223,8 @@ def build_graph(ctx: RunContext, finding, llm: LLM):
             # the reasoning of a supported alternative reaches the report when the case closes as explained, so it must
             # pass the grounding gate like any other AI-written text
             if d["supported"] and not grounding.check(f"{d['alternative']}: {d['reasoning']}", allowed + ledger_nums, docs).ok:
-                d["reasoning"] = f"supported by the evidence gathered ({', '.join(d['ledger_ids'])})"
+                # the ledger ids stay in `ledger_ids`; in the sentence they would reach the report as internal codes
+                d["reasoning"] = "supported by the evidence gathered"
             assessed.append(d)
         explained = any(a["supported"] and a["strength"] == "strong" for a in assessed)
         return Command(update={"alternatives": assessed, "explained": explained, "spend": [sp]},

@@ -211,12 +211,27 @@ def apply_audit(sc: ScoreResult) -> None:
                 contrib[key] *= UNVERIFIED_FACTOR
         elif f.kind == "signal" and f"pattern:{f.id}" in contrib:  # downgraded by the auditor
             contrib[f"pattern:{f.id}"] *= 0.6
+        if f.narrative_source == EXPLANATION_WITHDRAWN:  # halved by apply_explained for an explanation the audit removed
+            for k in contribution_keys(f):
+                if k in contrib:
+                    contrib[k] /= EXPLAINED_FACTOR
     _set_index(sc, contrib)
     sc.findings.sort(key=lambda x: -x.priority)
 
 
 EXPLAINED = "agent: closed as explained"
 EXPLAINED_FACTOR = 0.5
+# closed as explained, but the independent audit could trace none of the explanations to sources and removed them: the
+# finding counts in full again (an explanation that cannot be shown must not halve a finding)
+EXPLANATION_WITHDRAWN = "agent: explanation not confirmed by the audit"
+
+
+def withdraw_explanation(f: Finding) -> None:
+    """Undo the half weight of a finding closed as explained (its strength and ranking here; `apply_audit` restores its
+    part of the risk index)."""
+    f.narrative_source = EXPLANATION_WITHDRAWN
+    f.score /= EXPLAINED_FACTOR
+    f.priority /= EXPLAINED_FACTOR
 
 
 def apply_explained(sc: ScoreResult) -> None:

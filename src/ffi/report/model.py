@@ -15,7 +15,7 @@ from ffi.report import charts
 from ffi.report import plain as P
 from ffi.report.explain import for_report
 from ffi.report.linter import lint
-from ffi.scoring.engine import EXPLAINED, NO_EVENT, NO_EVENT_PATTERN
+from ffi.scoring.engine import EXPLAINED, EXPLANATION_WITHDRAWN, NO_EVENT, NO_EVENT_PATTERN
 
 FAMILY_NAMES = {"A": "Accounting integrity", "B": "Forensic scores & accrual models", "C": "Account-level detectors",
                 "D": "Statistical & ML", "E": "Text & disclosure", "F": "Knowledge-graph"}
@@ -153,6 +153,9 @@ INVESTIGATION = {  # narrative_source -> (status label, text when the AI investi
                                          "Supporting evidence."),
     EXPLAINED: ("Likely explained", "The AI investigation found a likely legitimate explanation, listed under "
                                     "Innocent explanations below, so this finding counts for half."),
+    EXPLANATION_WITHDRAWN: ("Explanation not confirmed", "The AI investigation proposed a legitimate explanation, but the "
+                                                         "independent re-check could not trace it to the filings, so it was "
+                                                         "removed and this finding counts in full."),
     "agent narrative dropped by reviewer": ("Withdrawn", "The AI-written explanation was withdrawn at review, so the conclusion "
                                                          "rests on the test results below."),
     "template": ("Not run", "No AI investigation was run for this finding, so the conclusion rests on the test results below."),

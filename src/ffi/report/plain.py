@@ -208,7 +208,8 @@ REWRITES: list[tuple[str, str]] = [
 _REWRITES = [(re.compile(p, re.I), r) for p, r in REWRITES]
 
 
-CITE_RE = re.compile(r"\s*\[L\d+(?:\.\d+)?(?:\s*[,;]\s*L\d+(?:\.\d+)?)*\]")  # [L0.1] and [L2.1, L2.2]
+# [L0.1], [L2.1, L2.2] and the same in round brackets, with or without a lead-in word: "(L0.1, L2.2)", "(evidence L0.1)"
+CITE_RE = re.compile(r"\s*(?:\[|\((?:(?:see|evidence|ledger)\s+)?)L\d+(?:\.\d+)?(?:\s*(?:[,;]|and)\s*L\d+(?:\.\d+)?)*[\])]", re.I)
 SECTION_RE = re.compile(r"\bitem(1a|1b|1c|7a|9a|9b|\d{1,2})\b", re.I)
 SECTION_NAMES = {"1": "business description", "1a": "risk factors", "1b": "unresolved SEC comments", "1c": "cybersecurity",
                  "2": "properties", "3": "legal proceedings", "5": "market for the shares", "7": "management's discussion and analysis",

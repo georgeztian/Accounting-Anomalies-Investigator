@@ -1018,7 +1018,7 @@ def e04(ctx: RunContext):
             continue
         # the same company-wide claim made twice in MD&A is checked (and reported) once; a skipped claim about a part of
         # the business ("Products gross margin decreased") must not hide the company-wide one that follows it
-        key = (metric, c.direction, c.magnitude_pct)
+        key = (metric, c.direction, None if c.magnitude_pct is None else abs(c.magnitude_pct))
         if key in seen:
             continue
         seen.add(key)
@@ -1026,7 +1026,9 @@ def e04(ctx: RunContext):
         ratio = metric == "gross margin"
         actual = (v1 - v0) if ratio else (v1 - v0) / abs(v0)
         actual_dir = "flat" if abs(actual) < (0.002 if ratio else 0.01) else ("increase" if actual > 0 else "decrease")
-        mag_bad = (c.magnitude_pct is not None and not ratio and abs(c.magnitude_pct / 100 - actual) > 0.02 + 0.1 * abs(actual))
+        # sizes are compared without sign: the direction is checked on its own, and "decreased 5%" is extracted as 5 or as -5
+        mag_bad = (c.magnitude_pct is not None and not ratio
+                   and abs(abs(c.magnitude_pct) / 100 - abs(actual)) > 0.02 + 0.1 * abs(actual))
         if (c.direction != actual_dir and "flat" not in (c.direction, actual_dir)) or mag_bad:
             contradictions.append((c, actual, loc))
     sev = min(1.0, 0.45 * len(contradictions))

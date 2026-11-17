@@ -331,21 +331,25 @@ def crev10(ctx: RunContext):
     rpo = rpo_all.dropna()
     if len(rpo) < 3:
         raise SkipDetector("RPO not reported for 3 years")
+    if rpo.index[-1] != ctx.focus:
+        raise SkipDetector("RPO not reported for the focus year")  # an earlier year's backlog is never read as this year's
     share = safe_div(rpo.iloc[-1], rev_all.get(rpo.index[-1], float("nan")))  # backlog and revenue of the same year
     if share < RPO_MIN_SHARE:
         # a backlog that covers a sliver of revenue (NVIDIA FY2026: $2.3B against $215.9B) is not where the revenue comes
         # from, so revenue outgrowing it says nothing about borrowing from future periods
         raise SkipDetector(f"RPO immaterial (under {RPO_MIN_SHARE:.0%} of revenue)")
-    # growth from one fiscal year to the next only: a year that is not reported leaves a gap, never a two-year change
-    gaps = (rev_all.pct_change(fill_method=None) - rpo_all.pct_change(fill_method=None)).dropna()
+    # growth from one fiscal year to the next only: a year that is not reported leaves a gap, never a two-year change,
+    # and ends the run of consecutive years (the years on either side of it are not consecutive)
+    gaps = (rev_all.pct_change(fill_method=None) - rpo_all.pct_change(fill_method=None)).iloc[1:]
     streak = 0
     for g in reversed(gaps.tolist()):
-        if g > 0.03:
+        if finite(g) and g > 0.03:
             streak += 1
         else:
             break
+    gaps = gaps.dropna()
     sev = float(np.clip(streak / 3, 0, 1)) * (0.9 if share > 0.3 else 0.5)
-    return [mk("C.REV.10", ctx, raw_value=float(gaps.iloc[-1]) if len(gaps) else None, severity=sev, unit="growth gap",
+    return [mk("C.REV.10", ctx, raw_value=float(gaps.loc[ctx.focus]) if ctx.focus in gaps.index else None, severity=sev, unit="growth gap",
                scheme=Scheme.PREMATURE_REVENUE, direction="income_increasing",
                rationale=f"Revenue growth exceeded RPO growth in {streak} consecutive year(s); RPO = {fmt_pct(share)} of revenue.",
                evidence=ctx.evs(["RPO", "REVENUE"], ks=(0, 1)))]
@@ -367,7 +371,9 @@ def crev11(ctx: RunContext):
     for label, pat in pats.items():
         for h in new_mentions(ctx.doc, ctx.prior_doc, pat)[:1]:
             found.append((label, h))
-    dso_up = safe_div(ctx.a("AR"), ctx.a("REVENUE")) > 1.1 * safe_div(ctx.a("AR", 1), ctx.a("REVENUE", 1))
+    # receivables under one concept in both years, or the rise is the tagging's
+    dso_up = bool(ctx.basis("AR") == ctx.basis("AR", 1)
+                  and safe_div(ctx.a("AR"), ctx.a("REVENUE")) > 1.1 * safe_div(ctx.a("AR", 1), ctx.a("REVENUE", 1)))
     sev = min(1.0, 0.3 * len(found) + (0.25 if found and dso_up else 0.0))
     return [mk("C.REV.11", ctx, raw_value=len(found), severity=sev, unit="new topics", scheme=Scheme.PREMATURE_REVENUE,
                direction="income_increasing",
@@ -576,7 +582,7 @@ def cinv04(ctx: RunContext):
     need_same_basis(ctx, "INVENTORY")
     c, c0 = safe_div(r, inv + r), safe_div(r0, inv0 + r0)
     v = V(ctx.A, ctx.focus)
-    dsi_up = _dsi(v) > _dsi(v, 1)
+    dsi_up = bool(v.same("COGS", 0, 1) and _dsi(v) > _dsi(v, 1))  # cost of sales under one concept in both years
     drop = safe_div(c0 - c, c0)
     sev = float(np.clip((drop - 0.1) / 0.4, 0, 1)) * (1.0 if dsi_up else 0.5)
     return [mk("C.INV.04", ctx, raw_value=c, expected=c0, severity=sev, unit="coverage", scheme=Scheme.COOKIE_JAR,
@@ -719,8 +725,9 @@ def cexp05(ctx: RunContext):
               if all(ctx.basis(i, k) in (None, ctx.basis(i)) for i in ("CAPEX", "DA"))]
     growth = safe_div(ctx.a("REVENUE"), ctx.a("REVENUE", 2))
     rg = growth ** 0.5 - 1 if growth > 0 else float("nan")
+    # the result is this year's ratio: without it there is no test (an earlier year's ratio is never shown as this year's)
+    need(ratios[0], rg)
     ratios = [r for r in ratios if finite(r)]
-    need(*(ratios[:1] or [float("nan")]), rg)
     persistent = sum(1 for r in ratios if r > 2)
     sev = float(np.clip((persistent - 1) / 2, 0, 1)) * (1.0 if rg < 0.05 else 0.3)
     return [mk("C.EXP.05", ctx, raw_value=ratios[0], expected=1.5, severity=sev * 0.8, unit="x",

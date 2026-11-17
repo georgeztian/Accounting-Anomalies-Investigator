@@ -17,11 +17,12 @@ DATE_RE = re.compile(r"\b(?:19|20)\d{2}-\d{2}-\d{2}\b|\b\d{1,2}/\d{1,2}/(?:19|20
                      rf"|\b{MONTH}\s+\d{{1,2}}(?:st|nd|rd|th)?\b(?:,?\s+(?:19|20)\d{{2}})?|\b\d{{1,2}}\s+{MONTH}(?:\s+(?:19|20)\d{{2}})?\b")
 
 
-ID_RE = re.compile(r"\b[A-F](?:\.[A-Z]{2,4})?\.\d{2}\b|\[L\d+\.\d+\]|\bFY\d{4}(?:Q[1-4])?\b|\bCY\d{4}\b")
+# ledger ids are read with or without brackets: "(L0.1, L2.2, L2.3)" cites evidence, it does not state 0.1, 2.2 and 2.3
+ID_RE = re.compile(r"\b[A-F](?:\.[A-Z]{2,4})?\.\d{2}\b|\[L\d+\.\d+\]|\bL\d+\.\d+\b|\bFY\d{4}(?:Q[1-4])?\b|\bCY\d{4}\b")
 # references to standards, rules and document parts ("ASC 842", "Topic 606", "IFRS 16", "Rule 10b5-1", "Note 5")
 REF_RE = re.compile(r"\b(?:ASC|ASU|Topic|IFRS|IAS|SFAS|FAS|SAB|Rule|Section|Item|Items|Note|Notes|Exhibit|Form|Regulation|"
                     r"Level|Tier|Class|Series|Phase)\s+[0-9][0-9A-Za-z\-–.()]*", re.IGNORECASE)
-LEDGER_RE = re.compile(r"\s*\[L\d+(?:\.\d+)?\]")
+LEDGER_RE = re.compile(r"\s*\[L\d+(?:\.\d+)?(?:\s*[,;]\s*L\d+(?:\.\d+)?)*\]")
 # calendar descriptions: "52/53-week fiscal year", "53-week year", "13-week quarter"
 CALENDAR_RE = re.compile(r"\b\d{1,2}(?:\s*/\s*\d{1,2})?[- ]weeks?\b", re.IGNORECASE)
 

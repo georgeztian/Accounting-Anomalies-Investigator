@@ -130,7 +130,7 @@ anomaly-report AAPL                                # a ticker works
 anomaly-report "Apple Inc."             # a name works (asks you to choose if ambiguous)
 
 anomaly-report AAPL --mode deterministic           # no LLM at all
-anomaly-report AAPL --period FY2024                # the fiscal year the report covers (default: the latest)
+anomaly-report AAPL --period FY2024                # the fiscal year the report covers (default: the latest); "2024" works too
 anomaly-report AAPL --as-of 2020-06-30             # point in time: only filings public on that date
 anomaly-report AAPL --years 7                      # years of history the tests use (default 10); still one report
 anomaly-report AAPL --span 10                      # one report covering the last 10 fiscal years
@@ -227,7 +227,7 @@ For financial and real-estate profiles, the earnings-management test also drops 
 | 3 | Company could not be resolved |
 | 4 | Company has not filed an annual report (10-K, 20-F or 40-F) yet |
 | 5 | SEC EDGAR error |
-| 6 | Bad period or other input (also: `render` found no saved run) |
+| 6 | Bad period or other input (also: `render` found no saved run). A malformed option value, such as a `--as-of` that is not a date, exits with the usual usage error (2). |
 
 ### Output
 
@@ -360,7 +360,7 @@ Every reported finding is audited independently, with a correction loop of **at 
 | `impact` | The impact range is ordered, and materiality recomputed from scratch matches |
 | `corroboration` | A pattern's members are still flagged and come from at least 2 families |
 | `narrative` | Every number in the narrative traces to a source value |
-| `agent_text` | The innocent explanations and questions the investigation wrote pass the same check; failing ones are removed |
+| `agent_text` | The innocent explanations and questions the investigation wrote pass the same check; failing ones are removed, and a finding that was halved for an explanation removed this way counts in full again |
 
 In each round the auditor checks the finding, applies corrections and checks again. Corrections can remove unverifiable evidence, re-anchor quotes, recompute materiality, downgrade an uncorroborated pattern, or replace an ungrounded narrative.
 

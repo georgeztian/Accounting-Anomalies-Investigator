@@ -85,6 +85,10 @@ def run_cmd(
     if years < 1:
         raise typer.BadParameter("--years must be at least 1")
     formats = _formats(format)
+    try:
+        as_of_date = date.fromisoformat(as_of) if as_of else None
+    except ValueError as e:
+        raise typer.BadParameter(f"'{as_of}' is not a date; use YYYY-MM-DD", param_hint="--as-of") from e
     # a multi-year review reads every year's filings with the AI and investigates its top 5 merged anomalies
     budget_usd = budget_usd if budget_usd is not None else float(agent_cfg.get("run_budget_usd", 6.0)) * (2 if span else 1)
     max_cases = max_cases if max_cases is not None else (SPAN_CASES if span else int(agent_cfg.get("max_cases", 3)))
@@ -97,7 +101,7 @@ def run_cmd(
         mode = "auto"
         console.print("[dim]No terminal attached: using --mode auto.[/dim]")
     opts = RunOptions(
-        company=company, years=years, period=period, as_of=date.fromisoformat(as_of) if as_of else None,
+        company=company, years=years, period=period, as_of=as_of_date,
         peers=[p for p in peers.split(",") if p.strip()] if peers else None,
         formats=formats, out_dir=out, mode=mode, budget_usd=budget_usd,
         run_id=resume, offline=offline, max_cases=max_cases,

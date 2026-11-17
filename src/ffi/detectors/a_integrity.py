@@ -630,7 +630,8 @@ def a16(ctx: RunContext):
     if rec is None:
         raise SkipDetector("focus 10-K not identified")
     d = ctx.store.df
-    vals = d[(d["accn"] == rec.accn) & (d["unit"] == ctx.currency)]["val"].abs()
+    # each reported fact once: a concept that feeds several line items has a row for each of them
+    vals = d[(d["accn"] == rec.accn) & (d["unit"] == ctx.currency)].drop_duplicates(["concept", "start", "end"])["val"].abs()
     vals = vals[vals >= 1e4]
     if len(vals) < 30:
         raise SkipDetector("too few monetary facts")

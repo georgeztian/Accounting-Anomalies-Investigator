@@ -382,6 +382,16 @@ def d04(ctx: RunContext):
 # ---------------------------------------------------------------------------- D.05
 BENFORD1 = np.log10(1 + 1 / np.arange(1, 10))
 BENFORD2 = np.log10(1 + 1 / np.arange(10, 100))
+BENFORD_NONCONFORMITY = 0.012  # Nigrini's line between acceptable and marginal conformity, set on samples of thousands
+BENFORD_CHANCE_MULTIPLE = 1.5  # ... and never less than this multiple of what sampling alone produces
+
+
+def benford_sampling_mad(n: int) -> float:
+    """The first-digit MAD expected from sampling alone when `n` amounts follow Benford's law exactly: the mean absolute
+    deviation of a binomial share is about sqrt(2 p (1 - p) / (pi n)). An annual report has 100-200 tagged amounts, where
+    this is about 0.02: Nigrini's thresholds (0.006-0.015), set on samples of thousands, called every company in the
+    review panel nonconforming (first-digit MAD 0.022-0.037 on 103-172 amounts)."""
+    return float(np.mean(np.sqrt(2 * BENFORD1 * (1 - BENFORD1) / (np.pi * max(n, 1)))))
 
 
 @detector("D.05", "Benford / digit tests", F, Area.INTEGRITY)
@@ -402,11 +412,15 @@ def d05(ctx: RunContext):
     f2 = np.array([(d12 == k).mean() for k in range(10, 100)])
     mad1 = float(np.mean(np.abs(f1 - BENFORD1)))
     mad2 = float(np.mean(np.abs(f2 - BENFORD2)))
-    sev = float(np.clip((mad1 - 0.012) / 0.012, 0, 1)) * 0.4  # deliberately low weight
-    verdict = "close conformity" if mad1 < 0.006 else "acceptable conformity" if mad1 < 0.012 else "marginal conformity" if mad1 < 0.015 else "nonconformity"
-    return [mk("D.05", ctx, raw_value=mad1, expected=0.006, severity=sev, unit="MAD",
-               rationale=(f"First-digit MAD {mad1:.4f} ({verdict} by Nigrini's thresholds) and first-two-digit MAD {mad2:.4f} "
-                          f"over {len(vals)} monetary facts. Small samples and subtotals legitimately deviate; low weight."))]
+    chance = benford_sampling_mad(len(vals))
+    line = max(BENFORD_NONCONFORMITY, BENFORD_CHANCE_MULTIPLE * chance)
+    sev = float(np.clip((mad1 - line) / 0.012, 0, 1)) * 0.4  # deliberately low weight
+    verdict = ("within what a sample of this size shows by chance" if mad1 <= line
+               else "more than a sample of this size shows by chance")
+    return [mk("D.05", ctx, raw_value=mad1, expected=chance, severity=sev, unit="MAD",
+               rationale=(f"First-digit MAD {mad1:.4f} over {len(vals)} monetary facts ({verdict}: digits that follow Benford's law "
+                          f"exactly would still show about {chance:.4f} in a sample of {len(vals)}, and the test counts a departure "
+                          f"above {line:.4f}); first-two-digit MAD {mad2:.4f}. Subtotals and repeated amounts legitimately deviate; low weight."))]
 
 
 # ---------------------------------------------------------------------------- D.06 / D.07
